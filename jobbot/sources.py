@@ -380,12 +380,13 @@ def collect_link_page(source: SourceConfig) -> List[Job]:
     html = fetch_text(source.url, source.headers)
     parser = HTMLLinkExtractor()
     parser.feed(html)
+    job_links = [(href, text) for href, text in parser.links if clean_title(text) and looks_like_job_link(text, href)]
+    if len(job_links) < 2 and len(html.encode("utf-8")) < 8192 and looks_like_spa_shell(html):
+        raise SourceError("Source appears to be a JavaScript SPA - not supported")
     jobs = []
     seen = set()
-    for href, text in parser.links:
+    for href, text in job_links:
         title = clean_title(text)
-        if not title or not looks_like_job_link(title, href):
-            continue
         url = urljoin(source.url, href)
         if url in seen:
             continue
@@ -425,6 +426,14 @@ def looks_like_job_link(title: str, href: str) -> bool:
             "ai",
             "llm",
         )
+    )
+
+
+def looks_like_spa_shell(html: str) -> bool:
+    lower = (html or "").lower()
+    return (
+        bool(re.search(r'<div[^>]+id=["\'](?:root|__next|app)["\'][^>]*>\s*</div>', lower))
+        or ("<script" in lower and len(strip_html(html)) < 200)
     )
 
 
@@ -540,15 +549,34 @@ def clean_title(title: str) -> str:
 
 def infer_company(title: str, description: str) -> str:
     title = strip_html(title or "")
-    for separator in [" at ", " - ", " | "]:
+    separator_policies = [
+        (": ", "left"),
+        (" at ", "right"),
+        (" - ", "right"),
+        (" | ", "right"),
+    ]
+    for separator, side in separator_policies:
         if separator in title:
-            part = title.split(separator)[-1].strip()
+            parts = title.split(separator, 1)
+            part = parts[0] if side == "left" else parts[-1]
+            part = part.strip()
             if 2 <= len(part) <= 80:
                 return part
     match = re.search(r"(?:at|company:)\s+([A-Z][A-Za-z0-9 .&-]{2,60})", description or "")
-    if match:
+    if match and is_plausible_company_match(match.group(1)):
         return match.group(1).strip()
     return "Unknown company"
+
+
+def is_plausible_company_match(value: str) -> bool:
+    candidate = " ".join((value or "").split()).strip(" .,-")
+    if len(candidate) < 3:
+        return False
+    if candidate.split()[0] in {"You", "We", "This", "That", "It", "There", "Here", "Our", "Their"}:
+        return False
+    if re.search(r"\s+(is|will|can|may|should|are|were|has|have)\s+", candidate, re.IGNORECASE):
+        return False
+    return True
 
 
 def infer_location(text: str) -> str:

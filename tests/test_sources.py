@@ -2,7 +2,7 @@ import unittest
 from unittest import mock
 
 from jobbot.models import SourceConfig
-from jobbot.sources import SourceError, collect_ats, collect_link_page, collect_rss, strip_html, validate_safe_url
+from jobbot.sources import SourceError, collect_ats, collect_link_page, collect_rss, infer_company, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -38,10 +38,10 @@ class SourceTests(unittest.TestCase):
 
     def test_collect_link_page_extracts_job_links(self):
         source = SourceConfig(id="community", name="Community", type="community", url="https://example.com/jobs")
-        html = '<a href="/roles/1">Senior AI Product Engineer</a><a href="/about">About us</a>'
+        html = '<a href="/roles/1">Senior AI Product Engineer</a><a href="/roles/2">Product Manager</a><a href="/about">About us</a>'
         with mock.patch("jobbot.sources.fetch_text", return_value=html):
             jobs = collect_link_page(source)
-        self.assertEqual(len(jobs), 1)
+        self.assertEqual(len(jobs), 2)
         self.assertEqual(jobs[0].url, "https://example.com/roles/1")
 
     def test_collect_greenhouse_ats(self):
@@ -51,6 +51,19 @@ class SourceTests(unittest.TestCase):
             jobs = collect_ats(source)
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].company, "ExampleCo")
+
+    def test_infer_company_handles_colon_and_fallback_garbage(self):
+        self.assertEqual(infer_company("Toptal: QA Automation Engineer", ""), "Toptal")
+        self.assertEqual(infer_company("Senior Engineer at Stripe", ""), "Stripe")
+        self.assertEqual(infer_company("Webpt: Senior PM", "You will own analytics"), "Webpt")
+        self.assertEqual(infer_company("Senior PM", "Wave is the ability to be useful"), "Unknown company")
+
+    def test_spa_shell_is_reported_clearly(self):
+        source = SourceConfig(id="spa", name="SPA", type="community", url="https://example.com/jobs")
+        html = '<div id="root"></div><script src="bundle.js"></script>'
+        with mock.patch("jobbot.sources.fetch_text", return_value=html):
+            with self.assertRaisesRegex(SourceError, "JavaScript SPA"):
+                collect_link_page(source)
 
 
 if __name__ == "__main__":

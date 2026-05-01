@@ -10,6 +10,7 @@ RUN useradd --create-home --uid 10001 jobbot
 COPY jobbot ./jobbot
 COPY config ./config
 COPY input ./input
+COPY openclaw/prompts ./openclaw/prompts
 
 RUN mkdir -p /jobbot/data /jobbot/workspace/discovery /jobbot/workspace/tuning && chown -R jobbot:jobbot /jobbot
 

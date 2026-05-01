@@ -1,7 +1,8 @@
 import unittest
+from pathlib import Path
 
 from jobbot.models import Job, UserProfile
-from jobbot.scoring import score_job, word_boundary_search
+from jobbot.scoring import load_scoring_rules, score_job, word_boundary_search
 
 
 class ScoringTests(unittest.TestCase):
@@ -81,6 +82,30 @@ class ScoringTests(unittest.TestCase):
         self.assertFalse(word_boundary_search("intern", "international product role"))
         self.assertFalse(word_boundary_search("us only", "trust only matters"))
         self.assertFalse(word_boundary_search("weapons", "anti-weapons policy analyst"))
+
+    def test_seniority_rejects_title_only_from_config(self):
+        rules = load_scoring_rules(Path("config/scoring.json"))
+        profile = UserProfile(raw_text="")
+        mentor_job = Job(
+            source_id="test",
+            source_name="Test",
+            external_id="1",
+            url="https://example.com/mentor",
+            title="AI Engineer",
+            company="ExampleCo",
+            description="Mentor junior engineers while building automation.",
+        )
+        junior_job = Job(
+            source_id="test",
+            source_name="Test",
+            external_id="2",
+            url="https://example.com/junior",
+            title="Junior AI Engineer",
+            company="ExampleCo",
+            description="Build automation.",
+        )
+        self.assertFalse(score_job(mentor_job, profile, rules).hard_reject)
+        self.assertTrue(score_job(junior_job, profile, rules).hard_reject)
 
 
 if __name__ == "__main__":

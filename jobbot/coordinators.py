@@ -39,7 +39,7 @@ class DiscoveryCoordinator:
                 "excluded_locations": self.profile.excluded_locations,
                 "excluded_domains": self.profile.excluded_domains,
             },
-            "current_sources": [source.__dict__ for source in current_sources],
+            "current_sources": [serialize_source_for_agent(source) for source in current_sources],
             "recent_metrics": metrics,
             "instructions": (
                 "Find high-signal public job sources. Validate candidates with HTTP fetch, robots.txt, "
@@ -52,6 +52,17 @@ class DiscoveryCoordinator:
         self.database.create_discovery_run(session_id, str(request_path), str(status_path))
         log_context(LOGGER, logging.INFO, "discovery_request_created", session_id=session_id, request_path=str(request_path))
         return session_id
+
+    def handoff_message(self, session_id: str) -> str:
+        return manual_handoff_message(
+            "source discovery",
+            session_id,
+            self.config.workspace_dir / "discovery" / ("request-%s.json" % session_id),
+            self.config.workspace_dir / "discovery" / ("response-%s.json" % session_id),
+            self.config.workspace_dir / "discovery" / ("status-%s.json" % session_id),
+            self.config.workspace_dir / "discovery" / ("handoff-%s.md" % session_id),
+            prompt_path("discovery"),
+        )
 
     def poll_done(self) -> List[Dict]:
         completed = []
@@ -131,6 +142,17 @@ class ScoringCoordinator:
         write_json(status_path, {"state": "pending", "updated_at": utc_now_iso(), "message": "Waiting for OpenClaw"})
         log_context(LOGGER, logging.INFO, "tuning_request_created", session_id=session_id, request_path=str(request_path))
         return session_id
+
+    def handoff_message(self, session_id: str) -> str:
+        return manual_handoff_message(
+            "scoring tuning",
+            session_id,
+            self.config.workspace_dir / "tuning" / ("request-%s.json" % session_id),
+            self.config.workspace_dir / "tuning" / ("response-%s.json" % session_id),
+            self.config.workspace_dir / "tuning" / ("status-%s.json" % session_id),
+            self.config.workspace_dir / "tuning" / ("handoff-%s.md" % session_id),
+            prompt_path("tuning"),
+        )
 
     def poll_done(self) -> List[Dict]:
         completed = []
@@ -279,3 +301,65 @@ def write_json(path: Path, payload: Dict) -> None:
 def read_json(path: Path) -> Dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def serialize_source_for_agent(source: SourceConfig) -> Dict:
+    return {
+        "id": source.id,
+        "name": source.name,
+        "type": source.type,
+        "url": source.url,
+        "status": source.status,
+        "created_by": source.created_by,
+        "risk_level": source.risk_level,
+        "query": source.query,
+        "poll_frequency_minutes": source.poll_frequency_minutes,
+    }
+
+
+def prompt_path(kind: str) -> Path:
+    return Path(__file__).resolve().parent.parent / "openclaw" / "prompts" / ("%s.md" % kind)
+
+
+def manual_handoff_message(
+    label: str,
+    session_id: str,
+    request_path: Path,
+    response_path: Path,
+    status_path: Path,
+    handoff_path: Path,
+    template_path: Path,
+) -> str:
+    template = template_path.read_text(encoding="utf-8")
+    request_json = request_path.read_text(encoding="utf-8")
+    status_json = json.dumps({"state": "done", "updated_at": utc_now_iso(), "message": "Manual Codex response saved"}, indent=2)
+    handoff = """Manual OpenClaw/Codex handoff: %s
+
+Paste everything below into ChatGPT/Codex. Save the model's JSON response exactly to:
+%s
+
+Then overwrite status with:
+%s
+
+Prompt template:
+%s
+
+Request JSON:
+%s
+""" % (
+        label,
+        response_path,
+        status_path,
+        template,
+        request_json,
+    )
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(handoff, encoding="utf-8")
+    log_context(LOGGER, logging.INFO, "manual_handoff_written", session_id=session_id, handoff_path=str(handoff_path))
+    return (
+        "OpenClaw/Codex handoff created for %s session %s.\n"
+        "A full paste-ready prompt was written to:\n%s\n\n"
+        "Response file to create:\n%s\n\n"
+        "Status file to mark done:\n%s\n\n"
+        "Paste-ready prompt follows:\n\n%s"
+    ) % (label, session_id, handoff_path, response_path, status_path, handoff)

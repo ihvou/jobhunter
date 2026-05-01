@@ -56,6 +56,51 @@ class DatabaseTests(unittest.TestCase):
             db.mark_digested([job_id])
             self.assertEqual(len(db.jobs_for_digest(10)), 0)
 
+    def test_digest_filters_min_show_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            low_id, _ = db.upsert_job(
+                Job(source_id="s", source_name="S", external_id="1", url="https://example.com/low", title="Low", company="C")
+            )
+            high_id, _ = db.upsert_job(
+                Job(source_id="s", source_name="S", external_id="2", url="https://example.com/high", title="High", company="C")
+            )
+            db.save_score(low_id, ScoreResult(score=30, hard_reject=False))
+            db.save_score(high_id, ScoreResult(score=80, hard_reject=False))
+            rows = db.jobs_for_digest(10, min_score=50)
+            self.assertEqual([row["id"] for row in rows], [high_id])
+
+    def test_secondary_dedupe_same_title_company_nearby_dates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            first_id, inserted = db.upsert_job(
+                Job(
+                    source_id="wwr",
+                    source_name="WWR",
+                    external_id="1",
+                    url="https://example.com/userwise-services-product-manager",
+                    title="Product Manager",
+                    company="Userwise Services",
+                    posted_at="2026-05-01T00:00:00Z",
+                )
+            )
+            self.assertTrue(inserted)
+            second_id, inserted = db.upsert_job(
+                Job(
+                    source_id="wwr",
+                    source_name="WWR",
+                    external_id="2",
+                    url="https://example.com/userwise-services-product-manager-1",
+                    title="Product Manager",
+                    company="Userwise Services",
+                    posted_at="2026-05-03T00:00:00Z",
+                )
+            )
+            self.assertEqual(first_id, second_id)
+            self.assertFalse(inserted)
+
 
 if __name__ == "__main__":
     unittest.main()

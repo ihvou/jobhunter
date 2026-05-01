@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 class Database:
@@ -42,6 +42,9 @@ class Database:
             if current < 2:
                 migrate_v2(conn)
                 set_schema_version(conn, 2)
+            if current < 3:
+                migrate_v3(conn)
+                set_schema_version(conn, 3)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -140,6 +143,8 @@ class Database:
     def upsert_job(self, job: Job) -> Tuple[str, bool]:
         job_id = stable_job_id(job)
         now = utc_now_iso()
+        normalized_title = normalize_key(job.title)
+        normalized_company = normalize_key(job.company)
         with self.connection() as conn:
             existing = conn.execute("select id from jobs where id = ?", (job_id,)).fetchone()
             if existing:
@@ -149,19 +154,44 @@ class Database:
                     set last_seen_at = ?,
                         source_id = case when source_id = '' then ? else source_id end,
                         description = case when length(coalesce(description, '')) < length(coalesce(?, ''))
+                                           then ? else description end,
+                        normalized_title = ?,
+                        normalized_company = ?
+                    where id = ?
+                    """,
+                    (now, job.source_id, job.description, job.description, normalized_title, normalized_company, job_id),
+                )
+                return job_id, False
+            duplicate = find_recent_duplicate(conn, normalized_title, normalized_company, job.posted_at, now)
+            if duplicate:
+                conn.execute(
+                    """
+                    update jobs
+                    set last_seen_at = ?,
+                        description = case when length(coalesce(description, '')) < length(coalesce(?, ''))
                                            then ? else description end
                     where id = ?
                     """,
-                    (now, job.source_id, job.description, job.description, job_id),
+                    (now, job.description, job.description, duplicate),
                 )
-                return job_id, False
+                log_context(
+                    LOGGER,
+                    logging.INFO,
+                    "job_secondary_duplicate",
+                    job_id=duplicate,
+                    source_id=job.source_id,
+                    normalized_title=normalized_title,
+                    normalized_company=normalized_company,
+                )
+                return duplicate, False
             conn.execute(
                 """
                 insert into jobs (
                     id, source_id, source_name, external_id, url, title, company,
                     location, remote_policy, salary_min, salary_max, currency,
-                    description, posted_at, first_seen_at, last_seen_at, status
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+                    description, posted_at, first_seen_at, last_seen_at, status,
+                    normalized_title, normalized_company
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
                 """,
                 (
                     job_id,
@@ -180,6 +210,8 @@ class Database:
                     job.posted_at,
                     now,
                     now,
+                    normalized_title,
+                    normalized_company,
                 ),
             )
             return job_id, True
@@ -215,7 +247,7 @@ class Database:
             if score.hard_reject:
                 conn.execute("update jobs set status = 'rejected' where id = ? and status = 'new'", (job_id,))
 
-    def jobs_for_digest(self, limit: int) -> List[sqlite3.Row]:
+    def jobs_for_digest(self, limit: int, min_score: int = 0) -> List[sqlite3.Row]:
         now = utc_now_iso()
         with self.connection() as conn:
             rows = list(
@@ -226,6 +258,7 @@ class Database:
                     join job_scores s on s.job_id = j.id
                     left join sources src on src.id = j.source_id
                     where s.hard_reject = 0
+                      and s.score >= ?
                       and (
                         j.status = 'new'
                         or (j.status = 'snoozed' and j.snoozed_until <= ?)
@@ -238,7 +271,7 @@ class Database:
                     order by s.score desc, j.first_seen_at desc
                     limit ?
                     """,
-                    (now, limit),
+                    (min_score, now, limit),
                 )
             )
             return rows
@@ -634,6 +667,24 @@ def migrate_v2(conn) -> None:
     )
 
 
+def migrate_v3(conn) -> None:
+    for column_sql in [
+        "alter table jobs add column normalized_title text not null default ''",
+        "alter table jobs add column normalized_company text not null default ''",
+    ]:
+        try:
+            conn.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
+    rows = conn.execute("select id, title, company from jobs").fetchall()
+    for row in rows:
+        conn.execute(
+            "update jobs set normalized_title = ?, normalized_company = ? where id = ?",
+            (normalize_key(row["title"]), normalize_key(row["company"]), row["id"]),
+        )
+    conn.execute("create index if not exists idx_jobs_normalized_title_company on jobs(normalized_title, normalized_company)")
+
+
 def set_schema_version(conn, version: int) -> None:
     conn.execute("insert or ignore into schema_version (version, applied_at) values (?, ?)", (version, utc_now_iso()))
 
@@ -684,6 +735,38 @@ def canonicalize_url(url: str) -> str:
 
 def normalize_key(value: str) -> str:
     return " ".join((value or "").strip().lower().split())
+
+
+def find_recent_duplicate(conn, normalized_title: str, normalized_company: str, posted_at: Optional[str], now: str) -> Optional[str]:
+    if not normalized_title or not normalized_company:
+        return None
+    rows = conn.execute(
+        """
+        select id, posted_at, first_seen_at
+        from jobs
+        where normalized_title = ? and normalized_company = ?
+        order by first_seen_at desc
+        limit 25
+        """,
+        (normalized_title, normalized_company),
+    ).fetchall()
+    candidate_date = dedupe_date(posted_at, now)
+    for row in rows:
+        row_date = dedupe_date(row["posted_at"], row["first_seen_at"])
+        if candidate_date and row_date and abs((candidate_date - row_date).days) <= 7:
+            return row["id"]
+    return None
+
+
+def dedupe_date(posted_at: Optional[str], fallback: Optional[str]) -> Optional[datetime]:
+    for value in (posted_at, fallback):
+        if not value:
+            continue
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            continue
+    return None
 
 
 def tomorrow_iso() -> str:

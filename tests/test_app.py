@@ -3,11 +3,13 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from jobbot.app import JobBot
 from jobbot.config import AppConfig, CostConfig
 from jobbot.database import Database
 from jobbot.models import Job, ScoreResult, SourceConfig, TelegramAction
+from jobbot.telegram import TelegramError
 
 
 class FakeTelegram:
@@ -26,6 +28,9 @@ class FakeTelegram:
 
     def send_message(self, text, reply_markup=None):
         self.messages.append((text, reply_markup))
+
+    def send_long_message(self, text):
+        self.messages.append((text, None))
 
     def answer_callback(self, callback_id, text):
         self.answers.append(text)
@@ -88,7 +93,7 @@ class AppTests(unittest.TestCase):
             bot = JobBot(config_for(tmp))
             bot.telegram = FakeTelegram()
             called = []
-            bot.executor.submit = lambda fn, *args: called.append(fn.__name__)
+            bot.submit_background = lambda fn, *args: called.append(fn.__name__)
             bot.handle_action(TelegramAction(scope="bot", action="collect", callback_id="cb"))
             self.assertIn("collect_and_digest", called)
 
@@ -101,6 +106,7 @@ class AppTests(unittest.TestCase):
             bot.handle_action(TelegramAction(scope="bot", action="usage", callback_id="cb"))
             self.assertTrue(list((bot.config.workspace_dir / "discovery").glob("request-*.json")))
             self.assertTrue(list((bot.config.workspace_dir / "tuning").glob("request-*.json")))
+            self.assertTrue(any("OpenClaw/Codex handoff" in str(message[0]) for message in bot.telegram.messages))
             self.assertTrue(any(str(message[0]).startswith("Usage") for message in bot.telegram.messages))
 
     def test_job_feedback_callbacks(self):
@@ -108,7 +114,7 @@ class AppTests(unittest.TestCase):
             bot = JobBot(config_for(tmp))
             bot.telegram = FakeTelegram()
             called = []
-            bot.executor.submit = lambda fn, *args: called.append((fn.__name__, args))
+            bot.submit_background = lambda fn, *args: called.append((fn.__name__, args))
             job_id = add_scored_job(bot, "irrelevant")
             bot.handle_action(TelegramAction(scope="job", action="irrelevant", target_id=job_id, callback_id="cb"))
             self.assertEqual(bot.database.get_job(job_id)["status"], "rejected")
@@ -157,10 +163,65 @@ class AppTests(unittest.TestCase):
             )
             bot.database.create_discovery_run(session_id, "request", "status")
             bot.database.update_discovery_run(session_id, status="done", response_path=str(response_path), candidate_count=1)
-            bot.handle_action(TelegramAction(scope="disc", action="approve", target_id=session_id, callback_id="cb"))
+            with mock.patch("jobbot.app.validate_safe_url"):
+                bot.source_candidate_reachable = lambda url: True
+                bot.handle_action(TelegramAction(scope="disc", action="approve", target_id=session_id, callback_id="cb"))
             sources = json.loads(bot.config.sources_path.read_text(encoding="utf-8"))
             self.assertEqual(sources[0]["created_by"], "agent")
             self.assertEqual(sources[0]["status"], "test")
+            self.assertEqual(bot.telegram.answers[-1], "Approved 1, skipped 0")
+
+    def test_discovery_approval_reports_counts_and_sanitizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.sources_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "existing",
+                            "name": "Existing",
+                            "type": "json_api",
+                            "url": "https://example.com/jobs.json",
+                            "enabled": True,
+                            "status": "active",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            bot = JobBot(config)
+            bot.telegram = FakeTelegram()
+            session_id = "s1"
+            response_path = bot.config.workspace_dir / "discovery" / "response-s1.json"
+            response_path.parent.mkdir(parents=True, exist_ok=True)
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {"name": "Duplicate", "url": "https://example.com/jobs.json", "type": "json_api"},
+                            {
+                                "name": "<script>alert(1)</script>",
+                                "url": "https://example.org/jobs.json",
+                                "type": "json_api",
+                                "why_it_matches": "<b>good</b>",
+                                "validation_notes": "<script>ok</script>",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bot.database.create_discovery_run(session_id, "request", "status")
+            bot.database.update_discovery_run(session_id, status="done", response_path=str(response_path), candidate_count=2)
+            with mock.patch("jobbot.app.validate_safe_url"):
+                bot.source_candidate_reachable = lambda url: True
+                bot.handle_action(TelegramAction(scope="disc", action="approve", target_id=session_id, callback_id="cb"))
+            sources = json.loads(config.sources_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(sources), 2)
+            self.assertEqual(bot.telegram.answers[-1], "Approved 1, skipped 1")
+            written = json.dumps(sources[-1])
+            self.assertNotIn("<", written)
+            self.assertNotIn("script", written.lower())
 
     def test_tuning_apply_writes_scoring_version(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,6 +249,72 @@ class AppTests(unittest.TestCase):
             job_id = add_scored_job(bot)
             bot.generate_cover_note(job_id)
             self.assertEqual(bot.telegram.messages[0][0], "override")
+
+    def test_cover_note_skips_terminal_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            called = []
+            bot.submit_background = lambda fn, *args: called.append((fn.__name__, args))
+            applied_job_id = add_scored_job(bot, "applied-cover", status="applied")
+            bot.handle_action(TelegramAction(scope="job", action="cover_note", target_id=applied_job_id, callback_id="cb"))
+            self.assertFalse(called)
+            self.assertEqual(bot.telegram.answers[-1], "Already applied - cover note skipped")
+
+            bot.generate_cover_note(applied_job_id)
+            self.assertEqual(bot.database.get_job(applied_job_id)["status"], "applied")
+            self.assertIn("Cover note skipped", bot.telegram.messages[-1][0])
+
+    def test_collection_shutdown_marks_source_run_interrupted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.shutdown_requested = True
+            source = SourceConfig(id="slow", name="Slow", type="rss", url="https://example.com/rss")
+            bot.database.upsert_sources([source])
+            bot.collect_source(source, {"rules": [], "thresholds": {"hard_reject_floor": 0}})
+            with bot.database.connection() as conn:
+                row = conn.execute("select error from source_runs where source_id = ?", ("slow",)).fetchone()
+            self.assertEqual(row["error"], "interrupted")
+
+    def test_telegram_errors_do_not_crash_poll_loop(self):
+        class ErrorTelegram(FakeTelegram):
+            enabled = True
+
+            def poll_actions(self):
+                return [TelegramAction(scope="bot", action="usage", callback_id="cb")]
+
+            def answer_callback(self, callback_id, text):
+                raise TelegramError("network down")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = ErrorTelegram()
+            bot.poll_telegram_once()
+
+    def test_discovery_request_excludes_sensitive_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.sources_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "private-api",
+                            "name": "Private API",
+                            "type": "json_api",
+                            "url": "https://example.com/jobs.json",
+                            "headers": {"Authorization": "Bearer secret"},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            bot = JobBot(config)
+            bot.telegram = FakeTelegram()
+            bot.handle_action(TelegramAction(scope="bot", action="discover_sources", callback_id="cb"))
+            request_path = next((config.workspace_dir / "discovery").glob("request-*.json"))
+            request = request_path.read_text(encoding="utf-8")
+            self.assertNotIn("Authorization", request)
+            self.assertNotIn("secret", request)
 
 
 if __name__ == "__main__":

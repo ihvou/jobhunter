@@ -49,9 +49,9 @@
       "weight": 20
     },
     {
-      "id": "exclude_seniority",
+      "id": "exclude_seniority_title",
       "kind": "hard_reject_word",
-      "fields": ["title", "description"],
+      "fields": ["title"],
       "patterns": ["intern", "internship", "junior", "graduate program"]
     },
     {

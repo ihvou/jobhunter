@@ -1,7 +1,12 @@
+import atexit
 import json
 import logging
+import re
+import signal
 import time
-from concurrent.futures import ThreadPoolExecutor
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import List
 
@@ -14,8 +19,8 @@ from .logging_setup import configure_logging, log_context
 from .models import SourceConfig, utc_now_iso
 from .scoring import load_scoring_rules, score_job
 from . import sources as source_module
-from .sources import SourceError, collect_from_source
-from .telegram import TelegramClient
+from .sources import SourceError, collect_from_source, validate_safe_url
+from .telegram import TelegramClient, TelegramError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +41,14 @@ class JobBot:
         self.discovery = DiscoveryCoordinator(config, self.database, self.profile)
         self.scoring = ScoringCoordinator(config, self.database, self.profile)
         self.executor = ThreadPoolExecutor(max_workers=2)
+        self.futures = set()
+        self.shutdown_requested = False
+        atexit.register(self.shutdown_executor)
+        try:
+            signal.signal(signal.SIGTERM, self.handle_shutdown_signal)
+            signal.signal(signal.SIGINT, self.handle_shutdown_signal)
+        except ValueError:
+            log_context(LOGGER, logging.DEBUG, "shutdown_signal_handler_skipped")
 
     @classmethod
     def from_environment(cls):
@@ -87,9 +100,13 @@ class JobBot:
         inserted_count = 0
         error = None
         try:
+            if self.shutdown_requested:
+                raise SourceError("interrupted")
             jobs = collect_from_source(source)
             fetched_count = len(jobs)
             for job in jobs:
+                if self.shutdown_requested:
+                    raise SourceError("interrupted")
                 job_id, inserted = self.database.upsert_job(job)
                 if inserted:
                     inserted_count += 1
@@ -103,11 +120,15 @@ class JobBot:
             error = "%s: %s" % (exc.__class__.__name__, exc)
             log_context(LOGGER, logging.ERROR, "source_unexpected_error", source_id=source.id, error=error)
         finally:
+            if self.shutdown_requested and error is None:
+                error = "interrupted"
             self.database.finish_source_run(run_id, source.id, fetched_count, inserted_count, error)
         return fetched_count, inserted_count
 
     def send_digest(self) -> None:
-        rows = self.database.jobs_for_digest(self.config.digest_max_jobs)
+        ruleset = load_scoring_rules(self.config.scoring_path)
+        min_show_score = int(ruleset.get("thresholds", {}).get("min_show_score", 0) or 0)
+        rows = self.database.jobs_for_digest(self.config.digest_max_jobs, min_show_score=min_show_score)
         usage = self.database.usage_summary()
         body = (
             "Jobs today: %(jobs_today)s\n"
@@ -125,10 +146,25 @@ class JobBot:
 
     def poll_telegram_once(self) -> None:
         self.touch_heartbeat()
-        self.poll_workspace()
-        actions = self.telegram.poll_actions()
+        try:
+            self.poll_workspace()
+            actions = self.telegram.poll_actions()
+        except TelegramError as exc:
+            log_context(LOGGER, logging.ERROR, "telegram_poll_error", error=str(exc))
+            return
         for action in actions:
-            self.handle_action(action)
+            try:
+                self.handle_action(action)
+            except TelegramError as exc:
+                log_context(
+                    LOGGER,
+                    logging.ERROR,
+                    "telegram_action_send_error",
+                    scope=action.scope,
+                    action=action.action,
+                    target_id=action.target_id,
+                    error=str(exc),
+                )
 
     def handle_action(self, action) -> None:
         log_context(LOGGER, logging.INFO, "telegram_action_received", scope=action.scope, action=action.action, target_id=action.target_id)
@@ -156,7 +192,7 @@ class JobBot:
                 self.telegram.answer_callback(action.callback_id, "Please wait %ss" % wait)
                 return
             self.telegram.answer_callback(action.callback_id, "Searching for new jobs...")
-            self.executor.submit(self.collect_and_digest)
+            self.submit_background(self.collect_and_digest)
             return
         if action.action == "discover_sources":
             allowed, _count = self.database.rate_limit_daily("bot:discover_sources", self.config.rate_limit_discovery_per_day)
@@ -166,7 +202,7 @@ class JobBot:
             session_id = self.discovery.create_request(load_sources(self.config.sources_path), self.source_metrics_markdown())
             self.database.add_feedback("__system__", "bot:discover_sources", session_id)
             self.telegram.answer_callback(action.callback_id, "Discovery in progress")
-            self.telegram.send_message("Discovery request `%s` created. Waiting for OpenClaw response." % session_id)
+            self.telegram.send_long_message(self.discovery.handoff_message(session_id))
             return
         if action.action == "tune_scoring":
             allowed, _count = self.database.rate_limit_daily("bot:tune_scoring", self.config.rate_limit_tuning_per_day)
@@ -176,7 +212,7 @@ class JobBot:
             session_id = self.scoring.create_request()
             self.database.add_feedback("__system__", "bot:tune_scoring", session_id)
             self.telegram.answer_callback(action.callback_id, "Scoring tuning request created")
-            self.telegram.send_message("Scoring tuning request `%s` created. Waiting for OpenClaw response." % session_id)
+            self.telegram.send_long_message(self.scoring.handoff_message(session_id))
             return
         if action.action == "usage":
             self.telegram.answer_callback(action.callback_id, "Usage sent")
@@ -185,8 +221,11 @@ class JobBot:
         self.telegram.answer_callback(action.callback_id, "Unknown bot action")
 
     def collect_and_digest(self) -> None:
-        self.collect()
-        self.send_digest()
+        try:
+            self.collect()
+            self.send_digest()
+        except TelegramError as exc:
+            log_context(LOGGER, logging.ERROR, "telegram_error_in_background_digest", error=str(exc))
 
     def handle_job_action(self, action) -> None:
         job = self.database.get_job(action.job_id)
@@ -222,10 +261,17 @@ class JobBot:
             self.recalculate_source_scores()
             return
         if action.action == "cover_note":
+            if current_status in ("applied", "rejected"):
+                self.telegram.answer_callback(
+                    action.callback_id,
+                    "Already applied - cover note skipped" if current_status == "applied" else "Already irrelevant",
+                )
+                log_context(LOGGER, logging.INFO, "cover_note_skipped_terminal_status", job_id=action.job_id, status=current_status)
+                return
             if not self.rate_limit_cover_note(action):
                 return
             self.telegram.answer_callback(action.callback_id, "Generating cover note")
-            self.executor.submit(self.generate_cover_note, action.job_id, False)
+            self.submit_background(self.generate_cover_note, action.job_id, False)
             return
         self.telegram.answer_callback(action.callback_id, "Unknown job action")
 
@@ -242,7 +288,7 @@ class JobBot:
             return
         if action.action == "override":
             self.telegram.answer_callback(action.callback_id, "Generating with override")
-            self.executor.submit(self.generate_cover_note, action.job_id, True)
+            self.submit_background(self.generate_cover_note, action.job_id, True)
             return
         self.telegram.answer_callback(action.callback_id, "Unknown cover action")
 
@@ -250,6 +296,12 @@ class JobBot:
         job = self.database.get_job(job_id)
         if not job:
             self.telegram.send_message("Job not found for cover note.")
+            return
+        if job["status"] in ("applied", "rejected"):
+            self.telegram.send_message(
+                "Cover note skipped for %s - status is already %s." % (job["title"], job["status"])
+            )
+            log_context(LOGGER, logging.INFO, "cover_note_worker_skipped_terminal_status", job_id=job_id, status=job["status"])
             return
         try:
             draft = self.llm.cover_note(self.profile, job, override_budget=override_budget)
@@ -290,55 +342,75 @@ class JobBot:
                 approved = candidates
             elif 0 <= action.index < len(candidates):
                 approved = [candidates[action.index]]
-            self.append_sources(approved)
-            self.database.update_discovery_run(action.target_id, status="approved", approved_count=len(approved))
-            log_context(LOGGER, logging.INFO, "discovery_sources_approved", session_id=action.target_id, approved=len(approved))
-            self.telegram.answer_callback(action.callback_id, "Approved %s source(s)" % len(approved))
+            result = self.append_sources(approved)
+            self.database.update_discovery_run(action.target_id, status="approved", approved_count=result["appended"])
+            log_context(
+                LOGGER,
+                logging.INFO,
+                "discovery_sources_approved",
+                session_id=action.target_id,
+                approved=result["appended"],
+                skipped_duplicates=result["skipped_duplicates"],
+                skipped_invalid=result["skipped_invalid"],
+            )
+            skipped = result["skipped_duplicates"] + result["skipped_invalid"]
+            self.telegram.answer_callback(action.callback_id, "Approved %s, skipped %s" % (result["appended"], skipped))
         elif action.action == "reject":
             self.database.update_discovery_run(action.target_id, status="rejected")
             log_context(LOGGER, logging.INFO, "discovery_rejected", session_id=action.target_id)
             self.telegram.answer_callback(action.callback_id, "Rejected discovery")
 
-    def append_sources(self, candidates: List[dict]) -> None:
+    def append_sources(self, candidates: List[dict]) -> dict:
         path = self.config.sources_path
         existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
         existing_urls = {source.get("url") for source in existing}
-        appended = 0
-        skipped = 0
+        result = {"appended": 0, "skipped_duplicates": 0, "skipped_invalid": 0}
         for candidate in candidates:
             source_type = normalize_discovered_source_type(candidate.get("type", "json_api"))
-            source_url = candidate.get("url")
+            source_url = sanitize_agent_string(candidate.get("url"), 500)
             if source_type == "imap" and not source_url:
                 source_url = "imap://job-alerts"
             if not source_url:
-                skipped += 1
+                result["skipped_invalid"] += 1
+                continue
+            if source_url in existing_urls:
+                result["skipped_duplicates"] += 1
                 continue
             try:
                 validate_source_url(source_url, source_type)
-            except ValueError:
-                skipped += 1
+                if source_type != "imap":
+                    validate_safe_url(source_url)
+                    if not self.source_candidate_reachable(source_url):
+                        raise SourceError("HEAD probe failed")
+            except ValueError as exc:
+                result["skipped_invalid"] += 1
+                log_context(LOGGER, logging.WARNING, "discovery_candidate_rejected", url=source_url, reason=str(exc))
                 continue
-            if source_url in existing_urls:
-                skipped += 1
+            except SourceError as exc:
+                result["skipped_invalid"] += 1
+                log_context(LOGGER, logging.WARNING, "discovery_candidate_rejected", url=source_url, reason=str(exc))
                 continue
+            name = sanitize_agent_string(candidate.get("name") or candidate.get("url") or "agent-source", 80)
             existing.append(
                 {
-                    "id": slugify(candidate.get("name") or candidate.get("url") or "agent-source"),
-                    "name": candidate.get("name") or "Agent source",
+                    "id": slugify(name or source_url or "agent-source"),
+                    "name": name or "Agent source",
                     "type": source_type,
                     "url": source_url,
                     "enabled": True,
                     "status": "test",
-                    "risk_level": candidate.get("risk", "medium"),
+                    "risk_level": sanitize_agent_string(candidate.get("risk", "medium"), 20),
                     "created_by": "agent",
-                    "validation_notes": candidate.get("validation_notes", ""),
+                    "why_it_matches": sanitize_agent_string(candidate.get("why_it_matches", ""), 300),
+                    "validation_notes": sanitize_agent_string(candidate.get("validation_notes", ""), 500),
                 }
             )
             existing_urls.add(source_url)
-            appended += 1
+            result["appended"] += 1
         path.write_text(json.dumps(existing, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         self.database.upsert_sources(load_sources(path))
-        log_context(LOGGER, logging.INFO, "sources_file_updated", path=str(path), appended=appended, skipped_duplicates=skipped)
+        log_context(LOGGER, logging.INFO, "sources_file_updated", path=str(path), **result)
+        return result
 
     def handle_tuning_action(self, action) -> None:
         if action.action == "reject":
@@ -398,14 +470,77 @@ class JobBot:
 
     def serve(self) -> None:
         self.initialize()
-        self.telegram.send_digest_header("Jobbot ready", "Click Get more jobs to search.")
-        while True:
-            self.poll_telegram_once()
-            time.sleep(2)
+        try:
+            self.telegram.send_digest_header("Jobbot ready", "Click Get more jobs to search.")
+        except TelegramError as exc:
+            log_context(LOGGER, logging.ERROR, "telegram_ready_message_failed", error=str(exc))
+        try:
+            while not self.shutdown_requested:
+                self.poll_telegram_once()
+                time.sleep(2)
+        finally:
+            self.shutdown_executor()
 
     def touch_heartbeat(self) -> None:
         self.config.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
         self.config.heartbeat_path.write_text(utc_now_iso(), encoding="utf-8")
+
+    def submit_background(self, fn, *args):
+        future = self.executor.submit(fn, *args)
+        self.futures.add(future)
+        future.add_done_callback(self.futures.discard)
+        return future
+
+    def shutdown_executor(self, timeout: int = 30) -> None:
+        if not hasattr(self, "executor"):
+            return
+        self.shutdown_requested = True
+        pending = [future for future in getattr(self, "futures", set()) if not future.done()]
+        if pending:
+            done, not_done = wait(pending, timeout=timeout)
+            for future in done:
+                exc = future.exception()
+                if exc:
+                    log_context(LOGGER, logging.ERROR, "background_task_error", error=str(exc))
+            for future in not_done:
+                future.cancel()
+            log_context(LOGGER, logging.INFO, "executor_shutdown_waited", completed=len(done), cancelled=len(not_done))
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+    def handle_shutdown_signal(self, signum, _frame) -> None:
+        self.shutdown_requested = True
+        log_context(LOGGER, logging.WARNING, "shutdown_signal_received", signum=signum)
+
+    def source_candidate_reachable(self, url: str) -> bool:
+        request = urllib.request.Request(url, headers=source_module.DEFAULT_HEADERS, method="HEAD")
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                validate_safe_url(response.geturl())
+                return 200 <= response.status < 400
+        except urllib.error.HTTPError as exc:
+            if exc.code == 405:
+                return self.source_candidate_get_probe(url)
+            return 200 <= exc.code < 400
+        except SourceError as exc:
+            log_context(LOGGER, logging.WARNING, "source_candidate_head_failed", url=url, error=str(exc))
+            return False
+        except urllib.error.URLError as exc:
+            log_context(LOGGER, logging.WARNING, "source_candidate_head_failed", url=url, error=str(exc.reason))
+            return False
+
+    def source_candidate_get_probe(self, url: str) -> bool:
+        request = urllib.request.Request(url, headers=source_module.DEFAULT_HEADERS, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                validate_safe_url(response.geturl())
+                response.read(1)
+                return 200 <= response.status < 400
+        except SourceError as exc:
+            log_context(LOGGER, logging.WARNING, "source_candidate_get_probe_failed", url=url, error=str(exc))
+            return False
+        except urllib.error.URLError as exc:
+            log_context(LOGGER, logging.WARNING, "source_candidate_get_probe_failed", url=url, error=str(exc.reason))
+            return False
 
 
 def run_once() -> None:
@@ -441,3 +576,10 @@ def normalize_discovered_source_type(value: str) -> str:
     if normalized in ("rss", "json_api", "ats", "community", "imap"):
         return normalized
     return "json_api"
+
+
+def sanitize_agent_string(value, max_length: int) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    text = "".join(char if char >= " " and char != "\x7f" else " " for char in text)
+    text = " ".join(text.split())
+    return text[:max_length]

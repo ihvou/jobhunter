@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -70,6 +71,13 @@ class TelegramClient:
             payload["reply_markup"] = json.dumps(reply_markup)
         self._post("sendMessage", payload)
 
+    def send_long_message(self, text: str) -> None:
+        max_len = 3600
+        chunks = split_message(text, max_len)
+        for idx, chunk in enumerate(chunks):
+            prefix = "Part %s/%s\n" % (idx + 1, len(chunks)) if len(chunks) > 1 else ""
+            self.send_message(prefix + chunk)
+
     def answer_callback(self, callback_id: Optional[str], text: str) -> None:
         if not self.enabled or not callback_id:
             return
@@ -106,22 +114,26 @@ class TelegramClient:
     def _post(self, method: str, payload: Dict) -> Dict:
         body = urllib.parse.urlencode(payload).encode("utf-8")
         request = urllib.request.Request(self._url(method), data=body, method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            log_context(LOGGER, logging.ERROR, "telegram_url_error", method=method, error=str(exc.reason))
-            raise TelegramError("Telegram request failed for %s: %s" % (method, exc.reason))
+        data = self._urlopen_json(request, method)
         return self._check_ok(method, data)
 
     def _get(self, method_with_query: str) -> Dict:
-        try:
-            with urllib.request.urlopen(self._url(method_with_query), timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            log_context(LOGGER, logging.ERROR, "telegram_url_error", method=method_with_query.split("?")[0], error=str(exc.reason))
-            raise TelegramError("Telegram request failed: %s" % exc.reason)
-        return self._check_ok(method_with_query.split("?")[0], data)
+        method = method_with_query.split("?")[0]
+        data = self._urlopen_json(self._url(method_with_query), method)
+        return self._check_ok(method, data)
+
+    def _urlopen_json(self, request, method: str) -> Dict:
+        last_error = None
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.URLError as exc:
+                last_error = exc
+                log_context(LOGGER, logging.WARNING if attempt == 0 else logging.ERROR, "telegram_url_error", method=method, error=str(exc.reason), attempt=attempt + 1)
+                if attempt == 0:
+                    time.sleep(1)
+        raise TelegramError("Telegram request failed for %s: %s" % (method, last_error.reason))
 
     def _check_ok(self, method: str, data: Dict) -> Dict:
         if data.get("ok", True) is False:
@@ -239,3 +251,29 @@ Concerns:
         row["url"],
     )
 
+
+def split_message(text: str, max_len: int) -> List[str]:
+    text = str(text or "")
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    current = []
+    current_len = 0
+    for line in text.splitlines():
+        while len(line) + 1 > max_len:
+            if current:
+                chunks.append("\n".join(current))
+                current = []
+                current_len = 0
+            chunks.append(line[:max_len])
+            line = line[max_len:]
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_len:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
