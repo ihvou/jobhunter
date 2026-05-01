@@ -106,7 +106,8 @@ class AppTests(unittest.TestCase):
             bot.handle_action(TelegramAction(scope="bot", action="usage", callback_id="cb"))
             self.assertTrue(list((bot.config.workspace_dir / "discovery").glob("request-*.json")))
             self.assertTrue(list((bot.config.workspace_dir / "tuning").glob("request-*.json")))
-            self.assertTrue(any("OpenClaw/Codex handoff" in str(message[0]) for message in bot.telegram.messages))
+            self.assertTrue(list((bot.config.workspace_dir / "discovery").glob("handoff-*.md")))
+            self.assertTrue(any("queued for automated OpenClaw/Codex worker" in str(message[0]) for message in bot.telegram.messages))
             self.assertTrue(any(str(message[0]).startswith("Usage") for message in bot.telegram.messages))
 
     def test_job_feedback_callbacks(self):

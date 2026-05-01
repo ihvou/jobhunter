@@ -202,7 +202,7 @@ class JobBot:
             session_id = self.discovery.create_request(load_sources(self.config.sources_path), self.source_metrics_markdown())
             self.database.add_feedback("__system__", "bot:discover_sources", session_id)
             self.telegram.answer_callback(action.callback_id, "Discovery in progress")
-            self.telegram.send_long_message(self.discovery.handoff_message(session_id))
+            self.send_codex_request_notice("source discovery", session_id, self.discovery.handoff_message(session_id))
             return
         if action.action == "tune_scoring":
             allowed, _count = self.database.rate_limit_daily("bot:tune_scoring", self.config.rate_limit_tuning_per_day)
@@ -212,7 +212,7 @@ class JobBot:
             session_id = self.scoring.create_request()
             self.database.add_feedback("__system__", "bot:tune_scoring", session_id)
             self.telegram.answer_callback(action.callback_id, "Scoring tuning request created")
-            self.telegram.send_long_message(self.scoring.handoff_message(session_id))
+            self.send_codex_request_notice("scoring tuning", session_id, self.scoring.handoff_message(session_id))
             return
         if action.action == "usage":
             self.telegram.answer_callback(action.callback_id, "Usage sent")
@@ -226,6 +226,17 @@ class JobBot:
             self.send_digest()
         except TelegramError as exc:
             log_context(LOGGER, logging.ERROR, "telegram_error_in_background_digest", error=str(exc))
+
+    def send_codex_request_notice(self, label: str, session_id: str, manual_handoff: str) -> None:
+        if self.config.codex_handoff_mode == "manual":
+            self.telegram.send_long_message(manual_handoff)
+            return
+        handoff_path = self.config.workspace_dir / ("discovery" if label == "source discovery" else "tuning") / ("handoff-%s.md" % session_id)
+        self.telegram.send_message(
+            "%s queued for automated OpenClaw/Codex worker.\nSession: %s\nFallback prompt: %s"
+            % (label.capitalize(), session_id, handoff_path)
+        )
+        log_context(LOGGER, logging.INFO, "codex_request_queued", label=label, session_id=session_id, handoff_path=str(handoff_path))
 
     def handle_job_action(self, action) -> None:
         job = self.database.get_job(action.job_id)

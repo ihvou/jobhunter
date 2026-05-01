@@ -6,6 +6,7 @@ input/profile.local.md
 input/cv.local.md
 input/*.private.md
 openclaw/config/
+openclaw/codex-home/
 openclaw/workspace/
 __pycache__/
 *.pyc

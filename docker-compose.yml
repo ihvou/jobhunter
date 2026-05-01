@@ -24,6 +24,7 @@ services:
       JOBBOT_SOURCES_PATH: /jobbot/config/sources.json
       JOBBOT_SCORING_PATH: /jobbot/config/scoring.json
       JOBBOT_SETTINGS_PATH: /jobbot/config/jobbot.json
+      JOBBOT_CODEX_HANDOFF_MODE: ${JOBBOT_CODEX_HANDOFF_MODE:-auto}
       EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
       EMAIL_IMAP_USERNAME: ${EMAIL_IMAP_USERNAME:-}
       EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
@@ -45,19 +46,23 @@ services:
       - ALL
 
   openclaw-gateway:
-    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    build:
+      context: ./openclaw/worker
     container_name: jobhunter-openclaw-gateway
     restart: unless-stopped
     profiles:
       - openclaw
-    ports:
-      - "127.0.0.1:18789:18789"
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CODEX_HOME: /openclaw/codex-home
+      HOME: /openclaw/codex-home
+      OPENCLAW_WORKSPACE_DIR: /openclaw/workspace
+      OPENCLAW_PROMPTS_DIR: /openclaw/prompts
+      OPENCLAW_CODEX_MODEL: ${OPENCLAW_CODEX_MODEL:-}
+      OPENCLAW_POLL_SECONDS: ${OPENCLAW_POLL_SECONDS:-5}
+      OPENCLAW_CODEX_TIMEOUT_SECONDS: ${OPENCLAW_CODEX_TIMEOUT_SECONDS:-900}
     volumes:
-      - ./openclaw/config:/home/node/.openclaw
-      - ./openclaw/workspace:/home/node/.openclaw/workspace
-      - ./openclaw/config:/openclaw/config
+      - ./openclaw/codex-home:/openclaw/codex-home
+      - ./openclaw/prompts:/openclaw/prompts:ro
       - ./openclaw/workspace:/openclaw/workspace
     read_only: true
     tmpfs:

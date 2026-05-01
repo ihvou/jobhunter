@@ -7,7 +7,7 @@ Orientation for AI coding agents (Claude Code, Codex, Cursor, etc.) and human co
 A safe, low-cost job-search assistant that runs as two cooperating Docker containers:
 
 1. **`jobbot`** — deterministic Python service. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
-2. **`openclaw-gateway`** — isolated OpenClaw container. Intended to handle source discovery and scoring-tuning agent work through the shared workspace. The `jobbot` side of this contract is implemented; the concrete Codex/OpenClaw worker runtime remains the intentionally narrow integration gap.
+2. **`openclaw-gateway`** — isolated Codex CLI worker container. Handles source discovery and scoring-tuning agent work through the shared workspace. Codex auth lives in gitignored `openclaw/codex-home/`, not the host home directory.
 
 The user interacts through Telegram. There is no web UI in `jobbot`. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 
@@ -138,9 +138,9 @@ docker compose --profile openclaw up -d openclaw-gateway
 | No re-spam | Implemented with `digest_log`, except snoozed jobs due for resend |
 | Scoring DSL | Implemented in `config/scoring.json` + `jobbot/scoring.py` |
 | Word-boundary matching | Implemented with tests for known false positives |
-| Discovery request/approval | `jobbot` side implemented; requires OpenClaw/Codex response file |
-| Tuning request/shadow/apply | `jobbot` side implemented; requires OpenClaw/Codex response file |
-| OpenClaw worker runtime | Not implemented here; do not fake it without a real Codex auth/runtime decision |
+| Discovery request/approval | Implemented; automated worker writes OpenClaw/Codex response file |
+| Tuning request/shadow/apply | Implemented; automated worker writes OpenClaw/Codex response file |
+| OpenClaw worker runtime | Implemented in `openclaw/worker/` with Codex CLI |
 | IMAP source filters | Implemented via per-source `query` and UID high-water |
 | Source lifecycle | Implemented: `active`, `test`, `disabled`; `test` promotes on cover note/applied |
 | Budget override | Implemented for cover notes |
@@ -188,7 +188,7 @@ Scoring rules belong in `config/scoring.json`, not hardcoded Python. The interpr
 
 - Adding any Python dependency.
 - Implementing PDF/DOCX CV ingestion, because it conflicts with stdlib-only.
-- Wiring a real Codex/OpenClaw worker, because the auth/subscription mechanism and runtime contract need an explicit choice.
+- Changing Codex worker auth or mounting strategy, because it can leak subscription credentials if done casually.
 - Adding browser automation, even for public pages.
 
 ## Validation Before Declaring Done

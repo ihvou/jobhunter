@@ -43,6 +43,7 @@ class AppConfig:
     rate_limit_discovery_per_day: int = 3
     rate_limit_tuning_per_day: int = 3
     rate_limit_cover_notes_per_day: int = 10
+    codex_handoff_mode: str = "auto"
     cost: CostConfig = field(default_factory=CostConfig)
 
 
@@ -139,6 +140,7 @@ def load_app_config() -> AppConfig:
         rate_limit_cover_notes_per_day=env_or_setting(
             "JOBBOT_RATE_LIMIT_COVER_NOTES_PER_DAY", settings, "rate_limit_cover_notes_per_day", 10, int
         ),
+        codex_handoff_mode=str(os.getenv("JOBBOT_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
         cost=cost,
     )
 

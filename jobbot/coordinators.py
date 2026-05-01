@@ -100,7 +100,7 @@ class DiscoveryCoordinator:
                     logging.WARNING,
                     "discovery_response_failed",
                     session_id=row["session_id"],
-                    message=status.get("message", "failed"),
+                    detail=status.get("message", "failed"),
                 )
                 self.database.update_discovery_run(row["session_id"], status="failed", message=status.get("message", "failed"))
         return completed

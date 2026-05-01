@@ -11,7 +11,7 @@ Read the product spec in [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPE
 | Component | Purpose |
 |---|---|
 | `jobbot` | Python stdlib-only collector, scorer, budget gate, Telegram bot, and approval handler |
-| `openclaw-gateway` | Isolated OpenClaw container for source-discovery/scoring-tuning work through the shared workspace |
+| `openclaw-gateway` | Isolated Codex CLI worker for source-discovery/scoring-tuning work through the shared workspace |
 | SQLite | Local jobs, scores, feedback, digests, drafts, usage, and audit records |
 | Telegram | Daily controls and per-job feedback loop |
 
@@ -24,8 +24,8 @@ Everything is on-demand.
 | Telegram Button | What Happens |
 |---|---|
 | `Get more jobs` | Collects enabled sources once, dedupes, scores, and sends only jobs not already shown |
-| `Update sources` | Writes a discovery request into `/jobbot/workspace/discovery`; OpenClaw/Codex writes a response; you approve sources in Telegram |
-| `Tune scoring` | Writes a tuning request into `/jobbot/workspace/tuning`; proposed rules are shadow-tested before you can apply them |
+| `Update sources` | Writes a discovery request; the OpenClaw/Codex worker proposes sources; you approve them in Telegram |
+| `Tune scoring` | Writes a tuning request; the OpenClaw/Codex worker proposes rules; jobbot shadow-tests before you apply them |
 | `Usage` | Shows OpenAI API spend and local usage counters |
 
 There is no cron-driven collection. `serve` only polls Telegram and the shared workspace.
@@ -73,6 +73,8 @@ Fill the values you approve:
 | `OPENAI_API_KEY` | optional | Cover notes only, protected by local budget caps |
 | `OPENAI_MODEL` | optional | Defaults to `gpt-4o-mini` |
 | `EMAIL_IMAP_*` | optional | Read-only job-alert mailbox/label |
+| `JOBBOT_CODEX_HANDOFF_MODE` | optional | `auto` uses the worker; `manual` sends paste-ready prompts to Telegram |
+| `OPENCLAW_CODEX_*` | optional | Codex worker model, poll interval, and timeout |
 
 Do not commit `.env`, `input/profile.local.md`, `input/cv.local.md`, `config/profile.local.json`, or `data/`.
 
@@ -135,6 +137,19 @@ Per-job scoring is deterministic and free. The LLM never scores every job.
 | `./openclaw/workspace/discovery` | `/jobbot/workspace/discovery` | `/openclaw/workspace/discovery` |
 | `./openclaw/workspace/tuning` | `/jobbot/workspace/tuning` | `/openclaw/workspace/tuning` |
 
+The OpenClaw service is a small worker image with Codex CLI installed. It watches the shared workspace and invokes `codex exec` automatically when request files appear.
+
+One-time Codex subscription login:
+
+```bash
+docker compose --profile openclaw build openclaw-gateway
+docker compose --profile openclaw run --rm -it openclaw-gateway codex login --device-auth
+docker compose --profile openclaw run --rm openclaw-gateway codex login status
+docker compose --profile openclaw up -d openclaw-gateway
+```
+
+That login stores Codex auth in `./openclaw/codex-home`, which is gitignored. The repo does not mount your host home directory or browser profile.
+
 `Update sources` writes:
 
 ```text
@@ -142,7 +157,7 @@ Per-job scoring is deterministic and free. The LLM never scores every job.
 /jobbot/workspace/discovery/status-<session>.json
 ```
 
-OpenClaw/Codex is expected to write:
+The worker writes:
 
 ```text
 /openclaw/workspace/discovery/response-<session>.json
@@ -153,7 +168,7 @@ When status is `done`, `jobbot` posts an approval prompt. Approved sources land 
 
 `Tune scoring` follows the same pattern in `tuning/`. `jobbot` shadow-tests proposed scoring rules against recent jobs and feedback before offering `Apply`, `Reject`, or `Show diff`.
 
-Important boundary: OpenAI API spend in this repo is only for cover notes. Source discovery and scoring tuning are designed for Codex via the user's subscription inside the OpenClaw side of the workflow.
+Important boundary: OpenAI API spend in this repo is only for cover notes. Source discovery and scoring tuning use your Codex CLI login inside the OpenClaw worker. Keep `JOBBOT_CODEX_HANDOFF_MODE=manual` only if you want the older paste-into-ChatGPT fallback.
 
 ## Email Alerts
 
@@ -233,6 +248,7 @@ python3 -m jobbot serve
 docker compose up -d jobbot
 docker compose --profile openclaw up -d openclaw-gateway
 docker compose logs -f jobbot
+docker compose --profile openclaw logs -f openclaw-gateway
 docker compose --profile openclaw config --quiet
 ```
 
@@ -264,7 +280,7 @@ sqlite3 data/jobs.sqlite ".backup 'data/backup/jobs-$(date +%Y%m%d-%H%M%S).sqlit
 | Digest is empty | Inspect logs, loosen scoring rules, or add/approve more sources |
 | Same job repeats | Check `digest_log`; snoozed due jobs are allowed to reappear once |
 | Cover note denied | Use `Usage` and budget env vars; approve the one-time override only if intended |
-| OpenClaw proposal never appears | Inspect `openclaw/workspace/*/status-*.json` and OpenClaw container logs |
+| OpenClaw proposal never appears | Run `docker compose --profile openclaw logs -f openclaw-gateway` and inspect `openclaw/workspace/*/status-*.json` |
 | Email alerts missing | Confirm IMAP folder, app password, source `status`, and source `query` |
 
 ## Safety Notes
