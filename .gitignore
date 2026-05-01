@@ -1,9 +1,12 @@
 .env
 data/
+config/profile.local.json
+config/*.private.json
+input/profile.local.md
+input/*.private.md
 openclaw/config/
 openclaw/workspace/
 __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
-

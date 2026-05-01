@@ -22,6 +22,7 @@ class AppConfig:
     config_dir: Path
     database_path: Path
     profile_path: Path
+    profile_settings_path: Path
     sources_path: Path
     telegram_bot_token: str = ""
     telegram_allowed_chat_id: str = ""
@@ -55,7 +56,10 @@ def load_app_config() -> AppConfig:
     data_dir = _default_path("JOBBOT_DATA_DIR", "data")
     input_dir = _default_path("JOBBOT_INPUT_DIR", "input")
     config_dir = _default_path("JOBBOT_CONFIG_DIR", "config")
-    profile_path = Path(os.getenv("JOBBOT_PROFILE_PATH", str(input_dir / "profile.md")))
+    profile_path = Path(os.getenv("JOBBOT_PROFILE_PATH", str(input_dir / "profile.local.md")))
+    profile_settings_path = Path(
+        os.getenv("JOBBOT_PROFILE_SETTINGS_PATH", str(config_dir / "profile.local.json"))
+    )
     sources_path = Path(os.getenv("JOBBOT_SOURCES_PATH", str(config_dir / "sources.json")))
     database_path = Path(os.getenv("JOBBOT_DATABASE_PATH", str(data_dir / "jobs.sqlite")))
 
@@ -76,6 +80,7 @@ def load_app_config() -> AppConfig:
         config_dir=config_dir,
         database_path=database_path,
         profile_path=profile_path,
+        profile_settings_path=profile_settings_path,
         sources_path=sources_path,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_id=os.getenv("TELEGRAM_ALLOWED_CHAT_ID", ""),
@@ -109,7 +114,9 @@ def load_sources(path: Path) -> List[SourceConfig]:
 
 
 def load_profile(config: AppConfig) -> UserProfile:
-    profile_settings = load_json(config.config_dir / "profile.json", {})
+    profile_settings = load_json(config.profile_settings_path, None)
+    if profile_settings is None:
+        profile_settings = load_json(config.config_dir / "profile.example.json", {})
     raw_text = ""
     if config.profile_path.exists():
         raw_text = config.profile_path.read_text(encoding="utf-8")
@@ -138,4 +145,3 @@ def _list(value: Optional[object]) -> List[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item).strip()]
     return [str(value)]
-

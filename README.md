@@ -46,8 +46,12 @@ subject to the local daily/monthly budget limits.
 
 ### 1. Prepare Your Profile
 
-Edit [`input/profile.md`](input/profile.md) and replace the placeholder text with a concise text
-export of your CV.
+Copy [`input/profile.example.md`](input/profile.example.md) to `input/profile.local.md`, then replace
+the placeholder text with a concise text export of your CV.
+
+```bash
+cp input/profile.example.md input/profile.local.md
+```
 
 Recommended sections:
 
@@ -59,7 +63,12 @@ Recommended sections:
 - salary floor
 - dealbreakers
 
-Then tune [`config/profile.json`](config/profile.json):
+Copy [`config/profile.example.json`](config/profile.example.json) to `config/profile.local.json`, then
+tune the local file:
+
+```bash
+cp config/profile.example.json config/profile.local.json
+```
 
 | Field | Purpose |
 |---|---|
@@ -107,7 +116,7 @@ Fill only the values you approve:
 | `JOBBOT_MONTHLY_BUDGET_USD` | recommended | Local monthly spend cap |
 | `EMAIL_IMAP_*` | optional | Read-only job-alert mailbox access |
 
-Do not commit `.env`. It is ignored by git.
+Do not commit `.env`, `input/profile.local.md`, or `config/profile.local.json`. They are ignored by git.
 
 ### 4. Run A Local Smoke Test
 
@@ -256,8 +265,10 @@ Create a dedicated OpenAI API project/key for this bot so provider-side usage is
 
 | File | Purpose |
 |---|---|
-| `config/profile.json` | Target roles, keywords, exclusions, salary floor |
-| `input/profile.md` | Text CV/profile used by ranking and cover notes |
+| `config/profile.example.json` | Safe committed template for profile settings |
+| `config/profile.local.json` | Your private local profile settings, ignored by git |
+| `input/profile.example.md` | Safe committed template for CV/profile text |
+| `input/profile.local.md` | Your private local CV/profile text, ignored by git |
 | `config/sources.json` | Public RSS/API/email sources |
 | `config/jobbot.json` | Budgets, model, digest size, collection interval |
 | `.env` | Secrets and runtime paths |
@@ -270,9 +281,31 @@ Run this weekly or when the search quality feels stale:
 docker compose exec jobbot python -m jobbot discover-sources
 ```
 
-The bot reviews your profile and source metrics, then proposes new public sources, search patterns,
-company lists, ATS pages, or communities to try. New sources should be reviewed before enabling
-aggressive polling.
+The bot reviews:
+
+- `input/profile.local.md`
+- `config/profile.local.json` if present, otherwise `config/profile.example.json`
+- source performance metrics from SQLite
+- recent feedback such as `Irrelevant`, `Give me cover note`, and `Applied`
+
+It then proposes new public sources, search patterns, company lists, ATS pages, or communities to
+try. Source Discovery is recommendation-only in this MVP: it does not silently edit
+`config/sources.json`, enable scraping, or start polling a new platform. That review step is
+intentional. Add or enable sources only after you like the recommendation and the access method is
+safe.
+
+Typical workflow:
+
+```bash
+docker compose exec jobbot python -m jobbot discover-sources
+# review recommendations
+# manually edit config/sources.json
+docker compose restart jobbot
+```
+
+This means you still configure seed sources through `config/sources.json`, but you do not have to
+know every source up front. The bot can suggest sources that match your profile and your feedback
+history; you decide which ones become active.
 
 ## Commands
 
@@ -304,7 +337,7 @@ python3 -m jobbot serve
 |---|---|
 | `data/jobs.sqlite` | Jobs, scores, feedback, drafts, usage logs |
 | `config/` | Search configuration |
-| `input/profile.md` | Your text CV/profile |
+| `input/profile.local.md` | Your private text CV/profile |
 
 Back up the SQLite database if you care about historical learning:
 
@@ -319,8 +352,8 @@ Avoid committing `data/`; it may contain personal job-search history and generat
 | Symptom | Check |
 |---|---|
 | No Telegram messages | Verify `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` |
-| Digest is empty | Run `collect`, inspect logs, loosen filters in `config/profile.json` |
-| Cover notes are generic | Add more CV detail to `input/profile.md` |
+| Digest is empty | Run `collect`, inspect logs, loosen filters in `config/profile.local.json` |
+| Cover notes are generic | Add more CV detail to `input/profile.local.md` |
 | LLM calls stopped | Check `python3 -m jobbot usage` and budget env vars |
 | Email alerts not parsed | Confirm IMAP folder name and enable `email-job-alerts` |
 | Too many bad jobs | Use `Irrelevant` consistently and tighten negative keywords |

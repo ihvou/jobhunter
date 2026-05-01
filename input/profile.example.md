@@ -1,6 +1,6 @@
 # Candidate Profile
 
-Replace this file with a concise text export of your CV.
+Copy this file to `input/profile.local.md` and replace it with a concise text export of your CV.
 
 Recommended sections:
 

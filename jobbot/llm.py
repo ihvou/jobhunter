@@ -88,10 +88,14 @@ source_name | source_type | access_method | why_it_matches | risk | first_query_
 Candidate profile:
 %s
 
+Structured preferences:
+%s
+
 Recent source metrics:
 %s
 """ % (
             profile.raw_text[:6000],
+            profile_summary(profile),
             metrics[:4000],
         )
         generated = self.generate("source_discovery", prompt, max_output_tokens=900)
@@ -132,3 +136,18 @@ def fallback_source_discovery() -> str:
 | VC portfolio career pages | Company lists | Public web | Companies with recent funding and hiring budget | Low | Search for target VC portfolio hiring pages |
 """
 
+
+def profile_summary(profile: UserProfile) -> str:
+    return json.dumps(
+        {
+            "target_titles": profile.target_titles,
+            "positive_keywords": profile.positive_keywords,
+            "negative_keywords": profile.negative_keywords,
+            "required_locations": profile.required_locations,
+            "excluded_locations": profile.excluded_locations,
+            "excluded_domains": profile.excluded_domains,
+            "salary_floor": profile.salary_floor,
+            "currency": profile.currency,
+        },
+        indent=2,
+    )

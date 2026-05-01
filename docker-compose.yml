@@ -15,7 +15,8 @@ services:
       JOBBOT_INPUT_DIR: /app/input
       JOBBOT_CONFIG_DIR: /app/config
       JOBBOT_DATABASE_PATH: /app/data/jobs.sqlite
-      JOBBOT_PROFILE_PATH: /app/input/profile.md
+      JOBBOT_PROFILE_PATH: /app/input/profile.local.md
+      JOBBOT_PROFILE_SETTINGS_PATH: /app/config/profile.local.json
       JOBBOT_SOURCES_PATH: /app/config/sources.json
       JOBBOT_SETTINGS_PATH: /app/config/jobbot.json
       EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
