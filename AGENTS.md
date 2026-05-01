@@ -1,268 +1,201 @@
 # Agents Guide
 
-Orientation for AI coding agents (Claude Code, Codex, Cursor, etc.) and human contributors. Read this before reading the README. The README describes the *intended* user experience; this file is honest about what is built vs. what is specified.
+Orientation for AI coding agents (Claude Code, Codex, Cursor, etc.) and human contributors. Read this before the README. The README describes user setup; this file is the implementation contract.
 
-## What this project is
+## What This Project Is
 
-A safe, low-cost job-search assistant that runs as **two cooperating Docker containers**:
+A safe, low-cost job-search assistant that runs as two cooperating Docker containers:
 
-1. **`jobbot`** — deterministic Python service. Collects jobs from public sources, scores them with a rule interpreter, sends digests to Telegram, and handles user button clicks. Stdlib-only.
-2. **`openclaw-gateway`** — agent runtime. Runs *only* when invoked by `jobbot` for source discovery (`Update sources`) or scoring-algorithm tuning (`Tune scoring`). Uses Codex via the user's subscription.
+1. **`jobbot`** — deterministic Python service. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
+2. **`openclaw-gateway`** — isolated OpenClaw container. Intended to handle source discovery and scoring-tuning agent work through the shared workspace. The `jobbot` side of this contract is implemented; the concrete Codex/OpenClaw worker runtime remains the intentionally narrow integration gap.
 
-The user interacts entirely through Telegram. There is no web UI. The bot **never** applies to jobs, messages recruiters, or sends email.
+The user interacts through Telegram. There is no web UI in `jobbot`. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 
-## The mental model that matters most
+## Mental Model
 
-**Everything is on-demand.** There is no cron, no background polling. The user clicks a Telegram button, work happens, results land in chat. This is the single biggest difference from what the previous spec described — and from what the current implementation still does.
+Everything is on-demand. There is no cron-driven collection.
 
-Three primary entry points:
-
-- **`Get more jobs`** → on-demand collection across enabled sources → fresh digest of jobs not previously shown.
-- **`Update sources`** → `jobbot` writes a request file to a shared workspace volume; OpenClaw + Codex iterate (propose → validate → refine) and write a response; jobbot posts an approval prompt; user approves; sources land in `config/sources.json` with `created_by='agent'`.
-- **`Tune scoring`** → same shape as discovery but for `config/scoring.json`. Includes a **shadow test** before activation: re-score the last 100 jobs with the proposed rules, report distribution shift + agreement vs Applied/Irrelevant feedback, only then offer `[Apply][Reject]`.
-
-Two LLM tiers, kept strictly separate:
-
-- **Codex (subscription, flat fee)** — only inside the OpenClaw container, only for source discovery and scoring tuning.
-- **OpenAI API (paid, budget-gated)** — only inside `jobbot`, only for cover-note generation. Daily/monthly $ caps + per-day count cap + Telegram override prompt on overage.
-
-Per-job scoring is **fully deterministic** — zero LLM calls per job. The agent updates the *rules*; the rules score the jobs.
-
-## Source of truth
-
-| Document | Use it for |
+| Entry Point | Behavior |
 |---|---|
-| [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPEC.md) | The intended product. This is the spec. |
-| [`tasks.md`](tasks.md) | The honest gap list. What's built vs. what's specified, prioritized. Every work item lives here, in the table only. |
-| [`README.md`](README.md) | User-facing setup. **Note: parts are still stale relative to the revised spec** (see tasks.md #46). Trust the spec + tasks.md when they conflict. |
-| `git log` | Recent code changes. Authoritative for who-did-what. |
+| `Get more jobs` | Rate-limited collection across enabled sources, cross-source dedupe, deterministic scoring, fresh digest of jobs not previously shown |
+| `Update sources` | Writes a discovery request into `/jobbot/workspace/discovery`; waits for OpenClaw/Codex response; user approves sources in Telegram; approved rows are appended as `created_by: "agent", status: "test"` |
+| `Tune scoring` | Writes a tuning request into `/jobbot/workspace/tuning`; shadow-tests proposed rules; user applies/rejects in Telegram |
+| `Usage` | Shows OpenAI API spend and usage counters |
 
-## Repository layout
+Two LLM tiers stay separate:
 
-```
+| Tier | Location | Use |
+|---|---|---|
+| Codex subscription | OpenClaw side | Source discovery and scoring-rule tuning |
+| OpenAI API | `jobbot` | Cover notes only, behind local budget gates and per-day count caps |
+
+Per-job scoring is deterministic and free. The agent updates rules; it does not score every job with an LLM.
+
+## Source Of Truth
+
+| Document | Use |
+|---|---|
+| [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPEC.md) | Intended product behavior |
+| [`tasks.md`](tasks.md) | Priority list and acceptance criteria |
+| [`README.md`](README.md) | User setup and daily operation |
+| `git log` | Recent implementation history |
+
+## Repository Layout
+
+```text
 .
-├── jobbot/                       # Python service (stdlib-only)
-│   ├── __main__.py               # CLI entry: init, collect, digest, serve, ...
-│   ├── app.py                    # JobBot orchestrator (god object — slated for split)
-│   ├── config.py                 # Settings + AppConfig dataclass
-│   ├── models.py                 # SourceConfig, UserProfile, Job, ScoreResult, TelegramAction
-│   ├── database.py               # SQLite layer + schema; stable_job_id
-│   ├── sources.py                # Per-source collectors (RSS, Remotive, RemoteOK, Arbeitnow, JSON, IMAP)
-│   ├── scoring.py                # Hardcoded scoring (TO BE REPLACED with rule interpreter — tasks.md #6)
-│   ├── llm.py                    # OpenAI client (cover notes only, after revision)
-│   ├── budget.py                 # Daily/monthly $ gate
-│   └── telegram.py               # Telegram client + callback parser
-├── openclaw/
-│   └── JOB_SEARCH_AGENT_PROMPT.md  # Prompt for the OpenClaw agent (no app code yet — tasks.md #12)
+├── jobbot/
+│   ├── __main__.py          # CLI entry
+│   ├── app.py               # Thin-ish orchestration for Telegram/workspace/actions
+│   ├── budget.py            # OpenAI spend gate
+│   ├── config.py            # Settings, source/profile loading, safe path defaults
+│   ├── coordinators.py      # Discovery/tuning file-contract writers and approval helpers
+│   ├── database.py          # SQLite schema, migrations, dedupe, audit tables
+│   ├── llm.py               # OpenAI cover-note client only
+│   ├── logging_setup.py     # JSON logging + secret masking
+│   ├── models.py            # Dataclasses
+│   ├── scoring.py           # Deterministic rule interpreter
+│   ├── sources.py           # Collectors + safe fetch/IMAP UID handling
+│   └── telegram.py          # Telegram client, keyboards, callback parser
 ├── config/
-│   ├── sources.json              # Public sources (manual + agent-discovered after #13)
-│   ├── profile.json              # Optional structured profile overrides
-│   ├── jobbot.json               # Budgets, model, digest size
-│   └── scoring.json              # NOT YET — will hold the rule DSL (tasks.md #6)
+│   ├── jobbot.json          # Budgets, model, rate limits
+│   ├── profile.example.json # Safe structured profile template
+│   ├── scoring.json         # Active scoring DSL
+│   └── sources.json         # Source registry
 ├── input/
-│   ├── profile.md                # Free-text job profile description (primary input per spec §6.1)
-│   └── cv.md                     # Optional CV (text). Cover-note context only (tasks.md #27)
-├── data/
-│   └── jobs.sqlite               # Local state (gitignored)
-├── docs/
-│   └── OPENCLAW_DOCKER_APPROVAL_STEPS.md
-├── tests/                        # 7 unit tests (none cover app.py — tasks.md #33)
-├── docker-compose.yml            # Two services; SHARED VOLUME MISSING — tasks.md #1
-├── Dockerfile                    # No HEALTHCHECK — tasks.md #31
-├── pyproject.toml                # pytest config only; no linter — tasks.md #47
-├── OPENCLAW_JOB_SEARCH_SPEC.md   # The spec
-├── tasks.md                      # The work list
-├── README.md                     # User docs
-├── AGENTS.md                     # This file
-└── CLAUDE.md                     # Pointer to AGENTS.md
+│   ├── profile.example.md   # Safe profile-description template
+│   └── cv.example.md        # Safe CV-context template
+├── openclaw/
+│   └── JOB_SEARCH_AGENT_PROMPT.md
+├── tests/
+├── Dockerfile
+├── docker-compose.yml
+├── OPENCLAW_JOB_SEARCH_SPEC.md
+├── tasks.md
+├── README.md
+├── AGENTS.md
+└── CLAUDE.md
+```
+
+Private local files are ignored:
+
+```text
+.env
+data/
+config/profile.local.json
+input/profile.local.md
+input/cv.local.md
+openclaw/config/
+openclaw/workspace/
 ```
 
 ## Conventions
 
-- **Python ≥ 3.9. Stdlib only.** No `requests`, no `feedparser`, no `python-telegram-bot`, no `openai`. Tradeoff: more boilerplate, but tiny image, zero supply-chain surface, fast cold start. Don't add a dependency without an explicit ask.
-- **No comments unless the WHY is non-obvious.** Don't restate what the code does. Don't reference issues/tasks/PRs in code comments. Don't write multi-line docstrings.
-- **Word-boundary matching only** (`\bterm\b`) for any rule applied to job text. Substring matching has caused real bugs (`intern` matching `international`, `us only` matching `trust only`).
-- **Never put secrets in URLs or logs.** Telegram bot token will leak via urllib's URL repr if uncaught — see tasks.md #35.
-- **Prefer editing existing files over creating new ones.** Don't add docs/READMEs/notes unless asked.
-- **Telegram messages are plain text** (no Markdown/HTML parser). Don't introduce parsing without changing every call site.
-- **All cross-container IO is file-based** in `/jobbot/workspace/{discovery,tuning}/`. No HTTP between containers, no shared SQLite.
+- **Python >= 3.9. Stdlib only.** Do not add dependencies without an explicit ask.
+- Use `rg` for searching.
+- Use `apply_patch` for manual edits.
+- No comments unless the WHY is non-obvious.
+- Telegram messages are plain text; do not introduce Markdown/HTML parsing casually.
+- Word-boundary matching only for job-text rules.
+- Never put secrets in URLs or logs.
+- All cross-container IO is file-based in `/jobbot/workspace/{discovery,tuning}/`. No HTTP between containers and no shared SQLite.
 
-## Build / test / run
+## Build / Test / Run
 
 ```bash
-# Tests (currently 7, all passing)
 python3 -m unittest discover -s tests
-# or
 python3 -m pytest tests/ -q
-
-# Local smoke (no Docker)
 python3 -m jobbot init
 python3 -m jobbot collect
 python3 -m jobbot digest
-
-# Docker
-docker compose build jobbot
-docker compose up -d jobbot
-docker compose --profile openclaw up -d openclaw-gateway   # optional today; mandatory once tasks.md #12 lands
-
-# Compose validity check
 docker compose --profile openclaw config --quiet
 ```
 
-There is **no lint step** today. There is **no CI** today.
-
-If Python bytecode compilation tries to write outside the sandbox, set `PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache`.
-
-## What the spec says vs. what is implemented
-
-This is the high-trust summary. For full priority/acceptance/impact, read [`tasks.md`](tasks.md).
-
-### Architecture
-
-| Spec | Implementation |
-|---|---|
-| Shared workspace volume between jobbot and openclaw containers | **Missing.** The two services share zero volumes. |
-| OpenClaw container runs an agent runtime (file watch + Codex client + validator tools) | **Not built.** The container runs the stock OpenClaw image with no app code. |
-| File-based contract: `discovery/{request,status,response}-<ts>.json`, `tuning/{request,status,response}-<ts>.json` | **Not built.** |
-| jobbot's `serve` is a Telegram-poll-only loop | jobbot's `serve` is a 4-hour collection cron. **Wrong shape.** |
-
-### Telegram
-
-| Spec | Implementation |
-|---|---|
-| Per-job buttons: Irrelevant / Snooze / Cover note / Applied | ✅ |
-| Bot-level buttons: `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` | **None of them.** Callback parser only handles `job:*`. |
-| Approval callbacks: `disc:approve:<sid>:<idx>`, `disc:reject:<sid>`, `tune:apply:<sid>`, `tune:reject:<sid>` | **None.** |
-| Cover-note budget override via `[Override once][Cancel]` | **None.** Silently falls back to template. |
-| Follow-up prompts (Why irrelevant? / Where applied? / Tone?) | **None.** Action keyword is the only signal captured. |
-
-### Scoring
-
-| Spec | Implementation |
-|---|---|
-| Rules in `config/scoring.json` interpreted by a fixed Python interpreter | **No file. Hardcoded scoring.** |
-| Six rule kinds: `match_any_word`, `match_all_word`, `hard_reject_word`, `field_equals`, `numeric_at_least`, `feedback_similarity` | **None.** |
-| Word-boundary matching | **No.** Uses substring; produces false hard-rejects. |
-| Algorithm-update flow: write request → OpenClaw+Codex propose → schema-validate → shadow-test → user approve → archive previous version | **None.** |
-| `scoring_versions` audit table | **No.** |
-
-### Sources
-
-| Spec | Implementation |
-|---|---|
-| `Get more jobs` triggers on-demand collection with rate limit | **Cron-driven.** No button. |
-| Cross-source dedupe (same canonical URL/title/company across sources) | **Per-source only.** |
-| `digest_log` table → no re-spam guarantee | **Missing table.** Same jobs re-shown every cycle. |
-| `Update sources` flow: jobbot ↔ OpenClaw ↔ Codex with per-candidate validation | **Single direct OpenAI API call.** Returns a markdown table; no validation; no approval flow; no writes to `sources.json`. |
-| `discovery_runs` audit table | **No.** |
-| Source lifecycle: `active`/`test`/`disabled` with auto-promotion | **Boolean `enabled` only.** No probation. |
-| Per-IMAP-source filter via `query` field (e.g. djinni vs LinkedIn) | **No.** Single global IMAP folder. |
-
-### Profile / CV
-
-| Spec | Implementation |
-|---|---|
-| Primary: free-text `input/profile.md`; parsed for target_titles + positive_keywords + exclusions | Reads file as opaque text blob; user must hand-author `config/profile.json`. |
-| Optional: `input/cv.md` — used only for cover-note context | **No `cv.md` distinction.** `profile.md` doubles as CV. |
-
-### LLM cost
-
-| Spec | Implementation |
-|---|---|
-| Codex (subscription) for discovery + tuning; OpenAI API only for cover notes | **Only OpenAI API client exists.** No Codex client. |
-| Default model is real | Default is `gpt-5.4-nano` — does not exist; all calls 400; fallback template silently. |
-| Actual token usage from response, not estimates | Estimates tokens from `len(text)/4`. |
-| Cover-note budget override prompt | Silent template fallback. |
-| `Usage` button surfaces daily/monthly spend + counts | `python -m jobbot usage` CLI only. |
-
-### Schema
-
-| Spec | Implementation |
-|---|---|
-| Tables: `candidate_profile`, `sources`, `source_runs`, `jobs`, `job_scores`, `job_feedback`, `drafts`, `usage_log`, `discovery_runs`, `scoring_versions`, `digest_log`, `rate_limits` | Has the first 7 + `usage_log` + an unused `experiments` table. **The four new audit/state tables are missing.** |
-
-### Safety
-
-| Spec | Implementation |
-|---|---|
-| No browser cookies / no auto-apply / no recruiter messaging | ✅ |
-| Narrow Docker mounts | ✅ for jobbot. **Shared workspace volume missing.** |
-| `cap_drop: ALL`, `no-new-privileges` | ✅ |
-| `mem_limit`/`cpus`/`read_only` rootfs | ❌ |
-| `HEALTHCHECK` | ❌ |
-| Scheme allowlist + private-IP rejection in HTTP fetcher (SSRF defense) | ❌ |
-
-## Non-negotiables (do not weaken)
-
-- No logged-in LinkedIn/Wellfound browser automation. Email alerts only.
-- No mounting browser cookies, real browser profiles, the host home directory, SSH keys, or `/var/run/docker.sock`.
-- No auto-apply. The user applies manually and clicks `Applied`.
-- No outbound recruiter messaging or email-send capability.
-- No bypassing the OpenAI budget gate. Cover notes only run inside the budget envelope or with explicit user override per request.
-- No silent edits to `config/sources.json` or `config/scoring.json` — every agent-proposed change goes through a Telegram approval click.
-- No committing real CV/profile data, API keys, Telegram tokens, IMAP credentials, SQLite databases, or generated drafts.
-
-## How to extend
-
-### Add a manual source
-
-1. Edit [`config/sources.json`](config/sources.json). Schema today:
-   ```json
-   {
-     "id": "unique-id",
-     "name": "Display Name",
-     "type": "rss" | "remotive" | "remoteok" | "arbeitnow" | "json_api" | "imap",
-     "url": "https://...",
-     "enabled": true,
-     "risk_level": "low",
-     "poll_frequency_minutes": 240,
-     "headers": {},
-     "query": null
-   }
-   ```
-2. Restart the bot. The source registers on next `init` / `collect`.
-
-### Add an email source (e.g. djinni.co)
-
-**Today:** only one IMAP source supported (single folder). Set up a Gmail label `job-alerts`, route djinni alerts there with a Gmail filter (`from:no-reply@djinni.co`), enable the `email-job-alerts` row in `sources.json`. The bot reads everything in the folder.
-
-**After tasks.md #17 lands:** add a separate IMAP source row per sender, each with its own `query` field holding an IMAP SEARCH expression (`FROM "no-reply@djinni.co"`). djinni and LinkedIn become independent sources with independent stats.
-
-### Add a new collector type
-
-1. New function in [`jobbot/sources.py`](jobbot/sources.py) shaped like `collect_remotive`, returning `List[Job]`.
-2. Wire into [`collect_from_source`](jobbot/sources.py:82) dispatch.
-3. Add a unit test in `tests/test_sources.py` with a mocked `fetch_text` and a fixture payload.
-
-### Touch the database schema
-
-Today: add `create table if not exists ...` to [`init_schema`](jobbot/database.py:21). For new columns, add an `alter table` guarded by a try/except (no migration framework). After tasks.md #42 lands: register a new version function.
-
-### Touch scoring
-
-Today: edit [`jobbot/scoring.py`](jobbot/scoring.py) directly. After tasks.md #6 lands: edit `config/scoring.json` and the interpreter handles it; the agent flow can also propose changes via `Tune scoring`.
-
-## Things to refuse / ask before doing
-
-- **Don't add a Python dependency** without checking with the user. The stdlib-only constraint is intentional.
-- **Don't add a cron / scheduler.** The on-demand model is a deliberate spec choice.
-- **Don't add an HTTP API between containers.** File-based contract on the shared volume only.
-- **Don't add per-job LLM scoring.** Per-job is deterministic; LLM updates the rules instead.
-- **Don't auto-apply, auto-message, or auto-send email.** Hard product constraint.
-- **Don't mount browser profiles, host home, or `/var/run/docker.sock`.** Hard safety constraint.
-- **Don't `git add data/`** — contains personal job-search history.
-
-## Open questions worth asking the user before acting
-
-- The CV ingestion task (tasks.md #49) needs PDF/DOCX libs — adding `pdftotext` (binary) or `pypdf` (Python). Stdlib-only constraint conflicts. Ask first.
-- Codex client integration (tasks.md #12) requires picking an SDK / subscription mode. Ask the user which Codex they have (ChatGPT subscription, GitHub Copilot, etc.) before scaffolding.
-- The shared-volume implementation needs a polling vs file-watch decision. Polling is dependency-free; file-watch needs `inotify` (Linux only) or a small library. Ask before building.
-
-## Validation before declaring done
+If bytecode writes hit the sandbox:
 
 ```bash
-python3 -m unittest discover -s tests        # tests pass
-docker compose --profile openclaw config --quiet  # compose is valid
-git diff --check                              # no whitespace/conflict markers
-git status -sb                                # no accidental tracked files (data/, .env)
+PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest discover -s tests
+```
+
+Docker:
+
+```bash
+docker compose build jobbot
+docker compose run --rm jobbot python -m jobbot init
+docker compose up -d jobbot
+docker compose --profile openclaw up -d openclaw-gateway
+```
+
+## Implemented Vs. Spec
+
+| Area | Current State |
+|---|---|
+| Shared workspace | Implemented in compose and created by `jobbot` startup |
+| On-demand collection | Implemented; `serve` polls Telegram/workspace only |
+| Digest header buttons | Implemented: `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` |
+| Per-job buttons | Implemented: `Irrelevant`, `Remind me tomorrow`, `Give me cover note`, `Applied` |
+| Cross-source dedupe | Implemented via canonical URL + normalized company/title |
+| No re-spam | Implemented with `digest_log`, except snoozed jobs due for resend |
+| Scoring DSL | Implemented in `config/scoring.json` + `jobbot/scoring.py` |
+| Word-boundary matching | Implemented with tests for known false positives |
+| Discovery request/approval | `jobbot` side implemented; requires OpenClaw/Codex response file |
+| Tuning request/shadow/apply | `jobbot` side implemented; requires OpenClaw/Codex response file |
+| OpenClaw worker runtime | Not implemented here; do not fake it without a real Codex auth/runtime decision |
+| IMAP source filters | Implemented via per-source `query` and UID high-water |
+| Source lifecycle | Implemented: `active`, `test`, `disabled`; `test` promotes on cover note/applied |
+| Budget override | Implemented for cover notes |
+| Structured logging | Implemented as JSON logs with secret masking |
+| Docker hardening | Implemented for jobbot; OpenClaw has resource caps and dropped net admin/raw caps |
+
+## Source And Scoring Files
+
+Manual source schema:
+
+```json
+{
+  "id": "unique-id",
+  "name": "Display Name",
+  "type": "rss",
+  "url": "https://example.com/jobs.rss",
+  "status": "active",
+  "created_by": "user",
+  "risk_level": "low",
+  "headers": {},
+  "query": null
+}
+```
+
+Scoring rules belong in `config/scoring.json`, not hardcoded Python. The interpreter supports:
+
+- `match_any_word`
+- `match_all_word`
+- `hard_reject_word`
+- `field_equals`
+- `numeric_at_least`
+- `feedback_similarity`
+
+## Non-Negotiables
+
+- No logged-in LinkedIn/Wellfound browser automation. Email alerts only.
+- No auto-apply, recruiter messaging, or outbound email.
+- No browser profiles, host home, SSH keys, or `/var/run/docker.sock` mounts.
+- No silent edits to `config/sources.json` or `config/scoring.json`; agent proposals require Telegram approval.
+- No per-job LLM scoring.
+- No cron/scheduler unless the user explicitly asks for the opt-in future mode.
+- Do not commit `.env`, `data/`, local profile/CV files, generated drafts, API keys, or workspace request/response files.
+
+## Ask Before Doing
+
+- Adding any Python dependency.
+- Implementing PDF/DOCX CV ingestion, because it conflicts with stdlib-only.
+- Wiring a real Codex/OpenClaw worker, because the auth/subscription mechanism and runtime contract need an explicit choice.
+- Adding browser automation, even for public pages.
+
+## Validation Before Declaring Done
+
+```bash
+python3 -m unittest discover -s tests
+docker compose --profile openclaw config --quiet
+git diff --check
+git status -sb
 ```

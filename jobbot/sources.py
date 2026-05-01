@@ -1,18 +1,30 @@
 import email
 import email.header
+import ipaddress
 import imaplib
 import json
+import logging
 import os
 import re
+import socket
+import time
 import urllib.error
 import urllib.request
+import urllib.robotparser
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Optional
+from urllib.parse import urljoin, urlparse
 
+from .logging_setup import log_context
 from .models import Job, SourceConfig
+
+LOGGER = logging.getLogger(__name__)
+MAX_BYTES = int(os.getenv("JOBBOT_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
+CHECK_ROBOTS = os.getenv("JOBBOT_CHECK_ROBOTS", "0").strip().lower() in ("1", "true", "yes", "on")
+HOST_LAST_FETCH: Dict[str, float] = {}
 
 
 DEFAULT_HEADERS = {
@@ -39,6 +51,31 @@ class HTMLTextExtractor(HTMLParser):
         return " ".join(self.parts)
 
 
+class HTMLLinkExtractor(HTMLParser):
+    def __init__(self):
+        HTMLParser.__init__(self)
+        self.links = []
+        self._href = ""
+        self._text = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() == "a":
+            attrs_dict = dict(attrs)
+            self._href = attrs_dict.get("href", "")
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self._href:
+            text = " ".join(" ".join(self._text).split())
+            self.links.append((self._href, text))
+            self._href = ""
+            self._text = []
+
+
 def strip_html(value: str) -> str:
     parser = HTMLTextExtractor()
     try:
@@ -51,7 +88,13 @@ def strip_html(value: str) -> str:
 def parse_date(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
-    value = value.strip()
+    value = str(value).strip()
+    if value.isdigit() and len(value) >= 10:
+        timestamp = int(value[:10])
+        try:
+            return datetime.utcfromtimestamp(timestamp).replace(microsecond=0).isoformat() + "Z"
+        except (OverflowError, OSError, ValueError):
+            pass
     try:
         parsed = parsedate_to_datetime(value)
         return parsed.replace(microsecond=0).isoformat()
@@ -65,14 +108,24 @@ def parse_date(value: Optional[str]) -> Optional[str]:
 
 
 def fetch_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> str:
+    validate_safe_url(url)
+    wait_for_host_rate_limit(url)
+    if CHECK_ROBOTS and not robots_allowed(url):
+        raise SourceError("Robots.txt disallows %s" % url)
     merged_headers = dict(DEFAULT_HEADERS)
     if headers:
         merged_headers.update(headers)
     request = urllib.request.Request(url, headers=merged_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            final_url = response.geturl()
+            validate_safe_url(final_url)
             charset = response.headers.get_content_charset() or "utf-8"
-            return response.read().decode(charset, errors="replace")
+            body = response.read(MAX_BYTES + 1)
+            if len(body) > MAX_BYTES:
+                raise SourceError("Response too large for %s" % url)
+            log_context(LOGGER, logging.DEBUG, "source_fetch_ok", url=url, final_url=final_url, bytes=len(body))
+            return body.decode(charset, errors="replace")
     except urllib.error.HTTPError as exc:
         raise SourceError("HTTP %s fetching %s" % (exc.code, url))
     except urllib.error.URLError as exc:
@@ -91,7 +144,11 @@ def collect_from_source(source: SourceConfig) -> List[Job]:
         return collect_arbeitnow(source)
     if source_type == "json_api":
         return collect_generic_json(source)
-    if source_type == "imap":
+    if source_type == "ats":
+        return collect_ats(source)
+    if source_type == "community":
+        return collect_link_page(source)
+    if source_type in ("imap", "email_alert"):
         return collect_imap_alerts(source)
     raise SourceError("Unsupported source type: %s" % source.type)
 
@@ -237,6 +294,140 @@ def collect_generic_json(source: SourceConfig) -> List[Job]:
     return [job for job in jobs if job.title and job.url]
 
 
+def collect_ats(source: SourceConfig) -> List[Job]:
+    parsed = urlparse(source.url)
+    host = parsed.netloc.lower()
+    parts = [part for part in parsed.path.split("/") if part]
+    if "greenhouse.io" in host and parts:
+        return collect_greenhouse(source, parts[0])
+    if "lever.co" in host and parts:
+        return collect_lever(source, parts[0])
+    if "ashbyhq.com" in host and parts:
+        return collect_ashby(source, parts[0])
+    return collect_link_page(source)
+
+
+def collect_greenhouse(source: SourceConfig, board: str) -> List[Job]:
+    url = "https://boards-api.greenhouse.io/v1/boards/%s/jobs?content=true" % board
+    payload = json.loads(fetch_text(url, source.headers))
+    jobs = []
+    for raw in payload.get("jobs", []):
+        location = raw.get("location") or {}
+        jobs.append(
+            Job(
+                source_id=source.id,
+                source_name=source.name,
+                external_id=str(raw.get("id") or raw.get("absolute_url") or ""),
+                url=raw.get("absolute_url") or "",
+                title=raw.get("title") or "",
+                company=source.name,
+                location=location.get("name", "") if isinstance(location, dict) else str(location or ""),
+                remote_policy=infer_remote_policy(json.dumps(raw)[:2000]),
+                description=strip_html(raw.get("content") or ""),
+                posted_at=parse_date(raw.get("updated_at")),
+            )
+        )
+    return [job for job in jobs if job.title and job.url]
+
+
+def collect_lever(source: SourceConfig, company: str) -> List[Job]:
+    url = "https://api.lever.co/v0/postings/%s?mode=json" % company
+    payload = json.loads(fetch_text(url, source.headers))
+    rows = payload if isinstance(payload, list) else []
+    jobs = []
+    for raw in rows:
+        categories = raw.get("categories") or {}
+        jobs.append(
+            Job(
+                source_id=source.id,
+                source_name=source.name,
+                external_id=str(raw.get("id") or raw.get("hostedUrl") or ""),
+                url=raw.get("hostedUrl") or raw.get("applyUrl") or "",
+                title=raw.get("text") or "",
+                company=source.name,
+                location=categories.get("location", ""),
+                remote_policy=infer_remote_policy(json.dumps(raw)[:2000]),
+                description=strip_html(raw.get("descriptionPlain") or raw.get("description") or ""),
+                posted_at=parse_date(raw.get("createdAt")),
+            )
+        )
+    return [job for job in jobs if job.title and job.url]
+
+
+def collect_ashby(source: SourceConfig, organization: str) -> List[Job]:
+    url = "https://api.ashbyhq.com/posting-api/job-board/%s" % organization
+    payload = json.loads(fetch_text(url, source.headers))
+    jobs = []
+    for raw in payload.get("jobs", []):
+        jobs.append(
+            Job(
+                source_id=source.id,
+                source_name=source.name,
+                external_id=str(raw.get("id") or raw.get("jobUrl") or ""),
+                url=raw.get("jobUrl") or raw.get("applyUrl") or "",
+                title=raw.get("title") or "",
+                company=source.name,
+                location=raw.get("locationName") or "",
+                remote_policy=infer_remote_policy(json.dumps(raw)[:2000]),
+                description=strip_html(raw.get("descriptionHtml") or raw.get("description") or ""),
+                posted_at=parse_date(raw.get("publishedAt") or raw.get("updatedAt")),
+            )
+        )
+    return [job for job in jobs if job.title and job.url]
+
+
+def collect_link_page(source: SourceConfig) -> List[Job]:
+    html = fetch_text(source.url, source.headers)
+    parser = HTMLLinkExtractor()
+    parser.feed(html)
+    jobs = []
+    seen = set()
+    for href, text in parser.links:
+        title = clean_title(text)
+        if not title or not looks_like_job_link(title, href):
+            continue
+        url = urljoin(source.url, href)
+        if url in seen:
+            continue
+        seen.add(url)
+        jobs.append(
+            Job(
+                source_id=source.id,
+                source_name=source.name,
+                external_id=url,
+                url=url,
+                title=title[:180],
+                company=infer_company(title, html[:2000]) if source.type == "community" else source.name,
+                location=infer_location(title),
+                remote_policy=infer_remote_policy(title),
+                description=strip_html(title),
+            )
+        )
+        if len(jobs) >= 30:
+            break
+    return jobs
+
+
+def looks_like_job_link(title: str, href: str) -> bool:
+    text = "%s %s" % (title.lower(), href.lower())
+    return any(
+        token in text
+        for token in (
+            "job",
+            "career",
+            "hiring",
+            "product",
+            "engineer",
+            "manager",
+            "designer",
+            "developer",
+            "remote",
+            "ai",
+            "llm",
+        )
+    )
+
+
 def collect_imap_alerts(source: SourceConfig) -> List[Job]:
     host = os.getenv("EMAIL_IMAP_HOST", "")
     username = os.getenv("EMAIL_IMAP_USERNAME", "")
@@ -249,16 +440,26 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
     try:
         mailbox.login(username, password)
         mailbox.select(folder, readonly=True)
-        status, ids = mailbox.search(None, "UNSEEN")
+        search_args = ["UID", "SEARCH", None, "UID", "%s:*" % (int(source.imap_last_uid or 0) + 1)]
+        if source.query:
+            search_args.extend(parse_imap_query(source.query))
+        status, ids = mailbox.uid(*search_args[1:])
         if status != "OK":
             return []
         jobs = []
+        max_uid = source.imap_last_uid or 0
         for message_id in ids[0].split()[:50]:
-            status, data = mailbox.fetch(message_id, "(RFC822)")
+            try:
+                uid_int = int(message_id)
+                max_uid = max(max_uid, uid_int)
+            except ValueError:
+                pass
+            status, data = mailbox.uid("FETCH", message_id, "(RFC822)")
             if status != "OK" or not data:
                 continue
             message = email.message_from_bytes(data[0][1])
             jobs.extend(jobs_from_email(source, message))
+        source.last_seen_uid = max_uid
         return jobs
     finally:
         try:
@@ -383,3 +584,52 @@ def parse_int(value) -> Optional[int]:
     if not match:
         return None
     return int(match.group(0).replace(",", ""))
+
+
+def validate_safe_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise SourceError("Unsafe URL scheme: %s" % url)
+    host = parsed.hostname
+    if not host:
+        raise SourceError("Missing URL host: %s" % url)
+    try:
+        addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise SourceError("DNS error for %s: %s" % (host, exc))
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise SourceError("Unsafe resolved IP for %s: %s" % (host, ip))
+
+
+def wait_for_host_rate_limit(url: str) -> None:
+    host = urlparse(url).hostname or ""
+    if not host:
+        return
+    now = time.time()
+    last = HOST_LAST_FETCH.get(host, 0)
+    delay = 2.0 - (now - last)
+    if delay > 0:
+        time.sleep(delay)
+    HOST_LAST_FETCH[host] = time.time()
+
+
+def robots_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    robots_url = urljoin("%s://%s" % (parsed.scheme, parsed.netloc), "/robots.txt")
+    parser = urllib.robotparser.RobotFileParser()
+    parser.set_url(robots_url)
+    try:
+        parser.read()
+    except Exception:
+        return True
+    return parser.can_fetch(DEFAULT_HEADERS["User-Agent"], url)
+
+
+def parse_imap_query(query: str) -> List[str]:
+    if not query:
+        return []
+    # Keep this deliberately small. Operators like: FROM "x", SUBJECT "jobs".
+    tokens = re.findall(r'"[^"]+"|\S+', query)
+    return [token.strip() for token in tokens if token.strip()]

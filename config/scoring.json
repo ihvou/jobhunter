@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "generated_at": "2026-05-01T00:00:00Z",
+  "generated_by": "baseline",
+  "previous_version": null,
+  "rules": [
+    {
+      "id": "title_product_role",
+      "kind": "match_any_word",
+      "fields": ["title"],
+      "patterns": ["product manager", "product lead", "product owner", "head of product", "product builder", "product engineer", "ai engineer", "llm engineer"],
+      "weight": 25
+    },
+    {
+      "id": "ai_focus",
+      "kind": "match_any_word",
+      "fields": ["title", "description"],
+      "patterns": ["llm", "ai automation", "claude", "codex", "agents", "ai product", "automation"],
+      "weight": 15
+    },
+    {
+      "id": "builder_strengths",
+      "kind": "match_any_word",
+      "fields": ["title", "description"],
+      "patterns": ["prototype", "mvp", "product discovery", "product analytics", "stakeholder"],
+      "weight": 15
+    },
+    {
+      "id": "remote_friendly",
+      "kind": "field_equals",
+      "field": "remote_policy",
+      "value": "remote",
+      "weight": 10
+    },
+    {
+      "id": "salary_floor",
+      "kind": "numeric_at_least",
+      "field": "salary_max",
+      "threshold": 1,
+      "weight": 0,
+      "hard_reject_below": false
+    },
+    {
+      "id": "profile_similarity",
+      "kind": "feedback_similarity",
+      "fields": ["title", "description", "company"],
+      "patterns": ["product", "ai", "automation", "prototype", "mvp", "analytics", "stakeholder"],
+      "min_hits": 3,
+      "weight": 20
+    },
+    {
+      "id": "exclude_seniority",
+      "kind": "hard_reject_word",
+      "fields": ["title", "description"],
+      "patterns": ["intern", "internship", "junior", "graduate program"]
+    },
+    {
+      "id": "exclude_industries",
+      "kind": "hard_reject_word",
+      "fields": ["title", "description", "company"],
+      "patterns": ["gambling", "casino", "adult", "defense", "weapons"]
+    },
+    {
+      "id": "exclude_location_constraints",
+      "kind": "hard_reject_word",
+      "fields": ["title", "description", "location"],
+      "patterns": ["us only", "u.s. only", "security clearance"]
+    }
+  ],
+  "thresholds": {
+    "min_show_score": 40,
+    "hard_reject_floor": 0
+  },
+  "fallback": "baseline_v1"
+}

@@ -9,16 +9,24 @@ class SourceConfig:
     name: str
     type: str
     url: str
-    enabled: bool = True
+    status: str = "active"
     risk_level: str = "low"
     poll_frequency_minutes: int = 360
     headers: Dict[str, str] = field(default_factory=dict)
     query: Optional[str] = None
+    created_by: str = "user"
+    imap_last_uid: int = 0
+    last_seen_uid: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.status != "disabled"
 
 
 @dataclass
 class UserProfile:
     raw_text: str
+    cv_text: str = ""
     target_titles: List[str] = field(default_factory=list)
     positive_keywords: List[str] = field(default_factory=list)
     negative_keywords: List[str] = field(default_factory=list)
@@ -55,18 +63,26 @@ class ScoreResult:
     reasons: List[str] = field(default_factory=list)
     concerns: List[str] = field(default_factory=list)
     breakdown: Dict[str, int] = field(default_factory=dict)
+    fired_rules: List[str] = field(default_factory=list)
 
 
 @dataclass
 class TelegramAction:
+    scope: str
     action: str
-    job_id: str
+    target_id: Optional[str] = None
+    index: Optional[int] = None
     callback_id: Optional[str] = None
     chat_id: Optional[int] = None
     message_id: Optional[int] = None
     raw: Dict = field(default_factory=dict)
 
+    @property
+    def job_id(self) -> Optional[str]:
+        if self.scope in ("job", "cover"):
+            return self.target_id
+        return None
+
 
 def utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-

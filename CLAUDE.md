@@ -16,7 +16,7 @@ Read [`AGENTS.md`](AGENTS.md) first — it is the canonical project contract.
 | [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPEC.md) | The intended product |
 | [`tasks.md`](tasks.md) | The honest gap list — every work item, prioritized |
 | [`AGENTS.md`](AGENTS.md) | Repo layout, conventions, what's built vs. specified, how to extend |
-| [`README.md`](README.md) | User docs (parts are stale; trust spec + tasks.md when in conflict) |
+| [`README.md`](README.md) | User setup and daily operation |
 
 ## Hard constraints
 
@@ -28,6 +28,7 @@ Read [`AGENTS.md`](AGENTS.md) first — it is the canonical project contract.
 - No comments unless the WHY is non-obvious. No multi-line docstrings.
 - Word-boundary matching only for any rule applied to job text.
 - Don't commit `.env`, `data/`, or anything with real CV/profile data.
+- Don't fake the OpenClaw/Codex worker runtime. The jobbot file contract is implemented; a real worker needs an explicit Codex auth/runtime decision.
 
 ## Validation before finishing
 

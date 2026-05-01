@@ -1,23 +1,25 @@
 {
   "target_titles": [
-    "senior software engineer",
-    "senior full stack engineer",
-    "ai engineer",
-    "llm engineer",
-    "founding engineer",
+    "product manager",
+    "product lead",
+    "product owner",
+    "head of product",
+    "product builder",
     "product engineer"
   ],
   "positive_keywords": [
-    "python",
-    "typescript",
-    "react",
-    "node",
     "llm",
+    "codex",
+    "claude",
     "agents",
     "ai product",
-    "backend",
-    "full stack",
-    "startup"
+    "ai automation",
+    "prototype",
+    "mvp",
+    "product analytics",
+    "feature discovery",
+    "business process automation",
+    "multi-stakeholder"
   ],
   "negative_keywords": [
     "junior",
@@ -48,4 +50,3 @@
   "salary_floor": null,
   "currency": "USD"
 }
-

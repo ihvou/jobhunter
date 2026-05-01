@@ -11,8 +11,9 @@ def main() -> None:
     subparsers.add_parser("digest", help="Send current Telegram digest")
     subparsers.add_parser("run-once", help="Initialize, collect, score, and send one digest")
     subparsers.add_parser("telegram-poll", help="Poll Telegram callbacks once")
-    subparsers.add_parser("discover-sources", help="Ask the LLM for source-discovery recommendations")
-    subparsers.add_parser("serve", help="Run collection and Telegram polling loop")
+    subparsers.add_parser("discover-sources", help="Write a source-discovery request to the shared workspace")
+    subparsers.add_parser("tune-scoring", help="Write a scoring tuning request to the shared workspace")
+    subparsers.add_parser("serve", help="Run Telegram and workspace polling loop")
     subparsers.add_parser("usage", help="Print local usage summary")
     args = parser.parse_args()
 
@@ -33,6 +34,8 @@ def main() -> None:
         bot.poll_telegram_once()
     elif args.command == "discover-sources":
         bot.discover_sources()
+    elif args.command == "tune-scoring":
+        bot.tune_scoring()
     elif args.command == "serve":
         bot.serve()
     elif args.command == "usage":
@@ -43,4 +46,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

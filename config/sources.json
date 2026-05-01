@@ -5,6 +5,8 @@
     "type": "remotive",
     "url": "https://remotive.com/api/remote-jobs?category=software-dev",
     "enabled": true,
+    "status": "active",
+    "created_by": "user",
     "risk_level": "low",
     "poll_frequency_minutes": 240
   },
@@ -14,6 +16,8 @@
     "type": "remoteok",
     "url": "https://remoteok.com/api",
     "enabled": true,
+    "status": "active",
+    "created_by": "user",
     "risk_level": "low",
     "poll_frequency_minutes": 360
   },
@@ -23,6 +27,8 @@
     "type": "arbeitnow",
     "url": "https://www.arbeitnow.com/api/job-board-api",
     "enabled": true,
+    "status": "active",
+    "created_by": "user",
     "risk_level": "low",
     "poll_frequency_minutes": 360
   },
@@ -32,6 +38,8 @@
     "type": "rss",
     "url": "https://weworkremotely.com/remote-jobs.rss",
     "enabled": true,
+    "status": "active",
+    "created_by": "user",
     "risk_level": "low",
     "poll_frequency_minutes": 240
   },
@@ -41,6 +49,8 @@
     "type": "imap",
     "url": "imap://job-alerts",
     "enabled": false,
+    "status": "disabled",
+    "created_by": "user",
     "risk_level": "low",
     "poll_frequency_minutes": 360
   }

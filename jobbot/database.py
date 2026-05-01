@@ -1,11 +1,18 @@
 import hashlib
 import json
+import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
+
+LOGGER = logging.getLogger(__name__)
+LATEST_SCHEMA_VERSION = 2
 
 
 class Database:
@@ -13,122 +20,53 @@ class Database:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connection(self):
         conn = sqlite3.connect(str(self.path))
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     def init_schema(self) -> None:
-        with self.connect() as conn:
-            conn.executescript(
-                """
-                create table if not exists sources (
-                    id text primary key,
-                    name text not null,
-                    type text not null,
-                    url text not null,
-                    risk_level text not null,
-                    poll_frequency_minutes integer not null,
-                    enabled integer not null,
-                    score integer not null default 50,
-                    created_by text not null default 'seed',
-                    last_run_at text
-                );
-
-                create table if not exists source_runs (
-                    id integer primary key autoincrement,
-                    source_id text not null,
-                    started_at text not null,
-                    finished_at text,
-                    fetched_count integer not null default 0,
-                    inserted_count integer not null default 0,
-                    error text
-                );
-
-                create table if not exists jobs (
-                    id text primary key,
-                    source_id text not null,
-                    source_name text not null,
-                    external_id text,
-                    url text not null,
-                    title text not null,
-                    company text not null,
-                    location text,
-                    remote_policy text,
-                    salary_min integer,
-                    salary_max integer,
-                    currency text,
-                    description text,
-                    posted_at text,
-                    first_seen_at text not null,
-                    last_seen_at text not null,
-                    last_digest_at text,
-                    snoozed_until text,
-                    status text not null default 'new'
-                );
-
-                create table if not exists job_scores (
-                    job_id text primary key,
-                    score integer not null,
-                    hard_reject integer not null,
-                    reasons_json text not null,
-                    concerns_json text not null,
-                    breakdown_json text not null,
-                    scored_at text not null
-                );
-
-                create table if not exists job_feedback (
-                    id integer primary key autoincrement,
-                    job_id text not null,
-                    action text not null,
-                    details text,
-                    created_at text not null
-                );
-
-                create table if not exists drafts (
-                    id integer primary key autoincrement,
-                    job_id text not null,
-                    draft_type text not null,
-                    content text not null,
-                    created_at text not null
-                );
-
-                create table if not exists usage_log (
-                    id integer primary key autoincrement,
-                    task text not null,
-                    model text not null,
-                    input_tokens integer not null,
-                    output_tokens integer not null,
-                    estimated_cost_usd real not null,
-                    created_at text not null
-                );
-
-                create table if not exists experiments (
-                    id integer primary key autoincrement,
-                    source_id text,
-                    query text,
-                    status text not null,
-                    rationale text,
-                    created_at text not null
-                );
-                """
+        with self.connection() as conn:
+            conn.execute(
+                "create table if not exists schema_version (version integer primary key, applied_at text not null)"
             )
+            current = self.current_schema_version(conn)
+            if current < 1:
+                migrate_v1(conn)
+                set_schema_version(conn, 1)
+            if current < 2:
+                migrate_v2(conn)
+                set_schema_version(conn, 2)
+            trim_usage_logs(conn)
+            log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
+
+    def current_schema_version(self, conn) -> int:
+        row = conn.execute("select max(version) as version from schema_version").fetchone()
+        return int(row["version"] or 0)
 
     def upsert_sources(self, sources: Iterable[SourceConfig]) -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             for source in sources:
                 conn.execute(
                     """
                     insert into sources (
-                        id, name, type, url, risk_level, poll_frequency_minutes, enabled
-                    ) values (?, ?, ?, ?, ?, ?, ?)
+                        id, name, type, url, risk_level, poll_frequency_minutes,
+                        enabled, status, score, created_by, imap_last_uid
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, 50, ?, ?)
                     on conflict(id) do update set
                         name = excluded.name,
                         type = excluded.type,
                         url = excluded.url,
                         risk_level = excluded.risk_level,
                         poll_frequency_minutes = excluded.poll_frequency_minutes,
-                        enabled = excluded.enabled
+                        enabled = excluded.enabled,
+                        status = excluded.status,
+                        created_by = excluded.created_by
                     """,
                     (
                         source.id,
@@ -138,11 +76,42 @@ class Database:
                         source.risk_level,
                         source.poll_frequency_minutes,
                         1 if source.enabled else 0,
+                        source.status,
+                        source.created_by,
+                        source.imap_last_uid,
                     ),
                 )
 
+    def save_candidate_profile(self, raw_text: str, cv_text: str, parsed: Dict) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into candidate_profile (id, raw_text, cv_text, parsed_json, updated_at)
+                values (1, ?, ?, ?, ?)
+                on conflict(id) do update set
+                    raw_text = excluded.raw_text,
+                    cv_text = excluded.cv_text,
+                    parsed_json = excluded.parsed_json,
+                    updated_at = excluded.updated_at
+                """,
+                (raw_text, cv_text, json.dumps(parsed, sort_keys=True), utc_now_iso()),
+            )
+
+    def source_rows(self) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(conn.execute("select * from sources order by id"))
+
+    def source_imap_last_uid(self, source_id: str) -> int:
+        with self.connection() as conn:
+            row = conn.execute("select imap_last_uid from sources where id = ?", (source_id,)).fetchone()
+            return int(row["imap_last_uid"] or 0) if row else 0
+
+    def update_source_imap_uid(self, source_id: str, uid: int) -> None:
+        with self.connection() as conn:
+            conn.execute("update sources set imap_last_uid = max(coalesce(imap_last_uid, 0), ?) where id = ?", (uid, source_id))
+
     def start_source_run(self, source_id: str) -> int:
-        with self.connect() as conn:
+        with self.connection() as conn:
             cursor = conn.execute(
                 "insert into source_runs (source_id, started_at) values (?, ?)",
                 (source_id, utc_now_iso()),
@@ -157,7 +126,7 @@ class Database:
         inserted_count: int,
         error: Optional[str] = None,
     ) -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
                 update source_runs
@@ -166,26 +135,24 @@ class Database:
                 """,
                 (utc_now_iso(), fetched_count, inserted_count, error, run_id),
             )
-            conn.execute(
-                "update sources set last_run_at = ? where id = ?",
-                (utc_now_iso(), source_id),
-            )
+            conn.execute("update sources set last_run_at = ? where id = ?", (utc_now_iso(), source_id))
 
     def upsert_job(self, job: Job) -> Tuple[str, bool]:
         job_id = stable_job_id(job)
         now = utc_now_iso()
-        with self.connect() as conn:
+        with self.connection() as conn:
             existing = conn.execute("select id from jobs where id = ?", (job_id,)).fetchone()
             if existing:
                 conn.execute(
                     """
                     update jobs
                     set last_seen_at = ?,
+                        source_id = case when source_id = '' then ? else source_id end,
                         description = case when length(coalesce(description, '')) < length(coalesce(?, ''))
                                            then ? else description end
                     where id = ?
                     """,
-                    (now, job.description, job.description, job_id),
+                    (now, job.source_id, job.description, job.description, job_id),
                 )
                 return job_id, False
             conn.execute(
@@ -201,7 +168,7 @@ class Database:
                     job.source_id,
                     job.source_name,
                     job.external_id,
-                    job.url,
+                    canonicalize_url(job.url),
                     job.title,
                     job.company,
                     job.location,
@@ -218,19 +185,20 @@ class Database:
             return job_id, True
 
     def save_score(self, job_id: str, score: ScoreResult) -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
                 insert into job_scores (
                     job_id, score, hard_reject, reasons_json, concerns_json,
-                    breakdown_json, scored_at
-                ) values (?, ?, ?, ?, ?, ?, ?)
+                    breakdown_json, fired_rules_json, scored_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(job_id) do update set
                     score = excluded.score,
                     hard_reject = excluded.hard_reject,
                     reasons_json = excluded.reasons_json,
                     concerns_json = excluded.concerns_json,
                     breakdown_json = excluded.breakdown_json,
+                    fired_rules_json = excluded.fired_rules_json,
                     scored_at = excluded.scored_at
                 """,
                 (
@@ -240,28 +208,32 @@ class Database:
                     json.dumps(score.reasons),
                     json.dumps(score.concerns),
                     json.dumps(score.breakdown),
+                    json.dumps(score.fired_rules),
                     utc_now_iso(),
                 ),
             )
             if score.hard_reject:
-                conn.execute(
-                    "update jobs set status = 'rejected' where id = ? and status = 'new'",
-                    (job_id,),
-                )
+                conn.execute("update jobs set status = 'rejected' where id = ? and status = 'new'", (job_id,))
 
     def jobs_for_digest(self, limit: int) -> List[sqlite3.Row]:
         now = utc_now_iso()
-        with self.connect() as conn:
-            return list(
+        with self.connection() as conn:
+            rows = list(
                 conn.execute(
                     """
-                    select j.*, s.score, s.reasons_json, s.concerns_json
+                    select j.*, s.score, s.reasons_json, s.concerns_json, src.status as source_status
                     from jobs j
                     join job_scores s on s.job_id = j.id
+                    left join sources src on src.id = j.source_id
                     where s.hard_reject = 0
                       and (
                         j.status = 'new'
                         or (j.status = 'snoozed' and j.snoozed_until <= ?)
+                      )
+                      and not exists (
+                        select 1 from digest_log dl
+                        where dl.job_id = j.id
+                          and j.status != 'snoozed'
                       )
                     order by s.score desc, j.first_seen_at desc
                     limit ?
@@ -269,44 +241,64 @@ class Database:
                     (now, limit),
                 )
             )
+            return rows
 
-    def mark_digested(self, job_ids: List[str]) -> None:
+    def mark_digested(self, job_ids: List[str]) -> str:
+        digest_id = hashlib.sha256(("|".join(job_ids) + utc_now_iso()).encode("utf-8")).hexdigest()[:16]
         if not job_ids:
-            return
-        with self.connect() as conn:
+            return digest_id
+        with self.connection() as conn:
+            now = utc_now_iso()
             conn.executemany(
-                "update jobs set last_digest_at = ? where id = ?",
-                [(utc_now_iso(), job_id) for job_id in job_ids],
+                """
+                insert or ignore into digest_log (digest_id, sent_at, job_id)
+                values (?, ?, ?)
+                """,
+                [(digest_id, now, job_id) for job_id in job_ids],
             )
+            conn.executemany(
+                "update jobs set last_digest_at = ?, status = 'new', snoozed_until = null where id = ?",
+                [(now, job_id) for job_id in job_ids],
+            )
+        return digest_id
 
     def get_job(self, job_id: str) -> Optional[sqlite3.Row]:
-        with self.connect() as conn:
+        with self.connection() as conn:
             return conn.execute(
                 """
-                select j.*, s.score, s.reasons_json, s.concerns_json
+                select j.*, s.score, s.reasons_json, s.concerns_json, src.status as source_status
                 from jobs j
                 left join job_scores s on s.job_id = j.id
+                left join sources src on src.id = j.source_id
                 where j.id = ?
                 """,
                 (job_id,),
             ).fetchone()
 
     def update_job_status(self, job_id: str, status: str, snoozed_until: Optional[str] = None) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                "update jobs set status = ?, snoozed_until = ? where id = ?",
-                (status, snoozed_until, job_id),
-            )
+        with self.connection() as conn:
+            conn.execute("update jobs set status = ?, snoozed_until = ? where id = ?", (status, snoozed_until, job_id))
 
-    def add_feedback(self, job_id: str, action: str, details: Optional[str] = None) -> None:
-        with self.connect() as conn:
+    def feedback_exists(self, job_id: str, action: str) -> bool:
+        with self.connection() as conn:
+            row = conn.execute(
+                "select 1 from job_feedback where job_id = ? and action = ? limit 1",
+                (job_id, action),
+            ).fetchone()
+            return row is not None
+
+    def add_feedback(self, job_id: str, action: str, details: Optional[str] = None) -> bool:
+        if job_id != "__system__" and action in ("applied", "irrelevant") and self.feedback_exists(job_id, action):
+            return False
+        with self.connection() as conn:
             conn.execute(
                 "insert into job_feedback (job_id, action, details, created_at) values (?, ?, ?, ?)",
                 (job_id, action, details, utc_now_iso()),
             )
+            return True
 
     def save_draft(self, job_id: str, draft_type: str, content: str) -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.execute(
                 "insert into drafts (job_id, draft_type, content, created_at) values (?, ?, ?, ?)",
                 (job_id, draft_type, content, utc_now_iso()),
@@ -320,7 +312,7 @@ class Database:
         output_tokens: int,
         estimated_cost_usd: float,
     ) -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.execute(
                 """
                 insert into usage_log (
@@ -331,38 +323,62 @@ class Database:
             )
 
     def spend_since(self, since: datetime) -> float:
-        with self.connect() as conn:
+        with self.connection() as conn:
             row = conn.execute(
                 "select coalesce(sum(estimated_cost_usd), 0) as total from usage_log where created_at >= ?",
                 (since.replace(microsecond=0).isoformat() + "Z",),
             ).fetchone()
             return float(row["total"])
 
+    def count_since(self, table: str, since: datetime, where: str = "", params: Tuple = ()) -> int:
+        with self.connection() as conn:
+            sql = "select count(*) as total from %s where created_at >= ?" % table
+            values = [since.replace(microsecond=0).isoformat() + "Z"]
+            if where:
+                sql += " and " + where
+                values.extend(params)
+            row = conn.execute(sql, tuple(values)).fetchone()
+            return int(row["total"] or 0)
+
     def spend_today(self) -> float:
         now = datetime.utcnow()
-        start = datetime(now.year, now.month, now.day)
-        return self.spend_since(start)
+        return self.spend_since(datetime(now.year, now.month, now.day))
 
     def spend_this_month(self) -> float:
         now = datetime.utcnow()
-        start = datetime(now.year, now.month, 1)
-        return self.spend_since(start)
+        return self.spend_since(datetime(now.year, now.month, 1))
 
     def usage_summary(self) -> Dict[str, float]:
+        with self.connection() as conn:
+            today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+            jobs_today = conn.execute("select count(*) as c from jobs where first_seen_at >= ?", (today,)).fetchone()["c"]
+            cover_today = conn.execute(
+                "select count(*) as c from usage_log where task = 'cover_note' and created_at >= ?", (today,)
+            ).fetchone()["c"]
+            last_discovery = conn.execute(
+                "select requested_at from discovery_runs order by requested_at desc limit 1"
+            ).fetchone()
+            last_scoring = conn.execute(
+                "select activated_at from scoring_versions order by activated_at desc limit 1"
+            ).fetchone()
         return {
             "today": self.spend_today(),
             "month": self.spend_this_month(),
+            "jobs_today": jobs_today,
+            "cover_notes_today": cover_today,
+            "last_discovery": last_discovery["requested_at"] if last_discovery else "",
+            "last_scoring": last_scoring["activated_at"] if last_scoring else "",
         }
 
     def source_feedback_metrics(self) -> List[sqlite3.Row]:
-        with self.connect() as conn:
+        with self.connection() as conn:
             return list(
                 conn.execute(
                     """
                     select
                         src.id,
                         src.score as current_score,
-                        count(j.id) as jobs_seen,
+                        count(distinct j.id) as jobs_seen,
                         sum(case when f.action = 'irrelevant' then 1 else 0 end) as irrelevant_count,
                         sum(case when f.action = 'cover_note' then 1 else 0 end) as cover_note_count,
                         sum(case when f.action = 'applied' then 1 else 0 end) as applied_count
@@ -375,21 +391,295 @@ class Database:
             )
 
     def update_source_score(self, source_id: str, score: int) -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.execute("update sources set score = ? where id = ?", (score, source_id))
+
+    def promote_source_if_test(self, source_id: str) -> None:
+        with self.connection() as conn:
+            conn.execute("update sources set status = 'active', enabled = 1 where id = ? and status = 'test'", (source_id,))
+
+    def rate_limit_check(self, action: str, seconds: int) -> Tuple[bool, int]:
+        now = datetime.utcnow()
+        with self.connection() as conn:
+            row = conn.execute("select last_at from rate_limits where action = ?", (action,)).fetchone()
+            if row and row["last_at"]:
+                last = datetime.fromisoformat(row["last_at"].replace("Z", ""))
+                elapsed = int((now - last).total_seconds())
+                if elapsed < seconds:
+                    return False, seconds - elapsed
+            conn.execute(
+                "insert into rate_limits (action, last_at, count_24h) values (?, ?, 1) "
+                "on conflict(action) do update set last_at = excluded.last_at, count_24h = count_24h + 1",
+                (action, utc_now_iso()),
+            )
+            return True, 0
+
+    def rate_limit_daily(self, action: str, max_count: int) -> Tuple[bool, int]:
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        with self.connection() as conn:
+            row = conn.execute("select count(*) as c from job_feedback where action = ? and created_at >= ?", (action, today)).fetchone()
+            count = int(row["c"] or 0)
+            if count >= max_count:
+                return False, count
+            return True, count
+
+    def create_discovery_run(self, session_id: str, request_path: str, status_path: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into discovery_runs (
+                    session_id, requested_at, status, request_path, status_path, candidate_count, approved_count
+                ) values (?, ?, 'pending', ?, ?, 0, 0)
+                """,
+                (session_id, utc_now_iso(), request_path, status_path),
+            )
+
+    def update_discovery_run(self, session_id: str, **fields) -> None:
+        if not fields:
+            return
+        with self.connection() as conn:
+            assignments = ", ".join("%s = ?" % key for key in fields)
+            conn.execute("update discovery_runs set %s where session_id = ?" % assignments, tuple(fields.values()) + (session_id,))
+
+    def get_discovery_run(self, session_id: str) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute("select * from discovery_runs where session_id = ?", (session_id,)).fetchone()
+
+    def pending_discovery_runs(self) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(conn.execute("select * from discovery_runs where status in ('pending', 'running')"))
+
+    def create_scoring_version(self, version: int, rules_path: str, report_json: Dict, status: str = "pending") -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into scoring_versions (version, generated_by, activated_at, rules_path, shadow_report_json, status)
+                values (?, 'openclaw+codex', ?, ?, ?, ?)
+                """,
+                (version, utc_now_iso(), rules_path, json.dumps(report_json), status),
+            )
+
+    def recent_jobs(self, limit: int = 100) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """
+                    select j.*, s.score, s.hard_reject, s.reasons_json, s.concerns_json
+                    from jobs j
+                    left join job_scores s on s.job_id = j.id
+                    order by j.first_seen_at desc
+                    limit ?
+                    """,
+                    (limit,),
+                )
+            )
+
+
+def migrate_v1(conn) -> None:
+    conn.executescript(
+        """
+        create table if not exists candidate_profile (
+            id integer primary key check (id = 1),
+            raw_text text,
+            cv_text text,
+            parsed_json text,
+            updated_at text
+        );
+
+        create table if not exists sources (
+            id text primary key,
+            name text not null,
+            type text not null,
+            url text not null,
+            risk_level text not null,
+            poll_frequency_minutes integer not null default 360,
+            enabled integer not null default 1,
+            status text not null default 'active',
+            score integer not null default 50,
+            created_by text not null default 'user',
+            imap_last_uid integer not null default 0,
+            last_run_at text
+        );
+
+        create table if not exists source_runs (
+            id integer primary key autoincrement,
+            source_id text not null,
+            started_at text not null,
+            finished_at text,
+            fetched_count integer not null default 0,
+            inserted_count integer not null default 0,
+            error text
+        );
+
+        create table if not exists jobs (
+            id text primary key,
+            source_id text not null,
+            source_name text not null,
+            external_id text,
+            url text not null,
+            title text not null,
+            company text not null,
+            location text,
+            remote_policy text,
+            salary_min integer,
+            salary_max integer,
+            currency text,
+            description text,
+            posted_at text,
+            first_seen_at text not null,
+            last_seen_at text not null,
+            last_digest_at text,
+            snoozed_until text,
+            status text not null default 'new'
+        );
+
+        create table if not exists job_scores (
+            job_id text primary key,
+            score integer not null,
+            hard_reject integer not null,
+            reasons_json text not null,
+            concerns_json text not null,
+            breakdown_json text not null,
+            fired_rules_json text not null default '[]',
+            scored_at text not null
+        );
+
+        create table if not exists job_feedback (
+            id integer primary key autoincrement,
+            job_id text not null,
+            action text not null,
+            details text,
+            created_at text not null
+        );
+
+        create table if not exists drafts (
+            id integer primary key autoincrement,
+            job_id text not null,
+            draft_type text not null,
+            content text not null,
+            created_at text not null
+        );
+
+        create table if not exists usage_log (
+            id integer primary key autoincrement,
+            task text not null,
+            model text not null,
+            input_tokens integer not null,
+            output_tokens integer not null,
+            estimated_cost_usd real not null,
+            created_at text not null
+        );
+        """
+    )
+
+
+def migrate_v2(conn) -> None:
+    for column_sql in [
+        "alter table sources add column status text not null default 'active'",
+        "alter table sources add column imap_last_uid integer not null default 0",
+        "alter table sources add column created_by text not null default 'user'",
+        "alter table job_scores add column fired_rules_json text not null default '[]'",
+    ]:
+        try:
+            conn.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
+    conn.executescript(
+        """
+        drop table if exists experiments;
+
+        create table if not exists digest_log (
+            digest_id text not null,
+            sent_at text not null,
+            job_id text not null,
+            primary key (digest_id, job_id)
+        );
+        create index if not exists idx_digest_log_job_id on digest_log(job_id);
+
+        create table if not exists discovery_runs (
+            session_id text primary key,
+            requested_at text not null,
+            status text not null,
+            request_path text,
+            status_path text,
+            response_path text,
+            candidate_count integer not null default 0,
+            approved_count integer not null default 0,
+            message text
+        );
+
+        create table if not exists scoring_versions (
+            id integer primary key autoincrement,
+            version integer not null,
+            generated_by text not null,
+            activated_at text,
+            rules_path text not null,
+            shadow_report_json text not null,
+            status text not null default 'pending'
+        );
+
+        create table if not exists rate_limits (
+            action text primary key,
+            last_at text not null,
+            count_24h integer not null default 0
+        );
+
+        create table if not exists usage_daily (
+            day text primary key,
+            estimated_cost_usd real not null,
+            input_tokens integer not null,
+            output_tokens integer not null
+        );
+        """
+    )
+
+
+def set_schema_version(conn, version: int) -> None:
+    conn.execute("insert or ignore into schema_version (version, applied_at) values (?, ?)", (version, utc_now_iso()))
+
+
+def trim_usage_logs(conn) -> None:
+    cutoff = (datetime.utcnow() - timedelta(days=90)).replace(microsecond=0).isoformat() + "Z"
+    rows = conn.execute(
+        """
+        select substr(created_at, 1, 10) as day,
+               sum(estimated_cost_usd) as cost,
+               sum(input_tokens) as input_tokens,
+               sum(output_tokens) as output_tokens
+        from usage_log
+        where created_at < ?
+        group by substr(created_at, 1, 10)
+        """,
+        (cutoff,),
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """
+            insert into usage_daily (day, estimated_cost_usd, input_tokens, output_tokens)
+            values (?, ?, ?, ?)
+            on conflict(day) do update set
+              estimated_cost_usd = excluded.estimated_cost_usd,
+              input_tokens = excluded.input_tokens,
+              output_tokens = excluded.output_tokens
+            """,
+            (row["day"], row["cost"] or 0, row["input_tokens"] or 0, row["output_tokens"] or 0),
+        )
+    conn.execute("delete from usage_log where created_at < ?", (cutoff,))
 
 
 def stable_job_id(job: Job) -> str:
-    basis = "|".join(
-        [
-            job.source_id or "",
-            job.external_id or "",
-            normalize_key(job.url),
-            normalize_key(job.company),
-            normalize_key(job.title),
-        ]
-    )
+    basis = "|".join([canonicalize_url(job.url), normalize_key(job.company), normalize_key(job.title)])
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+
+
+def canonicalize_url(url: str) -> str:
+    parsed = urlparse(url or "")
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in ("ref", "source", "fbclid", "gclid")
+    ]
+    return urlunparse((parsed.scheme, parsed.netloc.lower(), parsed.path.rstrip("/"), "", urlencode(query), ""))
 
 
 def normalize_key(value: str) -> str:
@@ -398,4 +688,3 @@ def normalize_key(value: str) -> str:
 
 def tomorrow_iso() -> str:
     return (datetime.utcnow() + timedelta(days=1)).replace(microsecond=0).isoformat() + "Z"
-
