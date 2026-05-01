@@ -1,46 +1,41 @@
 # Claude Instructions
 
-This repository contains a human-in-the-loop job-search assistant for an OpenClaw-assisted workflow.
+Read [`AGENTS.md`](AGENTS.md) first — it is the canonical project contract.
 
-Read and follow `AGENTS.md` first. It is the canonical project contract for safety, privacy, source discovery, development, and validation.
+## Quick orientation
 
-## Short Version
+- **On-demand only.** No cron, no background polling. Every action starts with a Telegram button click. Do not reintroduce a scheduler.
+- **Two containers, file-based contract.** `jobbot` (Python, stdlib-only) ↔ `openclaw-gateway` (agent runtime) communicate via JSON files in `/jobbot/workspace/{discovery,tuning}/`. No HTTP between them, no shared SQLite.
+- **Two LLM tiers, kept separate.** Codex (subscription) inside OpenClaw for source discovery + scoring tuning. OpenAI API (paid, budget-gated) inside jobbot, only for cover notes.
+- **Per-job scoring is deterministic.** Rules live in `config/scoring.json` and are applied by a fixed interpreter. The LLM updates the rules; it does not score jobs directly.
 
-Preserve the core product boundary:
+## Source of truth
 
-- the bot may scout, rank, summarize, draft, and report
-- the human applies, messages, approves sources, and provides secrets
-- LinkedIn and other logged-in platforms are email-alert sources only, not browser automation targets
+| Read this | For |
+|---|---|
+| [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPEC.md) | The intended product |
+| [`tasks.md`](tasks.md) | The honest gap list — every work item, prioritized |
+| [`AGENTS.md`](AGENTS.md) | Repo layout, conventions, what's built vs. specified, how to extend |
+| [`README.md`](README.md) | User docs (parts are stale; trust spec + tasks.md when in conflict) |
 
-## Non-Negotiables
+## Hard constraints
 
-- Do not add logged-in LinkedIn/Wellfound browser automation.
-- Do not mount browser cookies, real browser profiles, the host home directory, SSH keys, or Docker socket.
-- Do not add auto-apply or recruiter messaging.
-- Do not commit real CV/profile data, API keys, Telegram tokens, IMAP credentials, SQLite databases, or generated drafts.
-- Keep Source Discovery recommendation-only unless the user explicitly asks to change that design.
-- Keep Telegram actions compatible with `Irrelevant`, `Remind me tomorrow`, `Give me cover note`, and `Applied`.
+- No logged-in browser automation (LinkedIn, Wellfound, etc.). Email alerts only.
+- No auto-apply. No recruiter messaging. No outbound email.
+- No mounting browser cookies, host home, SSH keys, or `/var/run/docker.sock`.
+- No silent edits to `config/sources.json` or `config/scoring.json` — agent-proposed changes go through a Telegram approval click.
+- No new Python dependencies without an explicit ask. Stdlib-only is intentional.
+- No comments unless the WHY is non-obvious. No multi-line docstrings.
+- Word-boundary matching only for any rule applied to job text.
+- Don't commit `.env`, `data/`, or anything with real CV/profile data.
 
-## Private Profile Files
-
-Use local ignored files for real user data:
-
-```bash
-cp input/profile.example.md input/profile.local.md
-cp config/profile.example.json config/profile.local.json
-```
-
-Committed example files are templates only.
-
-## Common Commands
+## Validation before finishing
 
 ```bash
 python3 -m unittest discover -s tests
 docker compose --profile openclaw config --quiet
 git diff --check
-python3 -m jobbot init
-python3 -m jobbot discover-sources
+git status -sb
 ```
 
-If you change behavior, update `README.md` and tests where appropriate.
-
+If Python bytecode compilation fails in the sandbox: `PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache`.

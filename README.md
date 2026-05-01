@@ -221,17 +221,68 @@ Important: the bot does not submit applications. You apply manually, then click 
 ## Email Alerts
 
 LinkedIn and other logged-in platforms should be used through email alerts, not browser automation.
+The bot reads a single scoped IMAP folder and extracts links from messages. It never sends email
+and never logs into the source platform.
 
-Recommended setup:
+### One-Time Mailbox Setup
 
 | Step | Purpose |
 |---|---|
-| Create a dedicated mailbox or folder named `job-alerts` | Keeps email scope narrow |
-| Forward LinkedIn/Wellfound/company alerts there | Avoids logged-in scraping |
-| Add IMAP credentials to `.env` | Lets the bot read only alert emails |
-| Enable `email-job-alerts` in `config/sources.json` | Starts parsing alert links |
+| Create a dedicated mailbox **or** a Gmail label named `job-alerts` | Keeps the bot's read scope narrow |
+| Configure provider filters so all incoming alert emails land in that folder/label | Avoids the bot ever seeing your other mail |
+| Generate an IMAP app-password (Gmail: Account → Security → App passwords) | Plain account password is rejected by most providers |
+| Add IMAP credentials to `.env` | Read-only access from the container |
+| Enable `email-job-alerts` in `config/sources.json` (set `enabled: true`) | Starts parsing alert links on the next collection |
 
-The bot does not send email and does not log into LinkedIn.
+`.env` keys consumed by the IMAP collector:
+
+```text
+EMAIL_IMAP_HOST=imap.gmail.com
+EMAIL_IMAP_USERNAME=you@example.com
+EMAIL_IMAP_PASSWORD=<app password>
+EMAIL_IMAP_FOLDER=job-alerts
+```
+
+### Worked Example: Adding djinni.co Alerts
+
+djinni.co does not expose a public RSS/API for personal job alerts, but it does email them. So the
+bot consumes djinni alerts the same way it consumes LinkedIn alerts — via the scoped IMAP folder.
+
+| Step | Action |
+|---|---|
+| 1 | Sign in to djinni.co and configure your job-alert subscription (role, level, location, keywords) |
+| 2 | Set the alert recipient to the same address you configured in `.env` |
+| 3 | In Gmail (or your provider): create a filter `from:(no-reply@djinni.co)` → "Apply label `job-alerts`" + "Skip the inbox" |
+| 4 | In `config/sources.json`, set `email-job-alerts.enabled` to `true`. No new entry is needed — the IMAP collector picks up every message in the labeled folder regardless of sender |
+| 5 | Trigger a collection. New djinni jobs appear in the next digest |
+
+Repeat the filter step for any other alert sender (LinkedIn `jobs-noreply@linkedin.com`,
+Wellfound `team@wellfound.com`, company alerts, Google Alerts, etc.). All of them land in the same
+`job-alerts` folder; one IMAP source covers all of them.
+
+### How The IMAP Collector Treats Each Email
+
+| Behavior | Detail |
+|---|---|
+| Scope | Reads only `EMAIL_IMAP_FOLDER`; never the inbox |
+| Mode | Read-only (the bot never marks messages SEEN or moves them) |
+| Title | Uses the email subject as the job title |
+| Company | Inferred from subject + sender; often "Unknown company" for digest-style alerts |
+| URL | Extracts up to 10 URLs per message; one `jobs` row per URL |
+
+**Caveat for digest-style alerts** (djinni weekly digest, LinkedIn "10 new jobs in Kyiv", etc.):
+the current MVP parser produces multiple rows per email but they share the same subject as title.
+Per-job parsing for the major alert formats is planned (see [tasks.md](tasks.md)). For now, the
+links are still useful — clicking through opens the real job page on the source platform — but
+the digest cards from email-derived jobs look generic until per-format parsing is implemented.
+
+### Variants
+
+| Need | Setup |
+|---|---|
+| Multiple alert sources, one folder | Default. One filter per sender → same `job-alerts` label |
+| Separate folders per source | Add a second source row in `config/sources.json` with a different `EMAIL_IMAP_FOLDER` (requires an env override per source — currently a single global folder is supported; multi-folder is on the roadmap) |
+| Self-hosted/non-Gmail IMAP | Replace `imap.gmail.com` with your provider's host; ensure SSL on port 993 |
 
 ## Cost Controls
 

@@ -4,9 +4,9 @@
 
 This specification defines a Docker-isolated OpenClaw job-search agent that finds, ranks, and helps act on high-quality job opportunities without using LinkedIn browser automation or logged-in job-board scraping.
 
-The agent runs as an autonomous scout and analyst, not an autonomous applicant. It continuously improves where and how it searches, sends a ranked Telegram digest, and waits for explicit human feedback before drafting cover notes or marking actions as complete.
+The agent runs as a user-driven scout and analyst, not an autonomous applicant. It searches when the user asks, refines its sources and scoring rules with the user's approval, sends a ranked Telegram digest, and waits for explicit human feedback before drafting cover notes or marking actions as complete.
 
-Primary interaction happens through a Telegram bot with inline feedback buttons:
+Primary interaction happens through a Telegram bot. Per-job inline buttons:
 
 | Button | Meaning | System Action |
 |---|---|---|
@@ -15,7 +15,17 @@ Primary interaction happens through a Telegram bot with inline feedback buttons:
 | `Give me cover note` | Prepare an application note | Generate tailored cover note and optional CV bullet suggestions |
 | `Applied` | User applied manually | Mark job as applied, update company/source success metrics |
 
-The design favors safety, low account-ban risk, and low LLM cost.
+Bot-level (digest-level) buttons:
+
+| Button | Meaning | System Action |
+|---|---|---|
+| `Get more jobs` | Search for and show more jobs now | Run on-demand collection (§6.2), send fresh digest |
+| `Update sources` | Refine the source list | OpenClaw + Codex propose new validated sources for user approval (§6.5) |
+| `Tune scoring` | Refine the ranking rules | OpenClaw + Codex propose updated scoring rules; user reviews shadow-test before applying (§8.4) |
+
+The design favors safety, low account-ban risk, and low LLM cost. Per-job
+scoring is deterministic and free; the LLM is used only for source/scoring
+updates (Codex via subscription) and cover notes (OpenAI API, paid).
 
 ## 2. Goals And Non-Goals
 
@@ -137,43 +147,76 @@ The design favors safety, low account-ban risk, and low LLM cost.
 
 ### 6.1 Scenario: Initial Setup
 
+The primary input is a free-text job profile description (structured or
+unstructured). A CV is optional and used only as secondary context for
+cover-note generation.
+
 | Step | Actor | Action | Output |
 |---:|---|---|---|
-| 1 | User | Places CV and preferences into mounted input folder | `cv.pdf`, `preferences.yaml` |
-| 2 | User | Starts Dockerized OpenClaw Gateway | Running gateway |
-| 3 | Agent | Parses CV and preferences | Normalized profile |
-| 4 | Agent | Builds initial source list | Seeded sources |
-| 5 | Agent | Sends Telegram setup summary | User confirms scope |
+| 1 | User | Writes a job profile description into `input/profile.md` | `profile.md` |
+| 2 | User | Optionally adds a text CV at `input/cv.md` for richer cover notes | `cv.md` (optional) |
+| 3 | User | Starts Dockerized OpenClaw Gateway | Running gateway |
+| 4 | Agent | Parses profile description | Normalized profile (target titles, role goals, strengths, exclusions) |
+| 5 | Agent | Builds initial source list from `config/sources.json` seeds | Seeded sources |
+| 6 | Agent | Sends Telegram setup summary with detected role goals | User confirms scope |
+
+Example profile description (free text is acceptable; structure is not required):
+
+```text
+Product manager. Product lead. Product owner. Head of product. Product builder.
+Product engineer. Goal is to create product prototypes, MVPs, or implement new
+features in existing products via Claude-Code/Codex. Another option for the
+role goal is implementing AI-based features or optimizing business processes
+via AI-based automation.
+
+Key strengths: product/feature discovery (done in both outsourcing and product
+company environments), getting insights from product analytics, managing
+multi-stakeholder environments.
+```
 
 Acceptance criteria:
 
 | Criterion | Pass Condition |
 |---|---|
-| CV parsed | Skills, seniority, roles, regions, exclusions extracted |
-| Preferences loaded | Salary, timezone, location, role, company-stage preferences available |
+| Profile parsed | Target titles, role goals, positive keywords, and exclusions extracted from `profile.md` |
+| CV optional | If `cv.md` present, used for cover notes; if absent, the bot still scores and digests jobs |
 | Telegram connected | Bot can send and receive callback actions |
 | Safety policy active | No browser cookies, no auto-apply, no email-send permissions |
 
-### 6.2 Scenario: Scheduled Job Collection
+### 6.2 Scenario: On-Demand Job Collection
+
+Job collection is triggered by the user, not by a fixed schedule. The Telegram
+bot exposes a `Get more jobs` button. Clicking it runs a foreground collection
+across all enabled sources, then sends a fresh digest of new (not-yet-shown)
+jobs. A per-user rate limit prevents accidental hammering of sources.
 
 | Step | Actor | Action | Output |
 |---:|---|---|---|
-| 1 | Cron | Starts collection every 2-6 hours | Collection job |
-| 2 | Collectors | Fetch RSS/API/email/career pages | Raw job candidates |
-| 3 | Normalizer | Converts source-specific fields | Canonical job records |
-| 4 | Dedupe | Removes duplicates | Unique jobs |
-| 5 | Rule Filter | Applies hard constraints | Candidate shortlist |
-| 6 | Ranker | Scores jobs | Ranked jobs |
-| 7 | Telegram Sender | Sends digest | Inline action buttons |
+| 1 | User | Clicks `Get more jobs` in Telegram | Trigger event |
+| 2 | Bot | Checks rate limit (default: 1 collection / 10 minutes) | Allow or "please wait Ns" reply |
+| 3 | Bot | Replies "Searching for new jobs..." | TG ack |
+| 4 | Collectors | Fetch RSS/API/email/career pages from enabled sources | Raw job candidates |
+| 5 | Normalizer | Converts source-specific fields | Canonical job records |
+| 6 | Dedupe | Removes duplicates within and across sources | Unique jobs |
+| 7 | Rule Filter | Applies hard-reject rules from current scoring config (§8) | Candidate shortlist |
+| 8 | Ranker | Scores jobs deterministically (§8) | Ranked jobs |
+| 9 | Telegram Sender | Sends digest of jobs not previously shown to the user | New job cards |
 
 Acceptance criteria:
 
 | Criterion | Pass Condition |
 |---|---|
-| Dedupe works | Same company/title/link not repeated |
+| On-demand only | No cron-driven collection; first interaction is always a user click |
+| Rate-limited | Repeated clicks within the rate window receive a short "wait" reply, not a fetch |
+| Cross-source dedupe | Same company/title/canonical-URL not repeated across sources |
+| No re-spam | A digest never contains a job already shown in a prior digest unless explicitly snoozed and now due |
 | Hard filters respected | Excluded locations/sectors/levels are removed |
 | Digest bounded | Max digest size is enforced |
-| Cost bounded | LLM call budget checked before analysis |
+| Responsive | Button click is acknowledged in <2s; full digest delivered within ~30s for typical source counts |
+
+Note: a daily safety-net background fetch is intentionally out of scope. If
+the digest pool feels stale between user clicks, add it later as an opt-in
+`JOBBOT_DAILY_REFRESH=1` flag.
 
 ### 6.3 Scenario: Telegram Feedback Loop
 
@@ -212,45 +255,88 @@ Draft constraints:
 | Evidence | Reference 2-4 real matches from CV/job |
 | Human action | User sends or submits manually |
 
-### 6.5 Scenario: Dynamic Source Discovery
+### 6.5 Scenario: On-Demand Source Discovery (OpenClaw + Codex)
+
+Source discovery is triggered by the user via the `Update sources` Telegram
+button. The discovery work is performed by the OpenClaw Gateway acting as an
+agent runtime, with Codex (via the user's subscription) as the LLM. OpenClaw
+provides validation tools (HTTP fetch, robots.txt check, schema sniff) so
+proposed sources are vetted, not hallucinated.
+
+The two containers communicate through a shared workspace volume using a
+file-based contract — no HTTP between containers, no shared database write
+access. This keeps each container's blast radius narrow.
 
 | Step | Actor | Action | Output |
 |---:|---|---|---|
-| 1 | Cron | Runs weekly source-discovery job | Discovery session |
-| 2 | Agent | Reviews profile, recent matches, feedback | Source strategy context |
-| 3 | Agent | Searches public web for platforms/companies/query patterns | Candidate sources |
-| 4 | Agent | Scores candidate sources | Source review queue |
-| 5 | Agent | Sends Telegram summary | User approves source classes or specific sources |
-| 6 | Agent | Adds approved sources to test pool | New source experiments |
+| 1 | User | Clicks `Update sources` in Telegram | Trigger event |
+| 2 | Bot | Writes `discovery/request-<ts>.json` to shared workspace | Discovery request |
+| 3 | Bot | Replies "Discovery in progress, this can take 1-3 minutes" | TG ack |
+| 4 | OpenClaw | Picks up new request file (file watch or short poll) | Agent session start |
+| 5 | OpenClaw + Codex | Read profile, current sources, recent metrics; propose candidate sources | Initial candidate list |
+| 6 | OpenClaw | For each candidate: HTTP HEAD, robots.txt check, sample fetch, schema sniff, dedupe vs current pool | Validated/rejected per candidate |
+| 7 | OpenClaw + Codex | Iterate (e.g. "ATS X returns 403, find alternative"; "platform Y duplicates RemoteOK, drop") | Refined list |
+| 8 | OpenClaw | Writes `discovery/response-<ts>.json` and sets `discovery/status-<ts>.json` to `done` | Response |
+| 9 | Bot | Polls status file; on `done`, posts TG summary with `[Approve all][Approve N][Reject all]` buttons | Approval prompt |
+| 10 | User | Approves desired candidates | Selection |
+| 11 | Bot | Appends approved sources to `config/sources.json` with `created_by='agent'`, `enabled=true`, `status='test'` | Updated sources |
 
-Source-discovery prompt template:
+Communication contract (shared volume `./openclaw/workspace/discovery/`):
+
+| File | Writer | Reader | Schema (top-level) |
+|---|---|---|---|
+| `request-<ts>.json` | jobbot | OpenClaw | `{profile_summary, current_sources, recent_metrics, instructions, max_candidates}` |
+| `status-<ts>.json` | OpenClaw | jobbot | `{state: pending\|running\|done\|failed, updated_at, message}` |
+| `response-<ts>.json` | OpenClaw | jobbot | `{candidates: [...], session_id, notes}` |
+
+Each candidate in the response:
+
+| Field | Description |
+|---|---|
+| `name` | Human-readable name |
+| `url` | Endpoint or seed URL (validated to return 2xx and not be disallowed by robots.txt) |
+| `type` | One of: `rss`, `json_api`, `ats`, `community`, `email_alert` |
+| `why_it_matches` | 1-3 sentences referencing the user profile |
+| `risk` | `low` / `medium` / `high` |
+| `expected_signal` | Estimated weekly job count for the profile |
+| `validation_notes` | What OpenClaw verified (status code, sample item count, etc.) |
+
+Why Codex (vs the OpenAI API used for cover notes):
+
+| Reason | Detail |
+|---|---|
+| Subscription cost | Discovery is rare (weekly at most); user's subscription is flat fee |
+| Tool use | OpenClaw can drive Codex through an agent loop with web-fetch/validation tools, which the simpler `/v1/responses` API path does not |
+| Risk isolation | OpenAI per-call API spend stays scoped to cover-note generation only |
+
+Source-discovery prompt template (used by OpenClaw to brief Codex):
 
 ```text
 Find high-signal job sources for this candidate profile.
 Prioritize low-competition, fresh, direct-application, remote-compatible sources.
 Avoid LinkedIn logged-in scraping or any source requiring cookie automation.
-Return candidate sources as structured JSON:
-- source_name
-- source_type
-- access_method
-- expected_signal
-- risk_level
-- polling_frequency
-- first_query_or_url
-- why_it_matches
+For each candidate, you must validate by attempting a sample fetch and parse.
+Reject candidates that: return non-2xx, are disallowed by robots.txt, are
+duplicates of the current source list, or require login/cookies.
+Return refined candidates as structured JSON matching the response schema.
 ```
 
-### 6.6 Scenario: Dynamic Search Adjustment
+Source storage and provenance:
 
-| Signal | Interpretation | Adjustment |
+| Provenance | Location | Lifecycle |
 |---|---|---|
-| High `Irrelevant` rate for source | Source has poor fit | Lower source priority |
-| Many duplicate jobs | Source overlaps with better feeds | Reduce polling frequency |
-| Many jobs fail salary/location filter | Query too broad | Add stricter query terms |
-| User requests cover notes often | Source has strong relevance | Increase priority |
-| User marks applied | Source produces actionable roles | Increase trust score |
-| Good companies, wrong roles | Query taxonomy mismatch | Adjust title/keyword mapping |
-| Too few results | Search too narrow | Add adjacent titles and technologies |
+| Manually added | `config/sources.json`, `created_by='user'` | User edits directly; never modified by the agent |
+| Agent-discovered | `config/sources.json`, `created_by='agent'`, `status='test'` initially | Appended only after user approval; user can disable; the agent does not silently mutate existing entries |
+
+Acceptance criteria:
+
+| Criterion | Pass Condition |
+|---|---|
+| On-demand only | No cron-driven discovery |
+| Validated candidates | Every approved candidate has been fetched at least once successfully by OpenClaw before the user sees it |
+| User approval gate | Sources are not added to `sources.json` without an explicit Telegram approval click |
+| Provenance preserved | Manual and agent-discovered sources are visually distinguishable in `sources.json` |
+| Subscription-only LLM cost | Discovery uses Codex via subscription; OpenAI per-call API is not invoked |
 
 ## 7. Source Strategy
 
@@ -277,60 +363,140 @@ Return candidate sources as structured JSON:
 | Funding-to-hiring search | Find fresh hiring budgets | `"raised seed" "hiring engineers" "AI"` |
 | Region/timezone search | Match availability | `"remote" "Europe" "Asia timezone" "senior engineer"` |
 
-### 7.3 Source Score
+### 7.3 Source Lifecycle
 
-Each source receives a score from 0 to 100.
+With on-demand collection (§6.2), there is no polling-frequency tier — every
+collection click fetches every active source. Each source carries a simple
+lifecycle status instead:
 
-| Component | Weight | Description |
-|---|---:|---|
-| Relevance | 30 | Average job match score |
-| Freshness | 15 | Time between posting and discovery |
-| Uniqueness | 15 | Non-duplicate rate |
-| Actionability | 15 | User clicks `Give me cover note` or `Applied` |
-| Safety | 10 | No logged-in automation or suspicious scraping |
-| Data quality | 10 | Salary, location, requirements available |
-| Cost efficiency | 5 | Useful jobs per fetch/LLM cost |
+| Status | Meaning | Included in `Get more jobs`? |
+|---|---|---|
+| `active` | User-managed source, or agent-discovered source promoted by the user | Yes |
+| `test` | Newly added by `Update sources` agent flow (§6.5); on probation | Yes, but flagged in the digest as "from a new source" |
+| `disabled` | Skipped by collection; preserved in `sources.json` for history | No |
 
-Source status:
-
-| Score | Status | Behavior |
-|---:|---|---|
-| 80-100 | Core | Poll frequently |
-| 60-79 | Active | Poll normally |
-| 40-59 | Test | Poll lightly |
-| 20-39 | Deprioritized | Poll rarely |
-| 0-19 | Disabled | Stop unless user re-enables |
+Promotion `test → active` happens implicitly the first time the user clicks
+`Applied` or `Give me cover note` on a job from that source. Demotion to
+`disabled` is a manual user action (`config/sources.json` edit) or an agent
+recommendation surfaced through the next `Update sources` run.
 
 ## 8. Job Scoring
 
-### 8.1 Job Match Score
+Per-job scoring is fully deterministic and free at runtime — no LLM call per
+job. The scoring algorithm itself is generated and periodically refined by
+OpenClaw + Codex, using the user's accumulated feedback as the training
+signal. Algorithm updates are gated by user approval.
 
-| Component | Weight | Examples |
-|---|---:|---|
-| Role/title fit | 20 | Senior engineer, founding engineer, AI product engineer |
-| Skill fit | 20 | Python, TypeScript, LLMs, infra, product engineering |
-| Seniority fit | 10 | Senior/staff/founding vs junior/manager-only |
-| Remote/location fit | 15 | Remote worldwide, Europe/Asia overlap |
-| Company fit | 10 | Stage, domain, culture, funding |
-| Compensation fit | 10 | Salary/equity transparency and floor |
-| Application friction | 5 | Direct form, email, simple application |
-| Freshness | 5 | Recently posted |
-| User feedback similarity | 5 | Similar to jobs user liked/applied |
+### 8.1 Two-Layer Architecture
 
-### 8.2 Hard Filters
+| Layer | Runs | Cost per job | Updated by |
+|---|---|---|---|
+| Scoring rules (`config/scoring.json`) | Once per algorithm update | n/a | OpenClaw + Codex on demand (`Tune scoring` button) |
+| Rule interpreter (`jobbot/scoring.py`) | On every job | Free; deterministic | Code change (versioned in git) |
 
-| Filter | Example |
+The interpreter exposes a fixed set of rule kinds (§8.3). Codex can only
+output rules in this DSL; it cannot inject arbitrary code. This keeps the
+"agent updates the scorer" idea safe to operate.
+
+### 8.2 Scoring Rules File
+
+```json
+{
+  "version": 3,
+  "generated_at": "2026-05-01T...Z",
+  "generated_by": "codex+openclaw",
+  "previous_version": 2,
+  "rules": [
+    {
+      "id": "title_product_role",
+      "kind": "match_any_word",
+      "fields": ["title"],
+      "patterns": ["product manager", "head of product", "product owner", "product engineer"],
+      "weight": 20
+    },
+    {
+      "id": "ai_focus",
+      "kind": "match_any_word",
+      "fields": ["title", "description"],
+      "patterns": ["llm", "ai automation", "claude", "codex", "agents"],
+      "weight": 15
+    },
+    {
+      "id": "remote_friendly",
+      "kind": "field_equals",
+      "field": "remote_policy",
+      "value": "remote",
+      "weight": 10
+    },
+    {
+      "id": "exclude_seniority",
+      "kind": "hard_reject_word",
+      "fields": ["title", "description"],
+      "patterns": ["intern", "internship"]
+    },
+    {
+      "id": "exclude_industries",
+      "kind": "hard_reject_word",
+      "fields": ["title", "description", "company"],
+      "patterns": ["gambling", "casino", "adult", "defense", "weapons"]
+    }
+  ],
+  "thresholds": {
+    "min_show_score": 50,
+    "hard_reject_floor": 0
+  },
+  "fallback": "baseline_v0"
+}
+```
+
+### 8.3 Supported Rule Kinds
+
+| Kind | Effect |
 |---|---|
-| Excluded domains | Crypto, gambling, defense, adult, etc. |
-| Location mismatch | US-only when user cannot work US-only |
-| Seniority mismatch | Intern/junior roles |
-| Compensation mismatch | Below salary floor if explicit |
-| Role mismatch | Sales/support/non-technical if not desired |
-| Duplicate | Same job already seen/applied/rejected |
+| `match_any_word` | Word-boundary match of any pattern in any listed field; awards `weight` if any match |
+| `match_all_word` | All patterns must match across the listed fields; awards `weight` if all match |
+| `hard_reject_word` | Word-boundary match → `hard_reject = true` |
+| `field_equals` | Equality on a normalized field (e.g. `remote_policy == "remote"`); awards `weight` |
+| `numeric_at_least` | Numeric field (e.g. `salary_max`) `>=` threshold; awards `weight`; optional `hard_reject_below` |
+| `feedback_similarity` | Token-overlap (or local-embedding) similarity to past `applied`/`cover_note` jobs; awards a fraction of `weight` |
 
-### 8.3 Output Explanation
+Pattern matching is always **word-boundary** to prevent the false-positive
+class (e.g. `intern` matching `international`). Codex receives this constraint
+as part of its briefing.
 
-Each Telegram job card should include:
+### 8.4 Algorithm Update Flow
+
+| Step | Actor | Action |
+|---:|---|---|
+| 1 | User | Clicks `Tune scoring` in Telegram |
+| 2 | Bot | Writes `tuning/request-<ts>.json` with profile, current rules, recent feedback aggregates, score-distribution stats, sample of recent flagged jobs |
+| 3 | OpenClaw + Codex | Propose updated rules conforming to the §8.3 schema |
+| 4 | OpenClaw | Schema-validate proposed rules; reject if invalid |
+| 5 | Bot | Shadow-tests proposed rules against the last N=100 jobs and reports: distribution shift, agreement rate vs Applied/Irrelevant feedback, false-reject rate against historical Applied jobs |
+| 6 | Bot | Sends TG summary with diff and shadow-test report; offers `[Apply][Reject][Show diff]` |
+| 7 | User | Approves or rejects |
+| 8 | Bot | On Apply: archive previous `scoring.json` to `scoring.v<previous>.json`; activate new version; record entry in `scoring_versions` table |
+
+The shadow test is the safety net. The user never activates a ruleset they
+haven't seen the impact of.
+
+### 8.5 Hard Filters
+
+Hard filters are now expressed as `hard_reject_word` (or `numeric_at_least`
+with `hard_reject_below`) rules in the scoring file, so they can be tuned by
+the same mechanism. Examples the initial baseline file should include:
+
+| Filter | Example rule |
+|---|---|
+| Excluded domains | `hard_reject_word` over `["gambling","casino","adult","defense","weapons"]` |
+| Location mismatch | `hard_reject_word` over `["us only","u.s. only","security clearance"]` |
+| Seniority mismatch | `hard_reject_word` over `["intern","internship","graduate program"]` |
+| Compensation mismatch | `numeric_at_least` on `salary_max` with `hard_reject_below: <floor>` |
+| Duplicates | Enforced upstream by dedupe (§6.2), not via scoring rules |
+
+### 8.6 Output Explanation
+
+Each Telegram job card includes:
 
 | Field | Description |
 |---|---|
@@ -339,17 +505,37 @@ Each Telegram job card should include:
 | Score | 0-100 |
 | Location | Remote/region constraints |
 | Source | Where it was found |
-| Why it matches | 2-4 concise bullets |
-| Concerns | 1-3 possible issues |
+| Why it matches | List of rule IDs that fired positively, with the matched pattern |
+| Concerns | List of rule IDs that produced soft penalties or unmet conditions |
 | Link | Source URL |
 | Buttons | Inline feedback buttons |
+
+Reasons and concerns are derived from which rules fired, so the user can see
+exactly which rule promoted or demoted a job — and can ask the agent to
+adjust that rule on the next tuning cycle.
+
+### 8.7 Cost Profile
+
+- Per-job scoring: 0 LLM calls.
+- Per-discovery cycle (weekly at most): Codex via subscription.
+- Per-tuning cycle (on-demand only, via `Tune scoring`): Codex via subscription.
+- Per-cover-note (on-demand): OpenAI API (paid; see §11).
+
+The OpenAI API budget gate in §11 only needs to govern cover-note drafts. The
+rest of the system runs at zero per-call LLM cost.
 
 ## 9. Telegram Bot Design
 
 ### 9.1 Digest Message Format
 
+A digest is sent in response to `Get more jobs`. It contains a header with bot
+controls, then one card per job. Cards are only emitted for jobs not already
+shown to the user in a previous digest (or snoozed-and-now-due).
+
 ```text
-Top matches from the last 6 hours
+New job matches
+
+[Get more jobs] [Update sources] [Tune scoring] [Usage]
 
 1. Senior AI Product Engineer - ExampleCo
 Score: 91
@@ -357,17 +543,19 @@ Source: Ashby career page
 Location: Remote, Europe overlap
 
 Why it matches:
-- LLM product engineering
-- TypeScript + Python stack
-- Senior IC role with startup ownership
+- title_product_role: matched "product engineer"
+- ai_focus: matched "llm"
+- remote_friendly
 
 Concern:
-- Salary not listed
+- compensation_disclosed: salary not listed
 
 [Irrelevant] [Remind me tomorrow] [Give me cover note] [Applied]
 ```
 
 ### 9.2 Callback Payloads
+
+Per-job buttons:
 
 | Button | Callback Data | Required Fields |
 |---|---|---|
@@ -375,6 +563,19 @@ Concern:
 | `Remind me tomorrow` | `job:snooze_1d:<job_id>` | `job_id`, snooze_until |
 | `Give me cover note` | `job:cover_note:<job_id>` | `job_id`, draft_request_id |
 | `Applied` | `job:applied:<job_id>` | `job_id`, applied_at |
+
+Bot-level (digest header) buttons:
+
+| Button | Callback Data | Behavior |
+|---|---|---|
+| `Get more jobs` | `bot:collect` | Trigger on-demand collection (§6.2), respect rate limit |
+| `Update sources` | `bot:discover_sources` | Open OpenClaw discovery request (§6.5) |
+| `Tune scoring` | `bot:tune_scoring` | Open OpenClaw scoring-tune request (§8.4) |
+| `Usage` | `bot:usage` | Reply with daily/monthly OpenAI spend and counts |
+| `Approve discovery N` | `disc:approve:<session_id>:<idx>` | Append a discovered source to `sources.json` |
+| `Reject discovery` | `disc:reject:<session_id>` | Drop the discovery proposal |
+| `Apply scoring` | `tune:apply:<session_id>` | Activate the proposed scoring rules |
+| `Reject scoring` | `tune:reject:<session_id>` | Drop the proposed scoring rules |
 
 ### 9.3 Telegram State Transitions
 
@@ -404,16 +605,18 @@ Concern:
 
 | Table | Purpose |
 |---|---|
-| `candidate_profile` | Normalized profile from CV and preferences |
-| `sources` | Source registry and source scoring |
+| `candidate_profile` | Normalized profile from `profile.md` (and optional `cv.md`) |
+| `sources` | Source registry; provenance via `created_by` |
 | `source_runs` | Fetch attempts, counts, errors, and cost |
 | `jobs` | Canonical job records |
-| `job_scores` | Scoring breakdowns |
+| `job_scores` | Per-job score and which rule IDs fired |
 | `job_feedback` | Telegram button feedback |
 | `drafts` | Cover notes and CV suggestions |
-| `usage_log` | Token and estimated cost records |
-| `budget_state` | Daily/monthly cost counters |
-| `experiments` | Source/query experiments |
+| `usage_log` | OpenAI per-call token and cost records (cover notes) |
+| `discovery_runs` | Source-discovery sessions: request, status, response file paths, candidate counts, approval outcome |
+| `scoring_versions` | History of `scoring.json`: version, generated_by, activated_at, shadow-test report |
+| `digest_log` | Per-digest record: digest_id, timestamp, job_ids included; supports the "no re-spam" guarantee |
+| `rate_limits` | Per-action throttle state (e.g. last `bot:collect` timestamp) |
 
 ### 10.2 `jobs` Fields
 
@@ -455,58 +658,72 @@ Concern:
 
 ### 11.1 Model Routing
 
-| Task | Preferred Method | Model |
-|---|---|---|
-| Fetch and parse RSS/API | Deterministic code | None |
-| Dedupe | Hashing and rules | None |
-| Hard filtering | Rules | None |
-| Embedding similarity | Local embedding model | Local |
-| Basic job scoring | Rules + local embeddings | None/local |
-| Short match explanation | Small LLM | GPT-5.4 nano or mini |
-| Source discovery | Small/medium LLM | GPT-5.4 mini |
-| Cover note | Small/medium LLM | GPT-5.4 mini |
-| Deep company strategy | Manual approval | GPT-5.4 mini or larger if approved |
+The two LLM tiers serve clearly separated purposes. Most tasks use Codex via
+the user's flat-fee subscription; only cover-note generation calls the
+metered OpenAI API.
+
+| Task | Method | Engine | Frequency |
+|---|---|---|---|
+| Fetch and parse RSS/API | Deterministic code | None | Per click |
+| Dedupe | Hashing and rules | None | Per job |
+| Hard filtering | Rules from `scoring.json` | None | Per job |
+| Per-job scoring | Rule interpreter (§8) | None | Per job |
+| Source discovery | Agent loop (OpenClaw + LLM) | Codex (subscription) | On demand, weekly at most |
+| Scoring-rules tuning | Agent loop (OpenClaw + LLM) | Codex (subscription) | On demand only |
+| Embedding similarity | Local embedding model | Local | Optional, per job |
+| Cover note | Single prompt | OpenAI API (paid) | On demand, per click |
+| CV bullet suggestions (Phase 3) | Single prompt | OpenAI API (paid) | On demand |
 
 ### 11.2 Budget Rules
 
-| Budget | Default |
-|---|---:|
-| Daily LLM budget | `$0.50` |
-| Monthly LLM budget | `$10.00` |
-| Max LLM-analyzed jobs per run | `30` |
-| Max LLM-analyzed jobs per day | `150` |
-| Max source-discovery runs | `1/week` |
-| Max cover-note drafts per day | `10` |
+Subscription-based (Codex) work has no per-call budget; throttling comes from
+user clicks. Only OpenAI-API calls (cover notes) are budget-gated.
 
-Budget gate behavior:
+| Budget | Default | Applies To |
+|---|---:|---|
+| Daily OpenAI budget | `$0.50` | Cover notes |
+| Monthly OpenAI budget | `$10.00` | Cover notes |
+| Max cover-note drafts per day | `10` | Cover notes |
+| Max source-discovery runs per day | `3` | Codex (anti-abuse, not cost) |
+| Max scoring-tune runs per day | `3` | Codex (anti-abuse, not cost) |
+| Per-action rate limit | `1 / 10 min` | `Get more jobs` |
+
+Budget gate behavior (cover notes):
 
 | Condition | Behavior |
 |---|---|
-| Under budget | Allow LLM call |
-| Near daily budget | Use local/rule-only scoring |
-| Daily budget exceeded | Stop LLM calls until next day |
-| Monthly budget exceeded | Stop LLM calls until reset or user override |
-| User requests cover note after budget exceeded | Ask for explicit override in Telegram |
+| Under budget | Allow OpenAI call |
+| Daily budget exceeded | Telegram prompt: "Daily budget exceeded. [Override once] [Cancel]" |
+| Monthly budget exceeded | Telegram prompt: "Monthly budget exceeded. [Override once] [Cancel]" |
 
 ### 11.3 Cost Visibility
 
 | Surface | Content |
 |---|---|
-| Telegram daily digest | `Spent today`, `spent this month`, `jobs processed` |
-| Weekly report | Source quality, costs, applied count, rejected count |
-| OpenClaw CLI | `openclaw gateway usage-cost --days 7 --json` |
-| OpenClaw chat | `/usage full`, `/usage cost`, `/status` |
-| SQLite | Per-call usage log |
+| Telegram digest header | "Usage" button replies with: jobs collected today, OpenAI spent today, OpenAI spent this month, cover-notes today, last discovery, last scoring update |
+| SQLite `usage_log` | Per-OpenAI-call token and cost record |
+| SQLite `discovery_runs` | One row per discovery session (no per-call cost; subscription) |
+| SQLite `scoring_versions` | One row per scoring update (no per-call cost; subscription) |
 
 ## 12. OpenClaw Docker Deployment
 
 ### 12.1 Volumes
 
-| Host Path | Container Path | Access | Purpose |
+The shared workspace volume is the **only** path both containers can see.
+Everything else is private to one container.
+
+| Host Path | jobbot container | OpenClaw container | Purpose |
 |---|---|---|---|
-| `./data` | `/jobbot/data` | read/write | SQLite, logs, drafts |
-| `./input` | `/jobbot/input` | read-only | CV and preferences |
-| `./config` | `/jobbot/config` | read/write | OpenClaw config |
+| `./data` | `/jobbot/data` rw | — (not mounted) | SQLite, logs, drafts |
+| `./input` | `/jobbot/input` ro | — (not mounted) | `profile.md`, optional `cv.md` |
+| `./config` | `/jobbot/config` rw | — (not mounted) | `sources.json`, `scoring.json`, `jobbot.json` |
+| `./openclaw/workspace` | `/jobbot/workspace` rw | `/openclaw/workspace` rw | Discovery & tuning request/response files |
+| `./openclaw/config` | — (not mounted) | `/openclaw/config` rw | OpenClaw's own state |
+
+Note that **jobbot writes its DB and config files only to its own private
+volumes**; OpenClaw cannot read or modify them directly. All cross-container
+work happens through the shared `workspace/` volume via the JSON file
+contracts in §6.5 and §8.4.
 
 Do not mount:
 
@@ -576,125 +793,94 @@ This is a skeleton, not final production compose. The final compose should match
 | Logged-in links | Send link to user, do not attempt login |
 | PII handling | Do not forward full CV unless user asks |
 
-## 14. Dynamic Optimization Reports
+## 14. Implementation Phases
 
-### 14.1 Daily Telegram Summary
-
-| Field | Description |
-|---|---|
-| Jobs collected | Raw count |
-| Jobs after dedupe | Unique count |
-| Jobs after filters | Shortlist count |
-| Top source | Highest scoring source today |
-| Spend today | LLM spend estimate |
-| Actions | Rejected, snoozed, cover notes, applied |
-
-### 14.2 Weekly Strategy Report
-
-| Section | Questions Answered |
-|---|---|
-| Source winners | Which sources produced the most useful jobs? |
-| Source losers | Which sources produced irrelevant or duplicate jobs? |
-| Query changes | What search terms should change? |
-| Company targets | Which companies should be monitored directly? |
-| New experiments | Which source experiments should be tested next week? |
-| Budget | Did the agent stay within cost limits? |
-
-### 14.3 Example Weekly Recommendation
-
-```text
-Recommendation:
-Increase polling for Ashby AI/devtools career pages from daily to every 6 hours.
-
-Evidence:
-- 14 unique jobs found
-- 7 scored above 80
-- 3 cover-note requests
-- 1 applied
-- Low duplicate rate
-
-Cost:
-- $0.08 LLM analysis this week
-
-Risk:
-- Low. Public career pages only.
-```
-
-## 15. Implementation Phases
-
-### Phase 1: Safe MVP
+### Phase 1: On-Demand MVP
 
 | Feature | Included |
 |---|---|
-| Dockerized OpenClaw Gateway | Yes |
-| Telegram digest | Yes |
-| CV/preferences parsing | Yes |
+| Dockerized OpenClaw Gateway with shared workspace volume | Yes |
+| Telegram digest (with `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` header buttons) | Yes |
+| Profile description parsing (CV optional) | Yes |
 | RSS/API collectors | Yes |
-| SQLite dedupe/logging | Yes |
-| Rule-based filtering | Yes |
-| Basic LLM explanation | Yes |
-| Feedback buttons | Yes |
+| SQLite dedupe/logging with cross-source dedupe and digest_log | Yes |
+| `scoring.json` baseline ruleset + interpreter (deterministic, no LLM per job) | Yes |
+| Per-job feedback buttons | Yes |
+| Cover note generation via OpenAI API (paid, budget-gated) | Yes |
 | Auto-apply | No |
 | Browser automation | No |
+| Cron-driven collection | No (replaced by on-demand) |
 
-### Phase 2: Dynamic Source Optimization
-
-| Feature | Included |
-|---|---|
-| Source score model | Yes |
-| Weekly source discovery | Yes |
-| Query experiment tracking | Yes |
-| Company target list generation | Yes |
-| Weekly strategy report | Yes |
-| Budget-aware LLM routing | Yes |
-
-### Phase 3: Application Assistance
+### Phase 2: Agent-Driven Source Discovery
 
 | Feature | Included |
 |---|---|
-| Cover note generation | Yes |
+| `Update sources` flow: jobbot ↔ OpenClaw ↔ Codex via shared workspace | Yes |
+| Per-candidate validation by OpenClaw (HTTP HEAD, robots.txt, sample fetch) | Yes |
+| Telegram approval gate; agent-discovered sources written to `sources.json` with `created_by='agent'` | Yes |
+| `discovery_runs` table for audit | Yes |
+
+### Phase 3: Agent-Driven Scoring Tuning
+
+| Feature | Included |
+|---|---|
+| `Tune scoring` flow: jobbot ↔ OpenClaw ↔ Codex via shared workspace | Yes |
+| Schema-validated rules output (DSL only, no codegen) | Yes |
+| Shadow test against last N=100 jobs before activation | Yes |
+| Telegram approval gate with diff and shadow-test report | Yes |
+| `scoring_versions` table for audit and rollback | Yes |
+
+### Phase 4: Application Assistance
+
+| Feature | Included |
+|---|---|
+| Cover note generation | Yes (in Phase 1) |
 | CV bullet suggestions | Yes |
 | Company research summary | Yes |
 | Application checklist | Yes |
 | Manual apply tracking | Yes |
 | Auto-submit | No |
 
-### Phase 4: Optional Advanced Features
+### Phase 5: Optional Advanced Features
 
 | Feature | Notes |
 |---|---|
 | Browser preview for public pages | Only non-logged-in pages |
-| Dedicated web dashboard | Optional; Telegram can be enough |
-| Multi-CV variants | Useful for different role clusters |
+| Dedicated web dashboard | Optional; Telegram remains primary |
+| Multi-profile variants | Different `profile.md` per role cluster |
+| CV ingestion in any format | Accept `cv.pdf`, `cv.docx`, `cv.doc`, or a public URL pointing to the CV; extract to text on `init`. Today only `cv.md` is read |
 | Interview follow-up tracking | Later workflow |
 | Recruiter outreach drafts | Draft only; user sends manually |
+| Daily safety-net background collection (`JOBBOT_DAILY_REFRESH=1`) | Opt-in only |
 
-## 16. Acceptance Criteria
+## 15. Acceptance Criteria
 
 | Area | Criteria |
 |---|---|
 | Safety | No LinkedIn cookies, no auto-apply, no outbound recruiter messaging |
-| Docker | Gateway runs in Docker with narrow volumes |
-| Telegram | Digest and four required buttons work |
-| Feedback | Button clicks update job status and learning metrics |
-| Source discovery | Agent proposes new sources with risk and expected signal |
-| Dynamic adjustment | Source priority changes based on metrics |
-| Cost | Daily/monthly budget gate blocks excess LLM calls |
-| Audit | Every job, score, feedback action, and LLM call is logged |
+| Docker | Gateway and jobbot run in Docker; jobbot ↔ OpenClaw share only `./openclaw/workspace/` |
+| Telegram per-job | Digest and four required per-job buttons work |
+| Telegram bot-level | `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` buttons work |
+| On-demand collection | No cron; rate-limited; cross-source dedupe; never re-shows previously digested jobs |
+| Source discovery | Triggered on demand; OpenClaw + Codex iterate with validation; user approves per-candidate; written to `sources.json` with `created_by='agent'` |
+| Scoring tuning | Triggered on demand; OpenClaw + Codex propose rules in the §8.3 DSL; shadow-tested; user approves before activation; previous version archived |
+| Per-job scoring | Fully deterministic; zero LLM calls per job; word-boundary matching only |
+| Cost | OpenAI API used only for cover notes; daily/monthly OpenAI budget gate blocks excess; Codex use is subscription-bounded |
+| Audit | Every job, score, feedback action, OpenAI call, discovery run, and scoring version is logged |
 
-## 17. Open Questions
+## 16. Open Questions
 
 | Question | Default Assumption |
 |---|---|
-| Preferred roles | Extract from CV, then ask user to confirm |
+| Preferred roles | Extract from `profile.md`, then ask user to confirm in Telegram |
 | Salary floor | Ask user during setup |
 | Locations/timezones | Ask user during setup |
 | Email provider | Gmail preferred; IMAP acceptable |
 | Deployment target | Local Docker first; VPS later if desired |
-| LLM provider | OpenAI API key for predictable cost |
-| Use Codex quota | Not for autonomous routine analysis; reserve for development/manual tasks |
+| OpenAI usage | Only for cover notes (and Phase 4 CV bullets); strict budget gate |
+| Codex subscription | Used by OpenClaw for source discovery and scoring tuning; flat-fee, no per-call budget |
 
-## 18. References
+## 17. References
 
 | Topic | Reference |
 |---|---|
