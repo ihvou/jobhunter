@@ -162,24 +162,47 @@ class ScoringCoordinator:
 
     def shadow_test(self, proposed_rules: Dict) -> Dict:
         recent = self.database.recent_jobs(100)
-        scored = []
+        proposed_scores = []
+        current_scores = []
         false_rejects = 0
         applied_count = 0
+        applied_consistent = 0
+        rejected_count = 0
+        rejected_consistent = 0
+        thresholds = proposed_rules.get("thresholds", {}) if isinstance(proposed_rules, dict) else {}
+        min_show_score = int(thresholds.get("min_show_score", 50) or 50)
         for row in recent:
             job = row_to_job(row)
             result = score_job(job, self.profile, proposed_rules)
-            scored.append(result.score)
+            proposed_scores.append(result.score)
+            current_scores.append(int(row["score"] or 0))
             if row["status"] == "applied":
                 applied_count += 1
                 if result.hard_reject:
                     false_rejects += 1
+                if not result.hard_reject and result.score >= min_show_score:
+                    applied_consistent += 1
+            if row["status"] == "rejected":
+                rejected_count += 1
+                if result.hard_reject or result.score < min_show_score:
+                    rejected_consistent += 1
+        current_average = sum(current_scores) / float(len(current_scores) or 1)
+        proposed_average = sum(proposed_scores) / float(len(proposed_scores) or 1)
         return {
             "sample_size": len(recent),
-            "average_score": sum(scored) / float(len(scored) or 1),
-            "min_score": min(scored) if scored else 0,
-            "max_score": max(scored) if scored else 0,
+            "current_distribution": score_values_distribution(current_scores),
+            "proposed_distribution": score_values_distribution(proposed_scores),
+            "current_average_score": current_average,
+            "proposed_average_score": proposed_average,
+            "average_score_shift": proposed_average - current_average,
+            "min_score": min(proposed_scores) if proposed_scores else 0,
+            "max_score": max(proposed_scores) if proposed_scores else 0,
             "applied_count": applied_count,
+            "applied_agreement_rate": applied_consistent / float(applied_count or 1),
+            "irrelevant_count": rejected_count,
+            "irrelevant_agreement_rate": rejected_consistent / float(rejected_count or 1),
             "false_rejects_applied": false_rejects,
+            "false_reject_rate_applied": false_rejects / float(applied_count or 1),
         }
 
     def apply_rules(self, session_id: str, proposed_path: Path) -> int:
@@ -226,9 +249,12 @@ def row_to_job(row):
 
 
 def score_distribution(rows) -> Dict:
+    return score_values_distribution([int(row["score"] or 0) for row in rows])
+
+
+def score_values_distribution(scores) -> Dict:
     buckets = {"0-39": 0, "40-59": 0, "60-79": 0, "80-100": 0}
-    for row in rows:
-        score = int(row["score"] or 0)
+    for score in scores:
         if score < 40:
             buckets["0-39"] += 1
         elif score < 60:

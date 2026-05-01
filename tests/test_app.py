@@ -64,6 +64,24 @@ def config_for(tmp):
     )
 
 
+def add_scored_job(bot, suffix="1", status="new"):
+    bot.database.upsert_sources([SourceConfig(id="s", name="S", type="rss", url="https://example.com/rss")])
+    job_id, _ = bot.database.upsert_job(
+        Job(
+            source_id="s",
+            source_name="S",
+            external_id=suffix,
+            url="https://example.com/%s" % suffix,
+            title="AI Engineer %s" % suffix,
+            company="C",
+        )
+    )
+    bot.database.save_score(job_id, ScoreResult(score=80, hard_reject=False))
+    if status != "new":
+        bot.database.update_job_status(job_id, status)
+    return job_id
+
+
 class AppTests(unittest.TestCase):
     def test_bot_collect_callback_submits_collection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -74,15 +92,40 @@ class AppTests(unittest.TestCase):
             bot.handle_action(TelegramAction(scope="bot", action="collect", callback_id="cb"))
             self.assertIn("collect_and_digest", called)
 
+    def test_bot_header_callbacks_write_requests_and_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            bot.handle_action(TelegramAction(scope="bot", action="discover_sources", callback_id="cb"))
+            bot.handle_action(TelegramAction(scope="bot", action="tune_scoring", callback_id="cb"))
+            bot.handle_action(TelegramAction(scope="bot", action="usage", callback_id="cb"))
+            self.assertTrue(list((bot.config.workspace_dir / "discovery").glob("request-*.json")))
+            self.assertTrue(list((bot.config.workspace_dir / "tuning").glob("request-*.json")))
+            self.assertTrue(any(str(message[0]).startswith("Usage") for message in bot.telegram.messages))
+
+    def test_job_feedback_callbacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            called = []
+            bot.executor.submit = lambda fn, *args: called.append((fn.__name__, args))
+            job_id = add_scored_job(bot, "irrelevant")
+            bot.handle_action(TelegramAction(scope="job", action="irrelevant", target_id=job_id, callback_id="cb"))
+            self.assertEqual(bot.database.get_job(job_id)["status"], "rejected")
+
+            job_id = add_scored_job(bot, "snooze")
+            bot.handle_action(TelegramAction(scope="job", action="snooze_1d", target_id=job_id, callback_id="cb"))
+            self.assertEqual(bot.database.get_job(job_id)["status"], "snoozed")
+
+            job_id = add_scored_job(bot, "cover")
+            bot.handle_action(TelegramAction(scope="job", action="cover_note", target_id=job_id, callback_id="cb"))
+            self.assertIn(("generate_cover_note", (job_id, False)), called)
+
     def test_duplicate_applied_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = JobBot(config_for(tmp))
             bot.telegram = FakeTelegram()
-            bot.database.upsert_sources([SourceConfig(id="s", name="S", type="rss", url="https://example.com/rss")])
-            job_id, _ = bot.database.upsert_job(
-                Job(source_id="s", source_name="S", external_id="1", url="https://example.com/1", title="AI Engineer", company="C")
-            )
-            bot.database.save_score(job_id, ScoreResult(score=80, hard_reject=False))
+            job_id = add_scored_job(bot)
             action = TelegramAction(scope="job", action="applied", target_id=job_id, callback_id="cb")
             bot.handle_action(action)
             bot.handle_action(action)
@@ -142,11 +185,7 @@ class AppTests(unittest.TestCase):
             config.cost.monthly_budget_usd = 0.0
             bot = JobBot(config)
             bot.telegram = FakeTelegram()
-            bot.database.upsert_sources([SourceConfig(id="s", name="S", type="rss", url="https://example.com/rss")])
-            job_id, _ = bot.database.upsert_job(
-                Job(source_id="s", source_name="S", external_id="1", url="https://example.com/1", title="AI Engineer", company="C")
-            )
-            bot.database.save_score(job_id, ScoreResult(score=80, hard_reject=False))
+            job_id = add_scored_job(bot)
             bot.generate_cover_note(job_id)
             self.assertEqual(bot.telegram.messages[0][0], "override")
 
