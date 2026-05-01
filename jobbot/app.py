@@ -128,7 +128,7 @@ class JobBot:
     def send_digest(self) -> None:
         ruleset = load_scoring_rules(self.config.scoring_path)
         min_show_score = int(ruleset.get("thresholds", {}).get("min_show_score", 0) or 0)
-        rows = self.database.jobs_for_digest(self.config.digest_max_jobs, min_show_score=min_show_score)
+        rows = self.database.jobs_for_digest(self.config.digest_max_jobs, min_score=min_show_score)
         usage = self.database.usage_summary()
         body = (
             "Jobs today: %(jobs_today)s\n"
@@ -436,7 +436,12 @@ class JobBot:
             if not proposed_path.exists():
                 self.telegram.answer_callback(action.callback_id, "Scoring response not ready")
                 return
-            version = self.scoring.apply_rules(action.target_id, proposed_path)
+            try:
+                version = self.scoring.apply_rules(action.target_id, proposed_path)
+            except ValueError as exc:
+                log_context(LOGGER, logging.WARNING, "invalid_scoring_rules_rejected", session_id=action.target_id, error=str(exc))
+                self.telegram.answer_callback(action.callback_id, "Invalid ruleset, scoring unchanged: %s" % exc)
+                return
             log_context(LOGGER, logging.INFO, "tuning_applied", session_id=action.target_id, version=version)
             self.telegram.answer_callback(action.callback_id, "Applied scoring v%s" % version)
             self.telegram.send_message("Applied scoring rules version %s." % version)

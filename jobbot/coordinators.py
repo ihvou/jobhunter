@@ -12,6 +12,14 @@ from .models import SourceConfig, UserProfile, utc_now_iso
 from .scoring import load_scoring_rules, score_job
 
 LOGGER = logging.getLogger(__name__)
+SUPPORTED_RULE_KINDS = {
+    "match_any_word",
+    "match_all_word",
+    "hard_reject_word",
+    "field_equals",
+    "numeric_at_least",
+    "feedback_similarity",
+}
 
 
 class DiscoveryCoordinator:
@@ -232,15 +240,16 @@ class ScoringCoordinator:
         proposed = proposed.get("ruleset") or proposed.get("proposed_rules") or proposed
         current = load_scoring_rules(self.config.scoring_path)
         current_version = int(current.get("version", 0) or 0)
-        archive_path = self.config.scoring_path.with_name("scoring.v%s.json" % current_version)
-        if self.config.scoring_path.exists():
-            shutil.copyfile(self.config.scoring_path, archive_path)
         new_version = int(proposed.get("version", current_version + 1) or current_version + 1)
         proposed["version"] = new_version
         proposed["previous_version"] = current_version
         proposed.setdefault("generated_at", utc_now_iso())
-        write_json(self.config.scoring_path, proposed)
+        validate_scoring_ruleset(proposed, current_version)
         report = self.shadow_test(proposed)
+        archive_path = self.config.scoring_path.with_name("scoring.v%s.json" % current_version)
+        if self.config.scoring_path.exists():
+            shutil.copyfile(self.config.scoring_path, archive_path)
+        write_json(self.config.scoring_path, proposed)
         self.database.create_scoring_version(new_version, str(self.config.scoring_path), report, status="active")
         log_context(LOGGER, logging.INFO, "scoring_rules_applied", session_id=session_id, version=new_version)
         return new_version
@@ -286,6 +295,30 @@ def score_values_distribution(scores) -> Dict:
         else:
             buckets["80-100"] += 1
     return buckets
+
+
+def validate_scoring_ruleset(ruleset: Dict, current_version: int) -> None:
+    if not isinstance(ruleset, dict):
+        raise ValueError("ruleset must be an object")
+    version = ruleset.get("version")
+    if not isinstance(version, int):
+        raise ValueError("version must be an integer")
+    if version < current_version:
+        raise ValueError("version must be >= current version")
+    rules = ruleset.get("rules")
+    if not isinstance(rules, list):
+        raise ValueError("rules must be a list")
+    thresholds = ruleset.get("thresholds")
+    if not isinstance(thresholds, dict):
+        raise ValueError("thresholds must be an object")
+    for idx, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ValueError("rule %s must be an object" % idx)
+        if not isinstance(rule.get("id"), str) or not rule.get("id").strip():
+            raise ValueError("rule %s must have a string id" % idx)
+        kind = rule.get("kind")
+        if kind not in SUPPORTED_RULE_KINDS:
+            raise ValueError("rule %s has unsupported kind %r" % (rule.get("id") or idx, kind))
 
 
 def timestamp_id() -> str:

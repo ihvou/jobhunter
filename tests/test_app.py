@@ -69,7 +69,7 @@ def config_for(tmp):
     )
 
 
-def add_scored_job(bot, suffix="1", status="new"):
+def add_scored_job(bot, suffix="1", status="new", score=80):
     bot.database.upsert_sources([SourceConfig(id="s", name="S", type="rss", url="https://example.com/rss")])
     job_id, _ = bot.database.upsert_job(
         Job(
@@ -81,7 +81,7 @@ def add_scored_job(bot, suffix="1", status="new"):
             company="C",
         )
     )
-    bot.database.save_score(job_id, ScoreResult(score=80, hard_reject=False))
+    bot.database.save_score(job_id, ScoreResult(score=score, hard_reject=False))
     if status != "new":
         bot.database.update_job_status(job_id, status)
     return job_id
@@ -109,6 +109,32 @@ class AppTests(unittest.TestCase):
             self.assertTrue(list((bot.config.workspace_dir / "discovery").glob("handoff-*.md")))
             self.assertTrue(any("queued for automated OpenClaw/Codex worker" in str(message[0]) for message in bot.telegram.messages))
             self.assertTrue(any(str(message[0]).startswith("Usage") for message in bot.telegram.messages))
+
+    def test_send_digest_filters_by_min_show_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 50}}', encoding="utf-8")
+            bot = JobBot(config)
+            bot.telegram = FakeTelegram()
+            low_id = add_scored_job(bot, "low", score=30)
+            high_id = add_scored_job(bot, "high", score=80)
+
+            bot.send_digest()
+
+            self.assertEqual(bot.telegram.jobs, [high_id])
+            self.assertNotIn(low_id, bot.telegram.jobs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 90}}', encoding="utf-8")
+            bot = JobBot(config)
+            bot.telegram = FakeTelegram()
+            add_scored_job(bot, "below", score=80)
+
+            bot.send_digest()
+
+            self.assertEqual(bot.telegram.jobs, [])
+            self.assertEqual(bot.telegram.messages[0][0], "No strong new matches right now")
 
     def test_job_feedback_callbacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -238,6 +264,21 @@ class AppTests(unittest.TestCase):
             rules = json.loads(bot.config.scoring_path.read_text(encoding="utf-8"))
             self.assertEqual(rules["version"], 2)
             self.assertTrue((bot.config.scoring_path.parent / "scoring.v0.json").exists())
+
+    def test_invalid_tuning_rules_do_not_overwrite_scoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            response_path = bot.config.workspace_dir / "tuning" / "response-bad.json"
+            response_path.parent.mkdir(parents=True, exist_ok=True)
+            response_path.write_text(json.dumps({"version": 2, "thresholds": {}}), encoding="utf-8")
+            before = bot.config.scoring_path.read_bytes()
+
+            bot.handle_action(TelegramAction(scope="tune", action="apply", target_id="bad", callback_id="cb"))
+
+            self.assertEqual(bot.config.scoring_path.read_bytes(), before)
+            self.assertFalse((bot.config.scoring_path.parent / "scoring.v0.json").exists())
+            self.assertIn("Invalid ruleset, scoring unchanged", bot.telegram.answers[-1])
 
     def test_cover_note_budget_overage_sends_override_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
