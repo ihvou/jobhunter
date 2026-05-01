@@ -1,0 +1,9 @@
+.env
+data/
+openclaw/config/
+openclaw/workspace/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+

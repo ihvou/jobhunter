@@ -1,0 +1,13 @@
+{
+  "openai_model": "gpt-5.4-nano",
+  "digest_max_jobs": 10,
+  "collect_interval_minutes": 240,
+  "max_llm_jobs_per_run": 30,
+  "cost": {
+    "daily_budget_usd": 0.5,
+    "monthly_budget_usd": 10.0,
+    "input_usd_per_million": 0.1,
+    "output_usd_per_million": 0.4
+  }
+}
+

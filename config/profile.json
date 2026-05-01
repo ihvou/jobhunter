@@ -1,0 +1,51 @@
+{
+  "target_titles": [
+    "senior software engineer",
+    "senior full stack engineer",
+    "ai engineer",
+    "llm engineer",
+    "founding engineer",
+    "product engineer"
+  ],
+  "positive_keywords": [
+    "python",
+    "typescript",
+    "react",
+    "node",
+    "llm",
+    "agents",
+    "ai product",
+    "backend",
+    "full stack",
+    "startup"
+  ],
+  "negative_keywords": [
+    "junior",
+    "intern",
+    "unpaid",
+    "volunteer"
+  ],
+  "required_locations": [
+    "remote",
+    "worldwide",
+    "europe",
+    "emea",
+    "asia",
+    "apac"
+  ],
+  "excluded_locations": [
+    "us only",
+    "u.s. only",
+    "security clearance"
+  ],
+  "excluded_domains": [
+    "gambling",
+    "casino",
+    "adult",
+    "defense",
+    "weapons"
+  ],
+  "salary_floor": null,
+  "currency": "USD"
+}
+

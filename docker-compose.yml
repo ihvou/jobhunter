@@ -1,0 +1,52 @@
+services:
+  jobbot:
+    build:
+      context: .
+    container_name: jobhunter-jobbot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-nano}
+      JOBBOT_DAILY_BUDGET_USD: ${JOBBOT_DAILY_BUDGET_USD:-0.50}
+      JOBBOT_MONTHLY_BUDGET_USD: ${JOBBOT_MONTHLY_BUDGET_USD:-10.00}
+      JOBBOT_DATA_DIR: /app/data
+      JOBBOT_INPUT_DIR: /app/input
+      JOBBOT_CONFIG_DIR: /app/config
+      JOBBOT_DATABASE_PATH: /app/data/jobs.sqlite
+      JOBBOT_PROFILE_PATH: /app/input/profile.md
+      JOBBOT_SOURCES_PATH: /app/config/sources.json
+      JOBBOT_SETTINGS_PATH: /app/config/jobbot.json
+      EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
+      EMAIL_IMAP_USERNAME: ${EMAIL_IMAP_USERNAME:-}
+      EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
+      EMAIL_IMAP_FOLDER: ${EMAIL_IMAP_FOLDER:-job-alerts}
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+      - ./input:/app/input:ro
+    command: ["python", "-m", "jobbot", "serve"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    container_name: jobhunter-openclaw-gateway
+    restart: unless-stopped
+    profiles:
+      - openclaw
+    ports:
+      - "127.0.0.1:18789:18789"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./openclaw/config:/home/node/.openclaw
+      - ./openclaw/workspace:/home/node/.openclaw/workspace
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
