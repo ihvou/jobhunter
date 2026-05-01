@@ -13,7 +13,7 @@ Read the product spec in [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPE
 | `jobbot` | Python stdlib-only collector, scorer, budget gate, Telegram bot, and approval handler |
 | `openclaw-gateway` | Isolated Codex CLI worker for source-discovery/scoring-tuning work through the shared workspace |
 | SQLite | Local jobs, scores, feedback, digests, drafts, usage, and audit records |
-| Telegram | Daily controls and per-job feedback loop |
+| Telegram | Persistent daily-control keyboard and per-job feedback loop |
 
 The normal app has no web UI. Telegram is the control surface.
 
@@ -21,7 +21,7 @@ The normal app has no web UI. Telegram is the control surface.
 
 Everything is on-demand.
 
-| Telegram Button | What Happens |
+| Telegram Keyboard Button | What Happens |
 |---|---|
 | `Get more jobs` | Collects enabled sources once, dedupes, scores, and sends only jobs not already shown |
 | `Update sources` | Writes a discovery request; the OpenClaw/Codex worker proposes sources; you approve them in Telegram |
@@ -110,7 +110,7 @@ docker compose run --rm jobbot python -m jobbot init
 docker compose up -d jobbot
 ```
 
-The bot will send a ready message with the digest-level buttons. Click `Get more jobs` to run the first real collection.
+The bot will send a ready message with a persistent Telegram keyboard. Tap `Get more jobs` to run the first real collection. Slash-command fallbacks also work: `/jobs`, `/sources`, `/tune`, and `/usage`.
 
 ## Daily Usage
 

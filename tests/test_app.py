@@ -97,6 +97,23 @@ class AppTests(unittest.TestCase):
             bot.handle_action(TelegramAction(scope="bot", action="collect", callback_id="cb"))
             self.assertIn("collect_and_digest", called)
 
+    def test_bot_collect_reply_keyboard_message_acknowledges_in_chat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            called = []
+            bot.submit_background = lambda fn, *args: called.append(fn.__name__)
+            bot.handle_action(TelegramAction(scope="bot", action="collect"))
+            self.assertIn("collect_and_digest", called)
+            self.assertIn(("Searching for new jobs...", None), bot.telegram.messages)
+
+    def test_bot_menu_action_sends_reply_keyboard_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            bot.handle_action(TelegramAction(scope="bot", action="menu"))
+            self.assertEqual(bot.telegram.messages[-1], ("Jobbot ready", "Use the keyboard buttons below."))
+
     def test_bot_header_callbacks_write_requests_and_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = JobBot(config_for(tmp))

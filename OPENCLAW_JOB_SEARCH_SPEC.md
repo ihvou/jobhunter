@@ -6,7 +6,8 @@ This specification defines a Docker-isolated OpenClaw job-search agent that find
 
 The agent runs as a user-driven scout and analyst, not an autonomous applicant. It searches when the user asks, refines its sources and scoring rules with the user's approval, sends a ranked Telegram digest, and waits for explicit human feedback before drafting cover notes or marking actions as complete.
 
-Primary interaction happens through a Telegram bot. Per-job inline buttons:
+Primary interaction happens through a Telegram bot. Top-level actions use a
+persistent Telegram reply keyboard; per-job decisions stay inline:
 
 | Button | Meaning | System Action |
 |---|---|---|
@@ -528,14 +529,15 @@ rest of the system runs at zero per-call LLM cost.
 
 ### 9.1 Digest Message Format
 
-A digest is sent in response to `Get more jobs`. It contains a header with bot
-controls, then one card per job. Cards are only emitted for jobs not already
-shown to the user in a previous digest (or snoozed-and-now-due).
+A digest is sent in response to `Get more jobs`. The persistent reply keyboard
+stays available for bot-level controls; the digest itself contains a header and
+then one card per job. Cards are only emitted for jobs not already shown to the
+user in a previous digest (or snoozed-and-now-due).
 
 ```text
 New job matches
 
-[Get more jobs] [Update sources] [Tune scoring] [Usage]
+Reply keyboard: [Get more jobs] [Update sources] [Tune scoring] [Usage]
 
 1. Senior AI Product Engineer - ExampleCo
 Score: 91
@@ -553,7 +555,25 @@ Concern:
 [Irrelevant] [Remind me tomorrow] [Give me cover note] [Applied]
 ```
 
-### 9.2 Callback Payloads
+### 9.2 Telegram Actions And Callback Payloads
+
+Top-level reply keyboard messages:
+
+| Button | Parsed Action | Behavior |
+|---|---|---|
+| `Get more jobs` | `bot:collect` | Trigger on-demand collection (§6.2), respect rate limit |
+| `Update sources` | `bot:discover_sources` | Open OpenClaw discovery request (§6.5) |
+| `Tune scoring` | `bot:tune_scoring` | Open OpenClaw scoring-tune request (§8.4) |
+| `Usage` | `bot:usage` | Reply with daily/monthly OpenAI spend and counts |
+
+Slash-command fallbacks:
+
+| Command | Parsed Action |
+|---|---|
+| `/jobs` | `bot:collect` |
+| `/sources` | `bot:discover_sources` |
+| `/tune` | `bot:tune_scoring` |
+| `/usage` | `bot:usage` |
 
 Per-job buttons:
 
@@ -564,14 +584,10 @@ Per-job buttons:
 | `Give me cover note` | `job:cover_note:<job_id>` | `job_id`, draft_request_id |
 | `Applied` | `job:applied:<job_id>` | `job_id`, applied_at |
 
-Bot-level (digest header) buttons:
+Approval inline buttons:
 
 | Button | Callback Data | Behavior |
 |---|---|---|
-| `Get more jobs` | `bot:collect` | Trigger on-demand collection (§6.2), respect rate limit |
-| `Update sources` | `bot:discover_sources` | Open OpenClaw discovery request (§6.5) |
-| `Tune scoring` | `bot:tune_scoring` | Open OpenClaw scoring-tune request (§8.4) |
-| `Usage` | `bot:usage` | Reply with daily/monthly OpenAI spend and counts |
 | `Approve discovery N` | `disc:approve:<session_id>:<idx>` | Append a discovered source to `sources.json` |
 | `Reject discovery` | `disc:reject:<session_id>` | Drop the discovery proposal |
 | `Apply scoring` | `tune:apply:<session_id>` | Activate the proposed scoring rules |
@@ -700,7 +716,7 @@ Budget gate behavior (cover notes):
 
 | Surface | Content |
 |---|---|
-| Telegram digest header | "Usage" button replies with: jobs collected today, OpenAI spent today, OpenAI spent this month, cover-notes today, last discovery, last scoring update |
+| Telegram reply keyboard | "Usage" button replies with: jobs collected today, OpenAI spent today, OpenAI spent this month, cover-notes today, last discovery, last scoring update |
 | SQLite `usage_log` | Per-OpenAI-call token and cost record |
 | SQLite `discovery_runs` | One row per discovery session (no per-call cost; subscription) |
 | SQLite `scoring_versions` | One row per scoring update (no per-call cost; subscription) |
@@ -800,7 +816,7 @@ This is a skeleton, not final production compose. The final compose should match
 | Feature | Included |
 |---|---|
 | Dockerized OpenClaw Gateway with shared workspace volume | Yes |
-| Telegram digest (with `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` header buttons) | Yes |
+| Telegram reply keyboard (`Get more jobs`, `Update sources`, `Tune scoring`, `Usage`) plus per-job inline buttons | Yes |
 | Profile description parsing (CV optional) | Yes |
 | RSS/API collectors | Yes |
 | SQLite dedupe/logging with cross-source dedupe and digest_log | Yes |
@@ -895,4 +911,3 @@ This is a skeleton, not final production compose. The final compose should match
 | Remotive API/RSS | https://remotive.com/remote-jobs/api |
 | Adzuna API | https://developer.adzuna.com/ |
 | Arbeitnow API | https://www.arbeitnow.com/blog/job-board-api |
-

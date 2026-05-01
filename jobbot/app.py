@@ -183,42 +183,51 @@ class JobBot:
         if action.scope == "job":
             self.handle_job_action(action)
             return
-        self.telegram.answer_callback(action.callback_id, "Unknown action")
+        self.answer_action(action, "Unknown action")
 
     def handle_bot_action(self, action) -> None:
         if action.action == "collect":
             allowed, wait = self.database.rate_limit_check("bot:collect", self.config.rate_limit_collect_seconds)
             if not allowed:
-                self.telegram.answer_callback(action.callback_id, "Please wait %ss" % wait)
+                self.answer_action(action, "Please wait %ss" % wait)
                 return
-            self.telegram.answer_callback(action.callback_id, "Searching for new jobs...")
+            self.answer_action(action, "Searching for new jobs...")
             self.submit_background(self.collect_and_digest)
             return
         if action.action == "discover_sources":
             allowed, _count = self.database.rate_limit_daily("bot:discover_sources", self.config.rate_limit_discovery_per_day)
             if not allowed:
-                self.telegram.answer_callback(action.callback_id, "Discovery limit reached today")
+                self.answer_action(action, "Discovery limit reached today")
                 return
             session_id = self.discovery.create_request(load_sources(self.config.sources_path), self.source_metrics_markdown())
             self.database.add_feedback("__system__", "bot:discover_sources", session_id)
-            self.telegram.answer_callback(action.callback_id, "Discovery in progress")
+            self.answer_action(action, "Discovery in progress", send_message_if_no_callback=False)
             self.send_codex_request_notice("source discovery", session_id, self.discovery.handoff_message(session_id))
             return
         if action.action == "tune_scoring":
             allowed, _count = self.database.rate_limit_daily("bot:tune_scoring", self.config.rate_limit_tuning_per_day)
             if not allowed:
-                self.telegram.answer_callback(action.callback_id, "Tuning limit reached today")
+                self.answer_action(action, "Tuning limit reached today")
                 return
             session_id = self.scoring.create_request()
             self.database.add_feedback("__system__", "bot:tune_scoring", session_id)
-            self.telegram.answer_callback(action.callback_id, "Scoring tuning request created")
+            self.answer_action(action, "Scoring tuning request created", send_message_if_no_callback=False)
             self.send_codex_request_notice("scoring tuning", session_id, self.scoring.handoff_message(session_id))
             return
         if action.action == "usage":
-            self.telegram.answer_callback(action.callback_id, "Usage sent")
+            self.answer_action(action, "Usage sent", send_message_if_no_callback=False)
             self.telegram.send_message(format_usage(self.database.usage_summary()))
             return
-        self.telegram.answer_callback(action.callback_id, "Unknown bot action")
+        if action.action == "menu":
+            self.telegram.send_digest_header("Jobbot ready", "Use the keyboard buttons below.")
+            return
+        self.answer_action(action, "Unknown bot action")
+
+    def answer_action(self, action, text: str, send_message_if_no_callback: bool = True) -> None:
+        if action.callback_id:
+            self.telegram.answer_callback(action.callback_id, text)
+        elif send_message_if_no_callback:
+            self.telegram.send_message(text)
 
     def collect_and_digest(self) -> None:
         try:
@@ -487,7 +496,7 @@ class JobBot:
     def serve(self) -> None:
         self.initialize()
         try:
-            self.telegram.send_digest_header("Jobbot ready", "Click Get more jobs to search.")
+            self.telegram.send_digest_header("Jobbot ready", "Use the keyboard buttons below.")
         except TelegramError as exc:
             log_context(LOGGER, logging.ERROR, "telegram_ready_message_failed", error=str(exc))
         try:

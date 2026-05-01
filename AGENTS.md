@@ -132,7 +132,7 @@ docker compose --profile openclaw up -d openclaw-gateway
 |---|---|
 | Shared workspace | Implemented in compose and created by `jobbot` startup |
 | On-demand collection | Implemented; `serve` polls Telegram/workspace only |
-| Digest header buttons | Implemented: `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` |
+| Reply keyboard controls | Implemented: `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` |
 | Per-job buttons | Implemented: `Irrelevant`, `Remind me tomorrow`, `Give me cover note`, `Applied` |
 | Cross-source dedupe | Implemented via canonical URL + normalized company/title |
 | No re-spam | Implemented with `digest_log`, except snoozed jobs due for resend |

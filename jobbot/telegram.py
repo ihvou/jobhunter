@@ -17,6 +17,29 @@ class TelegramError(RuntimeError):
     pass
 
 
+BOT_MESSAGE_ACTIONS = {
+    "get more jobs": "collect",
+    "jobs": "collect",
+    "/jobs": "collect",
+    "/get_more_jobs": "collect",
+    "update sources": "discover_sources",
+    "sources": "discover_sources",
+    "/sources": "discover_sources",
+    "/update_sources": "discover_sources",
+    "/discover_sources": "discover_sources",
+    "tune scoring": "tune_scoring",
+    "tune": "tune_scoring",
+    "/tune": "tune_scoring",
+    "/tune_scoring": "tune_scoring",
+    "/scoring": "tune_scoring",
+    "usage": "usage",
+    "/usage": "usage",
+    "menu": "menu",
+    "/start": "menu",
+    "/help": "menu",
+}
+
+
 class TelegramClient:
     def __init__(self, token: str, allowed_chat_id: Optional[int]):
         self.token = token or ""
@@ -29,7 +52,7 @@ class TelegramClient:
 
     def send_digest_header(self, title: str, body: str = "") -> None:
         text = title if not body else "%s\n%s" % (title, body)
-        self.send_message(text, reply_markup=digest_keyboard())
+        self.send_message(text, reply_markup=main_menu_keyboard())
 
     def send_job(self, row) -> None:
         self.send_message(format_job_message(row), reply_markup=job_keyboard(row["id"]))
@@ -92,24 +115,51 @@ class TelegramClient:
         for update in data.get("result", []):
             self.offset = max(self.offset, int(update.get("update_id", 0)) + 1)
             callback = update.get("callback_query")
-            if not callback:
+            if callback:
+                action = self._action_from_callback(callback)
+                if action:
+                    actions.append(action)
                 continue
-            message = callback.get("message", {})
-            chat = message.get("chat", {})
-            chat_id = chat.get("id")
-            if int(chat_id) != int(self.allowed_chat_id):
-                self.answer_callback(callback.get("id", ""), "Unauthorized chat")
-                continue
-            action = parse_callback(callback.get("data", ""))
-            if not action:
-                self.answer_callback(callback.get("id", ""), "Unknown action")
-                continue
-            action.callback_id = callback.get("id")
-            action.chat_id = int(chat_id)
-            action.message_id = message.get("message_id")
-            action.raw = callback
-            actions.append(action)
+            message = update.get("message")
+            if message:
+                action = self._action_from_message(message)
+                if action:
+                    actions.append(action)
         return actions
+
+    def _action_from_callback(self, callback: Dict) -> Optional[TelegramAction]:
+        message = callback.get("message", {})
+        chat = message.get("chat", {})
+        chat_id = chat.get("id")
+        if chat_id is None or int(chat_id) != int(self.allowed_chat_id):
+            self.answer_callback(callback.get("id", ""), "Unauthorized chat")
+            return None
+        action = parse_callback(callback.get("data", ""))
+        if not action:
+            self.answer_callback(callback.get("id", ""), "Unknown action")
+            return None
+        action.callback_id = callback.get("id")
+        action.chat_id = int(chat_id)
+        action.message_id = message.get("message_id")
+        action.raw = callback
+        return action
+
+    def _action_from_message(self, message: Dict) -> Optional[TelegramAction]:
+        chat = message.get("chat", {})
+        chat_id = chat.get("id")
+        if chat_id is None or int(chat_id) != int(self.allowed_chat_id):
+            return None
+        action = parse_message(message.get("text", ""))
+        if not action:
+            self.send_message(
+                "Use the keyboard buttons, or type /jobs, /sources, /tune, or /usage.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return None
+        action.chat_id = int(chat_id)
+        action.message_id = message.get("message_id")
+        action.raw = message
+        return action
 
     def _post(self, method: str, payload: Dict) -> Dict:
         body = urllib.parse.urlencode(payload).encode("utf-8")
@@ -130,7 +180,14 @@ class TelegramClient:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.URLError as exc:
                 last_error = exc
-                log_context(LOGGER, logging.WARNING if attempt == 0 else logging.ERROR, "telegram_url_error", method=method, error=str(exc.reason), attempt=attempt + 1)
+                log_context(
+                    LOGGER,
+                    logging.WARNING if attempt == 0 else logging.ERROR,
+                    "telegram_url_error",
+                    method=method,
+                    error=str(exc.reason),
+                    attempt=attempt + 1,
+                )
                 if attempt == 0:
                     time.sleep(1)
         raise TelegramError("Telegram request failed for %s: %s" % (method, last_error.reason))
@@ -143,6 +200,24 @@ class TelegramClient:
 
     def _url(self, method: str) -> str:
         return "https://api.telegram.org/bot%s/%s" % (self.token, method)
+
+
+def parse_message(text: str) -> Optional[TelegramAction]:
+    normalized = normalize_message_text(text)
+    action = BOT_MESSAGE_ACTIONS.get(normalized)
+    if not action:
+        return None
+    return TelegramAction(scope="bot", action=action)
+
+
+def normalize_message_text(text: str) -> str:
+    text = " ".join(str(text or "").strip().split())
+    if not text:
+        return ""
+    if text.startswith("/"):
+        command = text.split()[0].split("@", 1)[0]
+        return command.lower()
+    return text.lower()
 
 
 def parse_callback(data: str) -> Optional[TelegramAction]:
@@ -163,19 +238,21 @@ def parse_callback(data: str) -> Optional[TelegramAction]:
     return None
 
 
-def digest_keyboard() -> Dict:
+def main_menu_keyboard() -> Dict:
     return {
-        "inline_keyboard": [
-            [
-                {"text": "Get more jobs", "callback_data": "bot:collect"},
-                {"text": "Update sources", "callback_data": "bot:discover_sources"},
-            ],
-            [
-                {"text": "Tune scoring", "callback_data": "bot:tune_scoring"},
-                {"text": "Usage", "callback_data": "bot:usage"},
-            ],
-        ]
+        "keyboard": [
+            [{"text": "Get more jobs"}, {"text": "Update sources"}],
+            [{"text": "Tune scoring"}, {"text": "Usage"}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "one_time_keyboard": False,
+        "input_field_placeholder": "Choose an action",
     }
+
+
+def digest_keyboard() -> Dict:
+    return main_menu_keyboard()
 
 
 def job_keyboard(job_id: str) -> Dict:
