@@ -115,26 +115,28 @@ function validateResponse(kind, payload) {
 }
 
 function codexArgs(kind, sessionId, outPath) {
-  const args = [
-    "exec",
-    "--skip-git-repo-check",
+  const globalArgs = [
     "--sandbox",
     "workspace-write",
     "--ask-for-approval",
     "never",
     "--cd",
     path.join(workspaceDir, kind),
-    "--output-last-message",
-    outPath,
   ];
   if (kind === "discovery") {
-    args.unshift("--search");
+    globalArgs.unshift("--search");
   }
   if (model) {
-    args.push("--model", model);
+    globalArgs.push("--model", model);
   }
-  args.push("-");
-  return args;
+  return [
+    ...globalArgs,
+    "exec",
+    "--skip-git-repo-check",
+    "--output-last-message",
+    outPath,
+    "-",
+  ];
 }
 
 function runCodex(kind, sessionId, prompt) {

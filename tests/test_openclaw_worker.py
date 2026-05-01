@@ -37,7 +37,9 @@ console.log(JSON.stringify({
         self.assertIn("--search", args["discovery"])
         self.assertNotIn("--search", args["tuning"])
         self.assertEqual(args["discovery"][0], "--search")
-        self.assertEqual(args["tuning"][0], "exec")
+        self.assertLess(args["discovery"].index("--ask-for-approval"), args["discovery"].index("exec"))
+        self.assertLess(args["tuning"].index("--ask-for-approval"), args["tuning"].index("exec"))
+        self.assertIn("exec", args["tuning"])
 
     def test_build_prompt_wraps_request_json_as_untrusted(self):
         with tempfile.TemporaryDirectory() as tmp:
