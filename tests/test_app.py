@@ -297,6 +297,22 @@ class AppTests(unittest.TestCase):
             self.assertFalse((bot.config.scoring_path.parent / "scoring.v0.json").exists())
             self.assertIn("Invalid ruleset, scoring unchanged", bot.telegram.answers[-1])
 
+    def test_tuning_worker_failure_is_sent_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobBot(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            status_path = bot.config.workspace_dir / "tuning" / "status-failed1.json"
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(json.dumps({"state": "failed", "message": "timeout"}), encoding="utf-8")
+
+            bot.poll_workspace()
+            bot.poll_workspace()
+
+            messages = [message[0] for message in bot.telegram.messages]
+            failures = [message for message in messages if "Scoring tuning failed" in message]
+            self.assertEqual(failures, ["Scoring tuning failed for session failed1: timeout"])
+            self.assertTrue((bot.config.workspace_dir / "tuning" / "notified-failed1").exists())
+
     def test_cover_note_budget_overage_sends_override_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)

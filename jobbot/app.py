@@ -346,6 +346,10 @@ class JobBot:
             log_context(LOGGER, logging.INFO, "sending_discovery_approval", session_id=item["session_id"], candidates=len(item["candidates"]))
             self.telegram.send_discovery_approval(item["session_id"], item["candidates"])
         for item in self.scoring.poll_done():
+            if item.get("error"):
+                log_context(LOGGER, logging.WARNING, "sending_tuning_failure", session_id=item["session_id"], error=item["error"])
+                self.telegram.send_message("Scoring tuning failed for session %s: %s" % (item["session_id"], item["error"]))
+                continue
             log_context(LOGGER, logging.INFO, "sending_tuning_approval", session_id=item["session_id"])
             self.telegram.send_tuning_approval(item["session_id"], json.dumps(item["report"], indent=2, sort_keys=True))
 
