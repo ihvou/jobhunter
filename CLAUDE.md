@@ -36,7 +36,7 @@ L1 scoring is deterministic and free. L2 relevance is an optional, cached, budge
 
 | Document | Use |
 |---|---|
-| [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPEC.md) | Intended product behavior |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Intended product behavior |
 | [`tasks.md`](tasks.md) | Priority list and acceptance criteria |
 | [`README.md`](README.md) | User setup and daily operation |
 | `git log` | Recent implementation history |
@@ -73,7 +73,7 @@ L1 scoring is deterministic and free. L2 relevance is an optional, cached, budge
 ├── tests/
 ├── Dockerfile
 ├── docker-compose.yml
-├── OPENCLAW_JOB_SEARCH_SPEC.md
+├── ARCHITECTURE.md
 ├── tasks.md
 ├── README.md
 ├── AGENTS.md

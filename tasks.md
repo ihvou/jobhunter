@@ -1,6 +1,6 @@
 # Tasks
 
-> **Note**: all tasks for this project are tracked in the single table below — do not add narrative sections, sub-headings, or freeform notes outside the table. New work goes in as a new numbered row. This file was rewritten against the revised [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPEC.md) (on-demand model, OpenClaw+Codex agent flows, two-layer scoring); the previous task numbering is not preserved.
+> **Note**: all tasks for this project are tracked in the single table below — do not add narrative sections, sub-headings, or freeform notes outside the table. New work goes in as a new numbered row. This file was rewritten against the revised [`ARCHITECTURE.md`](ARCHITECTURE.md) (on-demand model, OpenClaw+Codex agent flows, two-layer scoring); the previous task numbering is not preserved.
 
 | # | Priority | Problem | Solution | Acceptance | Impact |
 |---:|---|---|---|---|---|
