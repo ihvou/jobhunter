@@ -8,6 +8,7 @@ const pollMs = Math.max(1000, Number(process.env.OPENCLAW_POLL_SECONDS || "5") *
 const timeoutMs = Math.max(60000, Number(process.env.OPENCLAW_CODEX_TIMEOUT_SECONDS || "900") * 1000);
 const model = (process.env.OPENCLAW_CODEX_MODEL || "").trim();
 const maxAgentTurns = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_CODEX_TURNS || "5"));
+const maxAgentWallMs = Math.max(1000, Number(process.env.OPENCLAW_AGENT_MAX_WALL_SECONDS || "180") * 1000);
 const maxPromptChars = Math.max(10000, Number(process.env.OPENCLAW_MAX_PROMPT_CHARS || "60000"));
 const maxSqlQueries = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_SQL_QUERIES || "20"));
 const maxFileReads = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_FILE_READS || "10"));
@@ -170,8 +171,9 @@ function codexArgs(kind, sessionId, outPath) {
   ];
 }
 
-function runCodex(kind, sessionId, prompt) {
+function runCodex(kind, sessionId, prompt, timeoutOverrideMs = timeoutMs) {
   return new Promise((resolve, reject) => {
+    const effectiveTimeoutMs = Math.max(1, timeoutOverrideMs);
     const outPath = outputPath(kind, sessionId);
     const child = spawn("codex", codexArgs(kind, sessionId, outPath), {
       env: process.env,
@@ -181,8 +183,8 @@ function runCodex(kind, sessionId, prompt) {
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(new Error(`Codex timed out after ${timeoutMs / 1000}s`));
-    }, timeoutMs);
+      reject(new Error(`Codex timed out after ${Math.round(effectiveTimeoutMs / 1000)}s`));
+    }, effectiveTimeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
     });
@@ -207,18 +209,29 @@ function runCodex(kind, sessionId, prompt) {
   });
 }
 
+let runCodexForAgent = runCodex;
+
 async function runAgentCodex(kind, sessionId, prompt) {
+  const startedAt = Date.now();
   const usage = {
     codex_turns: 0,
     sql_queries: 0,
     file_reads: 0,
     http_fetches: 0,
-    started_at: Date.now(),
+    started_at: startedAt,
   };
   let workingPrompt = prompt;
   for (let turn = 1; turn <= maxAgentTurns; turn += 1) {
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs > maxAgentWallMs) {
+      throw new Error("cap exceeded: OPENCLAW_AGENT_MAX_WALL_SECONDS");
+    }
+    const remainingMs = maxAgentWallMs - elapsedMs;
+    if (remainingMs <= 0) {
+      throw new Error("cap exceeded: OPENCLAW_AGENT_MAX_WALL_SECONDS");
+    }
     usage.codex_turns = turn;
-    const result = await runCodex(kind, sessionId, workingPrompt);
+    const result = await runCodexForAgent(kind, sessionId, workingPrompt, Math.min(timeoutMs, remainingMs));
     const parsed = extractJson(result.finalText);
     if (!Array.isArray(parsed.tool_calls) || parsed.tool_calls.length === 0) {
       parsed.usage = { ...(parsed.usage || {}), ...usage, duration_seconds: Math.round((Date.now() - usage.started_at) / 1000) };
@@ -234,6 +247,10 @@ async function runAgentCodex(kind, sessionId, prompt) {
     }
   }
   throw new Error(`cap exceeded: OPENCLAW_AGENT_MAX_CODEX_TURNS=${maxAgentTurns}`);
+}
+
+function setRunCodexForTests(fn) {
+  runCodexForAgent = fn || runCodex;
 }
 
 async function executeToolCall(call, usage) {
@@ -465,6 +482,9 @@ module.exports = {
   buildPrompt,
   codexArgs,
   extractJson,
+  runCodex,
+  runAgentCodex,
+  setRunCodexForTests,
   assertSelectOnly,
   readFileTool,
   listDirTool,

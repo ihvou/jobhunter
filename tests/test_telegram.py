@@ -4,6 +4,17 @@ from jobbot.telegram import TelegramClient, agent_actions_keyboard, job_keyboard
 
 
 class TelegramTests(unittest.TestCase):
+    def capture_agent_response(self, response):
+        client = TelegramClient("", None)
+        sent = []
+
+        def fake_send(text, reply_markup=None, parse_mode=None):
+            sent.append((text, reply_markup, parse_mode))
+
+        client.send_message = fake_send
+        client.send_agent_response("s1", response)
+        return sent[-1]
+
     def test_parse_callback(self):
         action = parse_callback("job:cover_note:abc123")
         self.assertEqual(action.action, "cover_note")
@@ -65,6 +76,55 @@ class TelegramTests(unittest.TestCase):
         labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
         self.assertIn("Apply 2", labels)
         self.assertNotIn("Apply 1", labels)
+
+    def test_agent_response_renders_data_answer_inline_with_write_action(self):
+        text, keyboard, _parse_mode = self.capture_agent_response(
+            {
+                "answer": "Top-level answer",
+                "proposed_actions": [
+                    {
+                        "kind": "data_answer",
+                        "summary": "Detailed rows",
+                        "payload": {
+                            "answer": "Detailed table with 3 rows",
+                            "rows": [{"label": "one", "value": "1"}],
+                        },
+                    },
+                    {"kind": "directive_edit", "summary": "Add directive", "payload": {"directive": "X"}},
+                ],
+            }
+        )
+        labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+        numeric_apply = [label for label in labels if label.startswith("Apply ") and label[6:].isdigit()]
+        self.assertIn("Top-level answer", text)
+        self.assertIn("Detailed table with 3 rows", text)
+        self.assertIn("| one | 1 |", text)
+        self.assertEqual(numeric_apply, ["Apply 2"])
+        self.assertNotIn("Apply 1", labels)
+
+    def test_agent_response_with_only_data_answers_uses_main_menu(self):
+        text, keyboard, _parse_mode = self.capture_agent_response(
+            {
+                "answer": "Here is the data.",
+                "proposed_actions": [
+                    {"kind": "data_answer", "summary": "Rows", "payload": {"answer": "No writes"}}
+                ],
+            }
+        )
+        self.assertIn("No writes", text)
+        self.assertIn("keyboard", keyboard)
+        self.assertNotIn("inline_keyboard", keyboard)
+
+    def test_agent_response_renders_evidence_table(self):
+        text, _keyboard, _parse_mode = self.capture_agent_response(
+            {
+                "answer": "Evidence found.",
+                "evidence_table": [{"label": "a", "value": "1"}, {"label": "b", "value": "2"}],
+                "proposed_actions": [],
+            }
+        )
+        self.assertIn("| a | 1 |", text)
+        self.assertIn("| b | 2 |", text)
 
     def test_main_menu_is_reply_keyboard(self):
         keyboard = main_menu_keyboard()

@@ -29,6 +29,7 @@ Response schema:
 }
 
 Action payload guidance:
+- Use exactly the payload keys shown below. Do not use aliases, extra keys, patch formats, or bare objects; jobbot rejects unknown payload keys.
 - `directive_edit`: `{ "directive": "..." }`. Use for durable preferences such as source strategy, language requirements, role exclusions, or prioritization.
 - `profile_edit`: `{ "new_about_me": "..." }`. Use only when the user asks to rewrite the profile.
 - `sources_proposal`: `{ "operations": [{"op": "add|modify|disable", "source": {...}}] }`. Prefer aggregators/searchable boards/RSS/API/ATS feeds over random company pages unless the user asks for a target-company strategy.

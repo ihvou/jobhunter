@@ -50,6 +50,9 @@ class AppConfig:
     rate_limit_scoring_apply_per_day: int = 3
     rate_limit_bulk_apply_per_day: int = 2
     l2_max_jobs: int = 30
+    agent_request_recent_jobs: int = 15
+    agent_request_desc_chars: int = 250
+    agent_request_feedback_items: int = 5
     codex_handoff_mode: str = "auto"
     cost: CostConfig = field(default_factory=CostConfig)
 
@@ -163,6 +166,15 @@ def load_app_config() -> AppConfig:
             "JOBBOT_RATE_LIMIT_BULK_APPLY_PER_DAY", settings, "rate_limit_bulk_apply_per_day", 2, int
         ),
         l2_max_jobs=env_or_setting("JOBBOT_L2_MAX_JOBS", settings, "l2_max_jobs", 30, int),
+        agent_request_recent_jobs=env_or_setting(
+            "JOBBOT_AGENT_REQUEST_RECENT_JOBS", settings, "agent_request_recent_jobs", 15, int
+        ),
+        agent_request_desc_chars=env_or_setting(
+            "JOBBOT_AGENT_REQUEST_DESC_CHARS", settings, "agent_request_desc_chars", 250, int
+        ),
+        agent_request_feedback_items=env_or_setting(
+            "JOBBOT_AGENT_REQUEST_FEEDBACK_ITEMS", settings, "agent_request_feedback_items", 5, int
+        ),
         codex_handoff_mode=str(os.getenv("JOBBOT_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
         cost=cost,
     )

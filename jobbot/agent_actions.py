@@ -49,6 +49,23 @@ class AgentActionContext:
     run_l2: Optional[Callable[[List], None]] = None
 
 
+def validate_payload_keys(kind: str, payload: Dict, required: List[str], optional: List[str] = None) -> Optional[ActionResult]:
+    optional = optional or []
+    expected = required + optional
+    allowed = set(expected)
+    for key in payload.keys():
+        if key not in allowed:
+            return ActionResult(False, "unknown payload key '%s', expected %s" % (key, expected_keys(expected)))
+    for key in required:
+        if key not in payload:
+            return ActionResult(False, "%s missing required payload key '%s'" % (kind, key))
+    return None
+
+
+def expected_keys(keys: List[str]) -> str:
+    return ", ".join("'%s'" % key for key in keys)
+
+
 def sanitize_actions(raw_actions: List[Dict]) -> List[Dict]:
     actions = []
     for raw in raw_actions or []:
@@ -79,15 +96,11 @@ def apply_agent_action(action: Dict, context: AgentActionContext) -> ActionResul
 
 
 def directive_edit(payload: Dict, context: AgentActionContext) -> ActionResult:
+    validation = validate_payload_keys("directive_edit", payload, ["directive"])
+    if validation:
+        return validation
     sections = split_profile_sections(read_text(context.config.profile_path))
-    text = (
-        payload.get("directive")
-        or payload.get("append")
-        or payload.get("new_directive")
-        or payload.get("text")
-        or payload.get("patch_diff")
-        or ""
-    )
+    text = payload.get("directive") or ""
     text = sanitize_text(text, 4000)
     if not text:
         return ActionResult(False, "directive_edit had no directive text")
@@ -102,7 +115,10 @@ def directive_edit(payload: Dict, context: AgentActionContext) -> ActionResult:
 
 
 def profile_edit(payload: Dict, context: AgentActionContext) -> ActionResult:
-    new_about = payload.get("new_about_me") or payload.get("about_me") or payload.get("text") or ""
+    validation = validate_payload_keys("profile_edit", payload, ["new_about_me"])
+    if validation:
+        return validation
+    new_about = payload.get("new_about_me") or ""
     new_about = sanitize_text(new_about, 12000)
     if not new_about:
         return ActionResult(False, "profile_edit had no About me content")
@@ -113,6 +129,9 @@ def profile_edit(payload: Dict, context: AgentActionContext) -> ActionResult:
 
 
 def sources_proposal(payload: Dict, context: AgentActionContext) -> ActionResult:
+    validation = validate_payload_keys("sources_proposal", payload, ["operations"])
+    if validation:
+        return validation
     operations = payload.get("operations") or []
     if not isinstance(operations, list):
         return ActionResult(False, "sources_proposal operations must be a list")
@@ -164,7 +183,10 @@ def sources_proposal(payload: Dict, context: AgentActionContext) -> ActionResult
 
 
 def scoring_rule_proposal(payload: Dict, context: AgentActionContext) -> ActionResult:
-    proposed = payload.get("ruleset") or payload.get("proposed_rules") or payload
+    validation = validate_payload_keys("scoring_rule_proposal", payload, ["ruleset"])
+    if validation:
+        return validation
+    proposed = payload.get("ruleset")
     if not isinstance(proposed, dict):
         return ActionResult(False, "scoring_rule_proposal ruleset must be an object")
     current = load_scoring_rules(context.config.scoring_path)
@@ -181,11 +203,27 @@ def scoring_rule_proposal(payload: Dict, context: AgentActionContext) -> ActionR
 
 
 def data_answer(payload: Dict, _context: AgentActionContext) -> ActionResult:
-    answer = payload.get("answer") or payload.get("text") or "Read-only answer shown."
+    validation = validate_payload_keys(
+        "data_answer",
+        payload,
+        [],
+        ["answer", "rows", "aggregates", "file_content", "analysis"],
+    )
+    if validation:
+        return validation
+    answer = payload.get("answer") or payload.get("analysis") or "Read-only answer shown."
     return ActionResult(True, sanitize_text(answer, 3000))
 
 
 def human_followup(payload: Dict, _context: AgentActionContext) -> ActionResult:
+    validation = validate_payload_keys(
+        "human_followup",
+        payload,
+        ["title"],
+        ["summary", "suggested_approach", "urgency"],
+    )
+    if validation:
+        return validation
     tasks_path = Path.cwd() / "tasks.md"
     if not tasks_path.exists():
         return ActionResult(False, "tasks.md not found")
@@ -204,12 +242,27 @@ def human_followup(payload: Dict, _context: AgentActionContext) -> ActionResult:
 
 
 def rescore_jobs(payload: Dict, context: AgentActionContext) -> ActionResult:
+    validation = validate_payload_keys("rescore_jobs", payload, [], ["window_hours", "source_ids"])
+    if validation:
+        return validation
     hours = min(168, max(1, int(payload.get("window_hours", 24) or 24)))
+    source_ids = payload.get("source_ids") or []
+    if not isinstance(source_ids, list):
+        return ActionResult(False, "rescore_jobs source_ids must be a list")
     cutoff = (datetime.utcnow() - timedelta(hours=hours)).replace(microsecond=0).isoformat() + "Z"
     rules = load_scoring_rules(context.config.scoring_path)
     rows = []
     with context.database.connection() as conn:
-        rows = list(conn.execute("select * from jobs where last_seen_at >= ? order by last_seen_at desc", (cutoff,)))
+        if source_ids:
+            placeholders = ",".join("?" for _ in source_ids[:20])
+            rows = list(
+                conn.execute(
+                    "select * from jobs where last_seen_at >= ? and source_id in (%s) order by last_seen_at desc" % placeholders,
+                    (cutoff, *[str(source_id) for source_id in source_ids[:20]]),
+                )
+            )
+        else:
+            rows = list(conn.execute("select * from jobs where last_seen_at >= ? order by last_seen_at desc", (cutoff,)))
     for row in rows:
         job = row_to_job(row)
         context.database.save_score(row["id"], score_job(job, context.profile, rules))
@@ -219,6 +272,9 @@ def rescore_jobs(payload: Dict, context: AgentActionContext) -> ActionResult:
 
 
 def bulk_update_jobs(payload: Dict, context: AgentActionContext) -> ActionResult:
+    validation = validate_payload_keys("bulk_update_jobs", payload, ["filter_sql", "new_status"])
+    if validation:
+        return validation
     filter_sql = str(payload.get("filter_sql") or "").strip()
     new_status = str(payload.get("new_status") or "").strip()
     if new_status not in ("archived", "rejected"):
@@ -235,6 +291,9 @@ def bulk_update_jobs(payload: Dict, context: AgentActionContext) -> ActionResult
 
 
 def backup_export(payload: Dict, context: AgentActionContext) -> ActionResult:
+    validation = validate_payload_keys("backup_export", payload, [], ["include"])
+    if validation:
+        return validation
     include = set(payload.get("include") or ["config", "input", "scoring_archives"])
     backup_dir = context.config.data_dir / "backup"
     backup_dir.mkdir(parents=True, exist_ok=True)

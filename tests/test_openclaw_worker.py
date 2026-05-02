@@ -113,6 +113,32 @@ console.log(JSON.stringify(result));
         self.assertEqual(result["select"], "select id from jobs")
         self.assertTrue(result["rejected"])
 
+    def test_agent_wall_clock_cap_aborts_multi_turn_run(self):
+        output = run_node(
+            """
+process.env.OPENCLAW_AGENT_MAX_WALL_SECONDS = "1";
+process.env.OPENCLAW_AGENT_MAX_CODEX_TURNS = "5";
+const worker = require("./openclaw/worker/watcher.js");
+worker.setRunCodexForTests(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  return {
+    finalText: JSON.stringify({
+      tool_calls: [{id: "1", name: "read_file", arguments: {path: "/jobbot/config/missing"}}]
+    })
+  };
+});
+(async () => {
+  try {
+    await worker.runAgentCodex("agent", "wall", "prompt");
+    process.stdout.write("completed");
+  } catch (error) {
+    process.stdout.write(error.message);
+  }
+})();
+"""
+        )
+        self.assertIn("OPENCLAW_AGENT_MAX_WALL_SECONDS", output)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,8 +32,15 @@ class AgentCoordinator:
             "profile_md_full": self.profile.raw_text[:20000],
             "recent_directives_count": directive_count(self.profile.directives),
             "sources_summary": [source_summary(source) for source in load_sources(self.config.sources_path)],
-            "recent_jobs_sample": [job_summary(row) for row in self.database.recent_jobs(30)],
-            "recent_feedback_summary": recent_feedback_summary(self.database),
+            "recent_jobs_sample": [
+                job_summary(row, self.config.agent_request_desc_chars)
+                for row in self.database.recent_jobs(max(0, self.config.agent_request_recent_jobs))
+            ],
+            "recent_feedback_summary": recent_feedback_summary(
+                self.database,
+                max(0, self.config.agent_request_feedback_items),
+                self.config.agent_request_desc_chars,
+            ),
             "scoring_version": current_scoring_version(self.config.scoring_path),
             "instructions_hint": instructions_hint,
             "response_contract": {
@@ -132,7 +139,7 @@ def source_summary(source) -> Dict:
     }
 
 
-def job_summary(row) -> Dict:
+def job_summary(row, desc_chars: int = 250) -> Dict:
     return {
         "id": row["id"],
         "title": row["title"],
@@ -141,15 +148,15 @@ def job_summary(row) -> Dict:
         "url": row["url"],
         "score": row["score"] if "score" in row.keys() else None,
         "status": row["status"],
-        "description_excerpt": (row["description"] or "")[:500],
+        "description_excerpt": (row["description"] or "")[: max(0, desc_chars)],
     }
 
 
-def recent_feedback_summary(database: Database) -> Dict:
+def recent_feedback_summary(database: Database, limit: int = 5, desc_chars: int = 250) -> Dict:
     return {
-        "applied": [job_summary(row) for row in database.feedback_jobs("applied", 10)],
-        "irrelevant": [job_summary(row) for row in database.feedback_jobs("irrelevant", 10)],
-        "cover_note_requested": [job_summary(row) for row in database.feedback_jobs("cover_note", 10)],
+        "applied": [job_summary(row, desc_chars) for row in database.feedback_jobs("applied", limit)],
+        "irrelevant": [job_summary(row, desc_chars) for row in database.feedback_jobs("irrelevant", limit)],
+        "cover_note_requested": [job_summary(row, desc_chars) for row in database.feedback_jobs("cover_note", limit)],
     }
 
 

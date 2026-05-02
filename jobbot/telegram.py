@@ -93,9 +93,21 @@ class TelegramClient:
         ]
         actions = response.get("proposed_actions") or []
         write_actions = [action for action in actions if action.get("kind") != "data_answer"]
-        if actions:
+        evidence_lines = render_table_rows(response.get("evidence_table"))
+        if evidence_lines:
+            lines.extend(evidence_lines)
+            lines.append("")
+        for action in actions:
+            if action.get("kind") == "data_answer":
+                rendered = render_data_answer(action)
+                if rendered:
+                    lines.extend(rendered)
+                    lines.append("")
+        if write_actions:
             lines.append("Proposed actions:")
             for idx, action in enumerate(actions):
+                if action.get("kind") == "data_answer":
+                    continue
                 lines.append("%s. %s: %s" % (idx + 1, action.get("kind"), action.get("summary", "")))
         usage = response.get("usage") or {}
         footer = "Audit: session %s" % session_id
@@ -107,7 +119,8 @@ class TelegramClient:
                 usage.get("duration_seconds", 0),
             )
         lines.extend(["", footer])
-        self.send_message("\n".join(lines), reply_markup=agent_actions_keyboard(session_id, actions) if write_actions else main_menu_keyboard())
+        keyboard = agent_actions_keyboard(session_id, actions)
+        self.send_message("\n".join(lines), reply_markup=keyboard or main_menu_keyboard())
 
     def delete_message(self, message_id: Optional[int]) -> None:
         if not self.enabled or not message_id:
@@ -366,7 +379,7 @@ def tuning_keyboard(session_id: str) -> Dict:
     }
 
 
-def agent_actions_keyboard(session_id: str, actions: List[Dict]) -> Dict:
+def agent_actions_keyboard(session_id: str, actions: List[Dict]) -> Optional[Dict]:
     rows = []
     current = []
     for idx, action in enumerate(actions):
@@ -378,6 +391,8 @@ def agent_actions_keyboard(session_id: str, actions: List[Dict]) -> Dict:
             current = []
     if current:
         rows.append(current)
+    if not rows:
+        return None
     rows.append(
         [
             {"text": "Apply all", "callback_data": "agent:apply:%s:all" % session_id},
@@ -385,6 +400,61 @@ def agent_actions_keyboard(session_id: str, actions: List[Dict]) -> Dict:
         ]
     )
     return {"inline_keyboard": rows}
+
+
+def render_data_answer(action: Dict) -> List[str]:
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    lines = ["📋 %s" % (action.get("summary") or "Answer")]
+    if payload.get("answer"):
+        lines.append(str(payload.get("answer")))
+    if payload.get("analysis"):
+        lines.append(str(payload.get("analysis")))
+    if payload.get("aggregates"):
+        lines.append(short_json(payload.get("aggregates"), 800))
+    if payload.get("file_content"):
+        lines.append(str(payload.get("file_content"))[:1200])
+    lines.extend(render_table_rows(payload.get("rows")))
+    return lines
+
+
+def render_table_rows(rows, limit: int = 10) -> List[str]:
+    if not rows:
+        return []
+    values = rows if isinstance(rows, list) else [rows]
+    rendered = []
+    for idx, row in enumerate(values[:limit]):
+        if isinstance(row, dict):
+            rendered.append("| %s | %s |" % (table_cell(row_label(row, idx)), table_cell(row_value(row))))
+        else:
+            rendered.append("`%s`" % short_json(row, 500))
+    extra = len(values) - limit
+    if extra > 0:
+        rendered.append("_…and %s more, see workspace response file._" % extra)
+    return rendered
+
+
+def row_label(row: Dict, idx: int) -> str:
+    return str(row.get("label") or row.get("name") or row.get("id") or idx + 1)
+
+
+def row_value(row: Dict):
+    if "value" in row:
+        return row.get("value")
+    remainder = {key: value for key, value in row.items() if key not in ("label", "name", "id")}
+    return remainder or row
+
+
+def table_cell(value) -> str:
+    text = short_json(value, 220) if isinstance(value, (dict, list)) else str(value or "")
+    return re.sub(r"\s+", " ", text).replace("|", "/").strip()
+
+
+def short_json(value, limit: int) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = str(value)
+    return text[:limit]
 
 
 def format_job_message(row) -> str:
