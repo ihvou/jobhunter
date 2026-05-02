@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jobbot.app import JobBot
-from jobbot.models import Job, ScoreResult, SourceConfig
+from jobhunter.app import JobHunter
+from jobhunter.models import Job, ScoreResult, SourceConfig
 from test_app import config_for
 
 
@@ -16,7 +16,7 @@ class AgentCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text((ROOT / "input" / "profile.example.md").read_text(encoding="utf-8"), encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.database.upsert_sources([SourceConfig(id="s", name="S", type="rss", url="https://example.com/rss")])
             for idx in range(30):
                 job_id, _ = bot.database.upsert_job(

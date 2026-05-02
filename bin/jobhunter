@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ENV_FILE="${JOBHUNTER_ENV_FILE:-$ROOT/.env}"
-COMPOSE=(docker compose --profile openclaw)
+COMPOSE=(docker compose --project-directory "$ROOT" --file "$ROOT/docker-compose.yml" --profile openclaw)
 
 if [[ -t 1 ]]; then
   GREEN=$'\033[32m'
@@ -21,17 +21,17 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: ./jobhunter <command> [args]
+Usage: ./bin/jobhunter <command> [args]
 
 Commands:
-  start                 Build if needed, then start jobbot + OpenClaw
+  start                 Build if needed, then start jobhunter + OpenClaw
   stop                  Stop and remove the Compose services
   restart               Rebuild and recreate both services
-  logs [jobbot|worker|both]
+  logs [jobhunter|worker|both]
                         Follow logs, default: both
   status                Print one-line service/data status
   reset                 Stop services and clear local DB/workspace after prompt
-  shell [jobbot|worker] Open a shell in a running service
+  shell [jobhunter|worker] Open a shell in a running service
   login                 Run one-time Codex device login in OpenClaw
   help                  Show this help
 EOF
@@ -74,10 +74,10 @@ require_env() {
 
 service_name() {
   case "${1:-both}" in
-    jobbot) printf "jobbot" ;;
+    jobhunter) printf "jobhunter" ;;
     worker|openclaw|openclaw-gateway) printf "openclaw-gateway" ;;
     both) printf "both" ;;
-    *) die "unknown service '$1' (use jobbot, worker, or both)" ;;
+    *) die "unknown service '$1' (use jobhunter, worker, or both)" ;;
   esac
 }
 
@@ -159,8 +159,8 @@ case "$cmd" in
   start)
     require_env
     ensure_dirs
-    "${COMPOSE[@]}" build jobbot openclaw-gateway
-    "${COMPOSE[@]}" up -d jobbot openclaw-gateway
+    "${COMPOSE[@]}" build jobhunter openclaw-gateway
+    "${COMPOSE[@]}" up -d jobhunter openclaw-gateway
     ;;
   stop)
     "${COMPOSE[@]}" down
@@ -168,31 +168,31 @@ case "$cmd" in
   restart)
     require_env
     ensure_dirs
-    "${COMPOSE[@]}" build jobbot openclaw-gateway
-    "${COMPOSE[@]}" up -d --force-recreate jobbot openclaw-gateway
+    "${COMPOSE[@]}" build jobhunter openclaw-gateway
+    "${COMPOSE[@]}" up -d --force-recreate jobhunter openclaw-gateway
     ;;
   logs)
     svc="$(service_name "${2:-both}")"
     tail_count="${TAIL:-100}"
     if [[ "$svc" == "both" ]]; then
-      "${COMPOSE[@]}" logs -f --tail="$tail_count" jobbot openclaw-gateway
+      "${COMPOSE[@]}" logs -f --tail="$tail_count" jobhunter openclaw-gateway
     else
       "${COMPOSE[@]}" logs -f --tail="$tail_count" "$svc"
     fi
     ;;
   status)
-    jobbot_state="$(container_state jobhunter-jobbot)"
+    jobhunter_state="$(container_state jobhunter)"
     worker_state="$(container_state jobhunter-openclaw-gateway)"
     IFS='|' read -r heartbeat_age sources_count last_digest_age < <(status_details)
-    if [[ "$jobbot_state" == "running" && "$worker_state" == "running" ]]; then
+    if [[ "$jobhunter_state" == "running" && "$worker_state" == "running" ]]; then
       label="${GREEN}OK${RESET}"
-    elif [[ "$jobbot_state" == "running" || "$worker_state" == "running" ]]; then
+    elif [[ "$jobhunter_state" == "running" || "$worker_state" == "running" ]]; then
       label="${YELLOW}WARN${RESET}"
     else
       label="${RED}STOPPED${RESET}"
     fi
-    printf "%s · jobbot:%s (heartbeat %s) · worker:%s · %s sources · last digest %s\n" \
-      "$label" "$jobbot_state" "$heartbeat_age" "$worker_state" "$sources_count" "$last_digest_age"
+    printf "%s · jobhunter:%s (heartbeat %s) · worker:%s · %s sources · last digest %s\n" \
+      "$label" "$jobhunter_state" "$heartbeat_age" "$worker_state" "$sources_count" "$last_digest_age"
     ;;
   reset)
     printf "%sThis will stop services and delete data/jobs.sqlite plus OpenClaw workspace files.%s\n" "$YELLOW" "$RESET"
@@ -205,8 +205,8 @@ case "$cmd" in
     printf "%sReset complete.%s\n" "$GREEN" "$RESET"
     ;;
   shell)
-    svc="$(service_name "${2:-jobbot}")"
-    [[ "$svc" != "both" ]] || die "shell needs jobbot or worker"
+    svc="$(service_name "${2:-jobhunter}")"
+    [[ "$svc" != "both" ]] || die "shell needs jobhunter or worker"
     "${COMPOSE[@]}" exec "$svc" sh
     ;;
   login)

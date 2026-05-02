@@ -6,10 +6,10 @@ Orientation for AI coding agents (Claude Code, Codex, Cursor, etc.) and human co
 
 A safe, low-cost job-search assistant that runs as two cooperating Docker containers:
 
-1. **`jobbot`** — deterministic Python service plus bounded OpenAI API calls for cover notes and L2 relevance. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
+1. **`jobhunter`** — deterministic Python service plus bounded OpenAI API calls for cover notes and L2 relevance. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
 2. **`openclaw-gateway`** — isolated Codex CLI worker container. Handles `/agent` strategy/data/source/filter work through the shared workspace. Codex auth lives in gitignored `openclaw/codex-home/`, not the host home directory.
 
-The user interacts through Telegram. There is no web UI in `jobbot`. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
+The user interacts through Telegram. There is no web UI in `jobhunter`. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 
 ## Mental Model
 
@@ -21,14 +21,14 @@ Everything is on-demand. There is no cron-driven collection.
 | `Update sources` | Routes a canned `/agent` request; OpenClaw/Codex proposes `sources_proposal` actions; user approves in Telegram |
 | `Tune scoring` | Routes a canned `/agent` request; OpenClaw/Codex proposes `scoring_rule_proposal` actions; user approves in Telegram |
 | `Usage` | Routes a canned `/agent` read-only data request |
-| `/agent <text>` | Writes an agent request into `/jobbot/workspace/agent`; response may include `data_answer` plus bounded proposed actions |
+| `/agent <text>` | Writes an agent request into `/jobhunter/workspace/agent`; response may include `data_answer` plus bounded proposed actions |
 
 Two LLM tiers stay separate:
 
 | Tier | Location | Use |
 |---|---|---|
 | Codex subscription | OpenClaw side | Source discovery, strategy analysis, read-only data answers, and scoring/filter tuning |
-| OpenAI API | `jobbot` | Cover notes and capped L2 relevance only, behind local budget gates and per-day count caps |
+| OpenAI API | `jobhunter` | Cover notes and capped L2 relevance only, behind local budget gates and per-day count caps |
 
 L1 scoring is deterministic and free. L2 relevance is an optional, cached, budget-gated OpenAI API pass on top L1 candidates; Codex is not used to score every job.
 
@@ -45,7 +45,7 @@ L1 scoring is deterministic and free. L2 relevance is an optional, cached, budge
 
 ```text
 .
-├── jobbot/
+├── jobhunter/
 │   ├── __main__.py          # CLI entry
 │   ├── agent.py             # /agent request/response workspace contract
 │   ├── agent_actions.py     # Bounded proposed-action registry and handlers
@@ -61,7 +61,7 @@ L1 scoring is deterministic and free. L2 relevance is an optional, cached, budge
 │   ├── sources.py           # Collectors + safe fetch/IMAP UID handling
 │   └── telegram.py          # Telegram client, keyboards, callback parser
 ├── config/
-│   ├── jobbot.json          # Budgets, model, rate limits
+│   ├── jobhunter.json          # Budgets, model, rate limits
 │   ├── profile.example.json # Safe structured profile template
 │   ├── scoring.json         # Active scoring DSL
 │   └── sources.json         # Source registry
@@ -101,8 +101,8 @@ openclaw/workspace/
 - Telegram messages are plain text; do not introduce Markdown/HTML parsing casually.
 - Word-boundary matching only for job-text rules.
 - Never put secrets in URLs or logs.
-- All cross-container IO is file-based in `/jobbot/workspace/{agent,discovery,tuning}/`. No HTTP between containers.
-- `/agent` write actions must go through `jobbot/agent_actions.py`; never add an action kind that executes code or shell commands.
+- All cross-container IO is file-based in `/jobhunter/workspace/{agent,discovery,tuning}/`. No HTTP between containers.
+- `/agent` write actions must go through `jobhunter/agent_actions.py`; never add an action kind that executes code or shell commands.
 - The OpenClaw worker tool surface is read-only: `query_sql`, `read_file`, `list_dir`, `http_fetch`, with caps and allowlists.
 
 ## Build / Test / Run
@@ -110,9 +110,9 @@ openclaw/workspace/
 ```bash
 python3 -m unittest discover -s tests
 python3 -m pytest tests/ -q
-python3 -m jobbot init
-python3 -m jobbot collect
-python3 -m jobbot digest
+python3 -m jobhunter init
+python3 -m jobhunter collect
+python3 -m jobhunter digest
 docker compose --profile openclaw config --quiet
 ```
 
@@ -125,9 +125,9 @@ PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest discover 
 Docker:
 
 ```bash
-docker compose build jobbot
-docker compose run --rm jobbot python -m jobbot init
-docker compose up -d jobbot
+docker compose build jobhunter
+docker compose run --rm jobhunter python -m jobhunter init
+docker compose up -d jobhunter
 docker compose --profile openclaw up -d openclaw-gateway
 ```
 
@@ -135,13 +135,13 @@ docker compose --profile openclaw up -d openclaw-gateway
 
 | Area | Current State |
 |---|---|
-| Shared workspace | Implemented in compose and created by `jobbot` startup |
+| Shared workspace | Implemented in compose and created by `jobhunter` startup |
 | On-demand collection | Implemented; `serve` polls Telegram/workspace only |
 | Reply keyboard controls | Implemented: `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` |
 | Per-job buttons | Implemented: `Irrelevant`, `Remind me tomorrow`, `Give me cover note`, `Applied` |
 | Cross-source dedupe | Implemented via canonical URL + normalized company/title |
 | No re-spam | Implemented with `digest_log`, except snoozed jobs due for resend |
-| Scoring DSL | Implemented in `config/scoring.json` + `jobbot/scoring.py` |
+| Scoring DSL | Implemented in `config/scoring.json` + `jobhunter/scoring.py` |
 | Word-boundary matching | Implemented with tests for known false positives |
 | Discovery request/approval | Implemented; automated worker writes OpenClaw/Codex response file |
 | Tuning request/shadow/apply | Implemented; automated worker writes OpenClaw/Codex response file |
@@ -155,7 +155,7 @@ docker compose --profile openclaw up -d openclaw-gateway
 | Source lifecycle | Implemented: `active`, `test`, `disabled`; `test` promotes on cover note/applied |
 | Budget override | Implemented for cover notes |
 | Structured logging | Implemented as JSON logs with secret masking |
-| Docker hardening | Implemented for jobbot; OpenClaw has resource caps and dropped net admin/raw caps |
+| Docker hardening | Implemented for jobhunter; OpenClaw has resource caps and dropped net admin/raw caps |
 
 ## Source And Scoring Files
 

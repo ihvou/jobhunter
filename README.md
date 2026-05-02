@@ -1,4 +1,4 @@
-# Jobhunter OpenClaw Jobbot
+# Jobhunter OpenClaw Jobhunter
 
 A safe, low-cost Telegram-driven job-search assistant. Two Docker containers, one chat surface. Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor instructions in [`AGENTS.md`](AGENTS.md). Open work in [`tasks.md`](tasks.md).
 
@@ -23,10 +23,10 @@ cp .env.example .env
 # (optional) set OPENAI_API_KEY for cover notes + better L2 relevance
 
 # 2. Authorize Codex (one-time device login)
-./jobhunter login
+./bin/jobhunter login
 
 # 3. Start both containers
-./jobhunter start
+./bin/jobhunter start
 ```
 
 The bot will DM you a ready message with a persistent reply keyboard.
@@ -45,7 +45,7 @@ All other env vars (model, budget caps, agent quotas, IMAP credentials) have sen
 
 ### From Telegram (everything you need day-to-day)
 
-After `./jobhunter start`:
+After `./bin/jobhunter start`:
 
 1. **Set your profile** — type `/profile set <paste your free-text description>`. Example:
     ```
@@ -62,19 +62,19 @@ After `./jobhunter start`:
 ### Operator commands
 
 ```bash
-./jobhunter start         # start both containers (idempotent — re-runs are safe)
-./jobhunter stop          # stop both containers
-./jobhunter restart       # rebuild and recreate
-./jobhunter status        # one-line health summary
-./jobhunter logs          # tail both services
-./jobhunter logs worker   # tail only the OpenClaw worker
-./jobhunter login         # re-authorize Codex (when token expires)
-./jobhunter reset         # nuke local SQLite + workspace files (asks for confirmation)
-./jobhunter shell jobbot  # open a shell in a running container
-./jobhunter help          # see all subcommands
+./bin/jobhunter start         # start both containers (idempotent — re-runs are safe)
+./bin/jobhunter stop          # stop both containers
+./bin/jobhunter restart       # rebuild and recreate
+./bin/jobhunter status        # one-line health summary
+./bin/jobhunter logs          # tail both services
+./bin/jobhunter logs worker   # tail only the OpenClaw worker
+./bin/jobhunter login         # re-authorize Codex (when token expires)
+./bin/jobhunter reset         # nuke local SQLite + workspace files (asks for confirmation)
+./bin/jobhunter shell jobhunter  # open a shell in a running container
+./bin/jobhunter help          # see all subcommands
 ```
 
-`./jobhunter start` and `./jobhunter restart` refuse to run if `.env` is missing required vars and tell you which ones.
+`./bin/jobhunter start` and `./bin/jobhunter restart` refuse to run if `.env` is missing required vars and tell you which ones.
 
 ### Telegram commands cheatsheet
 
@@ -117,13 +117,13 @@ Every write action is gated behind `[Apply 1] [Apply 2] [Apply all] [Reject all]
 | Item | Default cap |
 |---|---|
 | L1 per-job scoring | Free (no LLM) |
-| L2 relevance pass | OpenAI on top L1 candidates only, ≤ `JOBBOT_L2_MAX_JOBS=30` per click, cached per job (~$0.003/click typical) |
+| L2 relevance pass | OpenAI on top L1 candidates only, ≤ `JOBHUNTER_L2_MAX_JOBS=30` per click, cached per job (~$0.003/click typical) |
 | Cover notes | OpenAI, `gpt-4o-mini`, daily/monthly budget gate, 10/day, one-tap override on overage |
 | Agent requests | Codex subscription (no per-call cost), 20/day, 10s cooldown, capped per-request (5 turns / 20 SQL / 10 file reads / 5 fetches / 180s) |
 | Bulk write actions | Approval tap PLUS typed `CONFIRM <id>` reply within 60s |
 | Collection | 1 / 10 minutes per `Get more jobs` |
 
-Check current spend any time via the `Usage` button, `/usage` command, or `./jobhunter status`.
+Check current spend any time via the `Usage` button, `/usage` command, or `./bin/jobhunter status`.
 
 ## Email Alerts (Optional)
 
@@ -158,16 +158,16 @@ The IMAP collector tracks per-source UID high-water marks, so old messages are n
 
 | Symptom | Check |
 |---|---|
-| No Telegram messages | Verify bot token + chat ID; `./jobhunter logs jobbot` |
+| No Telegram messages | Verify bot token + chat ID; `./bin/jobhunter logs jobhunter` |
 | `Get more jobs` says wait | Collection rate limit kicked in; try after the shown wait |
 | Digest is empty | `/agent please tune scoring to be more permissive`, or add sources |
 | Bad jobs reach the digest | `/feedback <pattern to skip>`; approve the resulting `directive_edit` |
 | Good jobs are hidden | `/ask why was [URL] not in my last digest?`, then `/feedback` to teach |
 | Same job repeats | Snoozed-due jobs are allowed to reappear once; otherwise check `digest_log` |
 | Cover note denied | Use `Usage` to see budget; approve the one-time override only if intended |
-| Agent proposal never appears | `./jobhunter logs worker` and inspect `openclaw/workspace/agent/status-*.json` for `state=failed` |
-| `Daily agent quota reached` | Default 20/day; raise `JOBBOT_RATE_LIMIT_AGENT_PER_DAY` in `.env` |
-| Codex login expired | `./jobhunter login` re-runs device auth |
+| Agent proposal never appears | `./bin/jobhunter logs worker` and inspect `openclaw/workspace/agent/status-*.json` for `state=failed` |
+| `Daily agent quota reached` | Default 20/day; raise `JOBHUNTER_RATE_LIMIT_AGENT_PER_DAY` in `.env` |
+| Codex login expired | `./bin/jobhunter login` re-runs device auth |
 | `/revert` says "no reversible archive" | Some action kinds (data_answer, human_followup, bulk_update_jobs, rescore_jobs) don't archive a file; not reversible by `/revert` today |
 
 ## Safety Notes
@@ -183,7 +183,7 @@ The IMAP collector tracks per-source UID high-water marks, so old messages are n
 
 # Reference
 
-The rest of this file is reference material. You won't need any of it for normal use — Telegram and `./jobhunter` cover the daily workflow.
+The rest of this file is reference material. You won't need any of it for normal use — Telegram and `./bin/jobhunter` cover the daily workflow.
 
 ## Configuration Files
 
@@ -195,7 +195,7 @@ You usually don't need to touch these. Telegram covers everything once the bot i
 | `input/cv.local.md` | Optional CV text, used only for cover notes. | Edit the file; no Telegram command for CV today. |
 | `config/sources.json` | Source registry. Ships with sensible defaults (Remotive, RemoteOK, Arbeitnow, WeWorkRemotely, optional IMAP). | Tap `Update sources` in Telegram or `/agent please add ...`. Direct edits also work. |
 | `config/scoring.json` | Active scoring ruleset. Ships with a baseline. | Tap `Tune scoring` in Telegram. Direct edits work but the agent's shadow-test path is safer. |
-| `config/jobbot.json` | Budgets and runtime config. | Edit only if the defaults don't fit. |
+| `config/jobhunter.json` | Budgets and runtime config. | Edit only if the defaults don't fit. |
 | `.env` | Secrets and runtime paths. | Edit before first start; rare changes after. |
 
 For the very first run, copy the example files:
@@ -214,18 +214,18 @@ Each source row has a status (`active` / `test` / `disabled`) and a priority (`h
 
 ## Python Commands (Development / Debugging)
 
-For day-to-day use, prefer Telegram + `./jobhunter`. The Python CLI is for development and smoke testing.
+For day-to-day use, prefer Telegram + `./bin/jobhunter`. The Python CLI is for development and smoke testing.
 
 ```bash
-python3 -m jobbot init           # init schema, sources, workspace dirs; migrate legacy profile
-python3 -m jobbot collect        # fetch from enabled sources (no L2, no Telegram send)
-python3 -m jobbot digest         # run L2 on top L1 survivors and send/print top matches
-python3 -m jobbot run-once       # init + collect + digest
-python3 -m jobbot telegram-poll  # one tick of serve's poll loop
-python3 -m jobbot discover-sources  # legacy discovery request file (kept for debugging)
-python3 -m jobbot tune-scoring      # legacy tuning request file (kept for debugging)
-python3 -m jobbot usage          # local OpenAI usage summary
-python3 -m jobbot serve          # Telegram + workspace polling loop; no scheduled collection
+python3 -m jobhunter init           # init schema, sources, workspace dirs; migrate legacy profile
+python3 -m jobhunter collect        # fetch from enabled sources (no L2, no Telegram send)
+python3 -m jobhunter digest         # run L2 on top L1 survivors and send/print top matches
+python3 -m jobhunter run-once       # init + collect + digest
+python3 -m jobhunter telegram-poll  # one tick of serve's poll loop
+python3 -m jobhunter discover-sources  # legacy discovery request file (kept for debugging)
+python3 -m jobhunter tune-scoring      # legacy tuning request file (kept for debugging)
+python3 -m jobhunter usage          # local OpenAI usage summary
+python3 -m jobhunter serve          # Telegram + workspace polling loop; no scheduled collection
 ```
 
 There's no CLI for `/agent` itself — the agent surface is Telegram-only by design (every action is approval-gated and the chat is the audit log).
@@ -235,8 +235,8 @@ There's no CLI for `/agent` itself — the agent surface is Telegram-only by des
 The launcher above is recommended. Raw Compose is useful for debugging:
 
 ```bash
-docker compose --profile openclaw up -d jobbot openclaw-gateway
-docker compose logs -f jobbot
+docker compose --profile openclaw up -d jobhunter openclaw-gateway
+docker compose logs -f jobhunter
 docker compose --profile openclaw logs -f openclaw-gateway
 docker compose --profile openclaw config --quiet
 ```
@@ -247,12 +247,12 @@ docker compose --profile openclaw config --quiet
 |---|---|---|
 | `data/jobs.sqlite` | Jobs, L1 scores, L2 verdicts, feedback, digests, drafts, usage, agent_actions audit | yes |
 | `data/backup/` | Archives produced by `/agent backup ...` and your manual SQLite snapshots | yes |
-| `config/sources.json`, `config/scoring.json`, `config/jobbot.json` | Source registry, scoring rules, runtime config | committed |
+| `config/sources.json`, `config/scoring.json`, `config/jobhunter.json` | Source registry, scoring rules, runtime config | committed |
 | `config/scoring.v<n>.json` | Auto-archived previous scoring versions (used by `/revert`) | committed |
 | `input/profile.local.md`, `input/cv.local.md` | Your private profile + optional CV | yes |
 | `input/profile.<ts>.md.bak` | Auto-archived previous profile versions | yes |
 | `openclaw/workspace/` | Transient `discovery/`, `tuning/`, `agent/` JSON | yes |
-| `openclaw/codex-home/` | Codex CLI auth token after `./jobhunter login` | yes |
+| `openclaw/codex-home/` | Codex CLI auth token after `./bin/jobhunter login` | yes |
 
 Manual SQLite backup:
 

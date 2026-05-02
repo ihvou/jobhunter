@@ -39,7 +39,7 @@ from .telegram import TelegramClient, TelegramError
 LOGGER = logging.getLogger(__name__)
 
 
-class JobBot:
+class JobHunter:
     def __init__(self, config: AppConfig):
         configure_logging()
         self.config = config
@@ -88,8 +88,8 @@ class JobBot:
             },
         )
         self.touch_heartbeat()
-        log_context(LOGGER, logging.INFO, "jobbot_initialized", sources=len(sources), database=str(self.config.database_path))
-        print("Initialized jobbot with %s sources and database %s" % (len(sources), self.config.database_path))
+        log_context(LOGGER, logging.INFO, "jobhunter_initialized", sources=len(sources), database=str(self.config.database_path))
+        print("Initialized jobhunter with %s sources and database %s" % (len(sources), self.config.database_path))
 
     def collect(self) -> None:
         priority_rank = {"high": 0, "medium": 1, "low": 2}
@@ -266,7 +266,7 @@ class JobBot:
             self.telegram.send_message(self.format_scoring_history())
             return
         if action.action == "menu":
-            self.telegram.send_digest_header("Jobbot ready", "Use the keyboard buttons below.")
+            self.telegram.send_digest_header("Jobhunter ready", "Use the keyboard buttons below.")
             return
         self.answer_action(action, "Unknown bot action")
 
@@ -761,7 +761,7 @@ class JobBot:
     def serve(self) -> None:
         self.initialize()
         try:
-            self.telegram.send_digest_header("Jobbot ready", "Use the keyboard buttons below.")
+            self.telegram.send_digest_header("Jobhunter ready", "Use the keyboard buttons below.")
         except TelegramError as exc:
             log_context(LOGGER, logging.ERROR, "telegram_ready_message_failed", error=str(exc))
         try:
@@ -834,7 +834,7 @@ class JobBot:
 
 
 def run_once() -> None:
-    bot = JobBot.from_environment()
+    bot = JobHunter.from_environment()
     bot.initialize()
     bot.collect()
     bot.send_digest()

@@ -3,8 +3,8 @@ import unittest
 from email.message import EmailMessage
 from unittest import mock
 
-from jobbot.models import SourceConfig
-from jobbot.sources import collect_imap_alerts
+from jobhunter.models import SourceConfig
+from jobhunter.sources import collect_imap_alerts
 
 
 def make_message(subject, sender, body):

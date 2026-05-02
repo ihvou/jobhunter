@@ -5,11 +5,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from jobbot.app import JobBot
-from jobbot.config import AppConfig, CostConfig
-from jobbot.database import Database
-from jobbot.models import Job, ScoreResult, SourceConfig, TelegramAction
-from jobbot.telegram import TelegramError
+from jobhunter.app import JobHunter
+from jobhunter.config import AppConfig, CostConfig
+from jobhunter.database import Database
+from jobhunter.models import Job, ScoreResult, SourceConfig, TelegramAction
+from jobhunter.telegram import TelegramError
 
 
 class FakeTelegram:
@@ -93,7 +93,7 @@ def add_scored_job(bot, suffix="1", status="new", score=80):
 class AppTests(unittest.TestCase):
     def test_bot_collect_callback_submits_collection(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             called = []
             bot.submit_background = lambda fn, *args: called.append(fn.__name__)
@@ -102,7 +102,7 @@ class AppTests(unittest.TestCase):
 
     def test_bot_collect_reply_keyboard_message_acknowledges_in_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             called = []
             bot.submit_background = lambda fn, *args: called.append(fn.__name__)
@@ -112,14 +112,14 @@ class AppTests(unittest.TestCase):
 
     def test_bot_menu_action_sends_reply_keyboard_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             bot.handle_action(TelegramAction(scope="bot", action="menu"))
-            self.assertEqual(bot.telegram.messages[-1], ("Jobbot ready", "Use the keyboard buttons below."))
+            self.assertEqual(bot.telegram.messages[-1], ("Jobhunter ready", "Use the keyboard buttons below."))
 
     def test_bot_header_callbacks_write_agent_requests(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             bot.handle_action(TelegramAction(scope="bot", action="discover_sources", callback_id="cb"))
             bot.handle_action(TelegramAction(scope="bot", action="tune_scoring", callback_id="cb"))
@@ -131,7 +131,7 @@ class AppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 50}}', encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             low_id = add_scored_job(bot, "low", score=30)
             high_id = add_scored_job(bot, "high", score=80)
@@ -144,7 +144,7 @@ class AppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 90}}', encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             add_scored_job(bot, "below", score=80)
 
@@ -157,7 +157,7 @@ class AppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 50}}', encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             good_id = add_scored_job(bot, "good", score=80)
             bad_id, _ = bot.database.upsert_job(
@@ -180,7 +180,7 @@ class AppTests(unittest.TestCase):
 
     def test_job_feedback_callbacks(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             called = []
             bot.submit_background = lambda fn, *args: called.append((fn.__name__, args))
@@ -198,7 +198,7 @@ class AppTests(unittest.TestCase):
 
     def test_duplicate_applied_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             job_id = add_scored_job(bot)
             action = TelegramAction(scope="job", action="applied", target_id=job_id, callback_id="cb")
@@ -209,7 +209,7 @@ class AppTests(unittest.TestCase):
 
     def test_discovery_approval_appends_test_source(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             session_id = "s1"
             response_path = bot.config.workspace_dir / "discovery" / "response-s1.json"
@@ -232,7 +232,7 @@ class AppTests(unittest.TestCase):
             )
             bot.database.create_discovery_run(session_id, "request", "status")
             bot.database.update_discovery_run(session_id, status="done", response_path=str(response_path), candidate_count=1)
-            with mock.patch("jobbot.app.validate_safe_url"):
+            with mock.patch("jobhunter.app.validate_safe_url"):
                 bot.source_candidate_reachable = lambda url: True
                 bot.handle_action(TelegramAction(scope="disc", action="approve", target_id=session_id, callback_id="cb"))
             sources = json.loads(bot.config.sources_path.read_text(encoding="utf-8"))
@@ -258,7 +258,7 @@ class AppTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             session_id = "s1"
             response_path = bot.config.workspace_dir / "discovery" / "response-s1.json"
@@ -282,7 +282,7 @@ class AppTests(unittest.TestCase):
             )
             bot.database.create_discovery_run(session_id, "request", "status")
             bot.database.update_discovery_run(session_id, status="done", response_path=str(response_path), candidate_count=2)
-            with mock.patch("jobbot.app.validate_safe_url"):
+            with mock.patch("jobhunter.app.validate_safe_url"):
                 bot.source_candidate_reachable = lambda url: True
                 bot.handle_action(TelegramAction(scope="disc", action="approve", target_id=session_id, callback_id="cb"))
             sources = json.loads(config.sources_path.read_text(encoding="utf-8"))
@@ -294,7 +294,7 @@ class AppTests(unittest.TestCase):
 
     def test_tuning_apply_writes_scoring_version(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             response_path = bot.config.workspace_dir / "tuning" / "response-t1.json"
             response_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,7 +309,7 @@ class AppTests(unittest.TestCase):
 
     def test_invalid_tuning_rules_do_not_overwrite_scoring(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             response_path = bot.config.workspace_dir / "tuning" / "response-bad.json"
             response_path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,7 +324,7 @@ class AppTests(unittest.TestCase):
 
     def test_tuning_worker_failure_is_sent_once(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             status_path = bot.config.workspace_dir / "tuning" / "status-failed1.json"
             status_path.parent.mkdir(parents=True, exist_ok=True)
@@ -344,7 +344,7 @@ class AppTests(unittest.TestCase):
             config.openai_api_key = "test-key"
             config.cost.daily_budget_usd = 0.0
             config.cost.monthly_budget_usd = 0.0
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             job_id = add_scored_job(bot)
             bot.generate_cover_note(job_id)
@@ -352,7 +352,7 @@ class AppTests(unittest.TestCase):
 
     def test_cover_note_skips_terminal_status(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
             called = []
             bot.submit_background = lambda fn, *args: called.append((fn.__name__, args))
@@ -367,7 +367,7 @@ class AppTests(unittest.TestCase):
 
     def test_collection_shutdown_marks_source_run_interrupted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.shutdown_requested = True
             source = SourceConfig(id="slow", name="Slow", type="rss", url="https://example.com/rss")
             bot.database.upsert_sources([source])
@@ -387,7 +387,7 @@ class AppTests(unittest.TestCase):
                 raise TelegramError("network down")
 
         with tempfile.TemporaryDirectory() as tmp:
-            bot = JobBot(config_for(tmp))
+            bot = JobHunter(config_for(tmp))
             bot.telegram = ErrorTelegram()
             bot.poll_telegram_once()
 
@@ -408,7 +408,7 @@ class AppTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             bot.handle_action(TelegramAction(scope="bot", action="discover_sources", callback_id="cb"))
             request_path = next((config.workspace_dir / "agent").glob("request-*.json"))

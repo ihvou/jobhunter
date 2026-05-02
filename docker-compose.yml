@@ -1,40 +1,40 @@
 services:
-  jobbot:
+  jobhunter:
     build:
       context: .
-    container_name: jobhunter-jobbot
+    container_name: jobhunter
     restart: unless-stopped
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
-      JOBBOT_LOG_LEVEL: ${JOBBOT_LOG_LEVEL:-INFO}
-      JOBBOT_DAILY_BUDGET_USD: ${JOBBOT_DAILY_BUDGET_USD:-0.50}
-      JOBBOT_MONTHLY_BUDGET_USD: ${JOBBOT_MONTHLY_BUDGET_USD:-10.00}
-      JOBBOT_DATA_DIR: /jobbot/data
-      JOBBOT_INPUT_DIR: /jobbot/input
-      JOBBOT_CONFIG_DIR: /jobbot/config
-      JOBBOT_WORKSPACE_DIR: /jobbot/workspace
-      JOBBOT_DATABASE_PATH: /jobbot/data/jobs.sqlite
-      JOBBOT_HEARTBEAT_PATH: /jobbot/data/heartbeat
-      JOBBOT_PROFILE_PATH: /jobbot/input/profile.local.md
-      JOBBOT_CV_PATH: /jobbot/input/cv.local.md
-      JOBBOT_PROFILE_SETTINGS_PATH: /jobbot/config/profile.local.json
-      JOBBOT_SOURCES_PATH: /jobbot/config/sources.json
-      JOBBOT_SCORING_PATH: /jobbot/config/scoring.json
-      JOBBOT_SETTINGS_PATH: /jobbot/config/jobbot.json
-      JOBBOT_CODEX_HANDOFF_MODE: ${JOBBOT_CODEX_HANDOFF_MODE:-auto}
+      JOBHUNTER_LOG_LEVEL: ${JOBHUNTER_LOG_LEVEL:-INFO}
+      JOBHUNTER_DAILY_BUDGET_USD: ${JOBHUNTER_DAILY_BUDGET_USD:-0.50}
+      JOBHUNTER_MONTHLY_BUDGET_USD: ${JOBHUNTER_MONTHLY_BUDGET_USD:-10.00}
+      JOBHUNTER_DATA_DIR: /jobhunter/data
+      JOBHUNTER_INPUT_DIR: /jobhunter/input
+      JOBHUNTER_CONFIG_DIR: /jobhunter/config
+      JOBHUNTER_WORKSPACE_DIR: /jobhunter/workspace
+      JOBHUNTER_DATABASE_PATH: /jobhunter/data/jobs.sqlite
+      JOBHUNTER_HEARTBEAT_PATH: /jobhunter/data/heartbeat
+      JOBHUNTER_PROFILE_PATH: /jobhunter/input/profile.local.md
+      JOBHUNTER_CV_PATH: /jobhunter/input/cv.local.md
+      JOBHUNTER_PROFILE_SETTINGS_PATH: /jobhunter/config/profile.local.json
+      JOBHUNTER_SOURCES_PATH: /jobhunter/config/sources.json
+      JOBHUNTER_SCORING_PATH: /jobhunter/config/scoring.json
+      JOBHUNTER_SETTINGS_PATH: /jobhunter/config/jobhunter.json
+      JOBHUNTER_CODEX_HANDOFF_MODE: ${JOBHUNTER_CODEX_HANDOFF_MODE:-auto}
       EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
       EMAIL_IMAP_USERNAME: ${EMAIL_IMAP_USERNAME:-}
       EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
       EMAIL_IMAP_FOLDER: ${EMAIL_IMAP_FOLDER:-job-alerts}
     volumes:
-      - ./data:/jobbot/data
-      - ./config:/jobbot/config
-      - ./input:/jobbot/input
-      - ./openclaw/workspace:/jobbot/workspace
-    command: ["python", "-m", "jobbot", "serve"]
+      - ./data:/jobhunter/data
+      - ./config:/jobhunter/config
+      - ./input:/jobhunter/input
+      - ./openclaw/workspace:/jobhunter/workspace
+    command: ["python", "-m", "jobhunter", "serve"]
     read_only: true
     tmpfs:
       - /tmp
@@ -65,14 +65,14 @@ services:
       OPENCLAW_AGENT_MAX_FILE_READS: ${OPENCLAW_AGENT_MAX_FILE_READS:-10}
       OPENCLAW_AGENT_MAX_HTTP_FETCHES: ${OPENCLAW_AGENT_MAX_HTTP_FETCHES:-5}
       OPENCLAW_MAX_PROMPT_CHARS: ${OPENCLAW_MAX_PROMPT_CHARS:-60000}
-      OPENCLAW_JOBBOT_DB_PATH: /jobbot/data/jobs.sqlite
+      OPENCLAW_JOBHUNTER_DB_PATH: /jobhunter/data/jobs.sqlite
     volumes:
       - ./openclaw/codex-home:/openclaw/codex-home
       - ./openclaw/prompts:/openclaw/prompts:ro
       - ./openclaw/workspace:/openclaw/workspace
-      - ./config:/jobbot/config:ro
-      - ./input:/jobbot/input:ro
-      - ./data:/jobbot/data:ro
+      - ./config:/jobhunter/config:ro
+      - ./input:/jobhunter/input:ro
+      - ./data:/jobhunter/data:ro
     read_only: true
     tmpfs:
       - /tmp

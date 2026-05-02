@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jobbot.database import Database
-from jobbot.models import Job, ScoreResult
+from jobhunter.database import Database
+from jobhunter.models import Job, ScoreResult
 
 
 class DatabaseTests(unittest.TestCase):

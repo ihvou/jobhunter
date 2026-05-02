@@ -1,6 +1,6 @@
 import unittest
 
-from jobbot.telegram import TelegramClient, agent_actions_keyboard, job_keyboard, main_menu_keyboard, parse_callback, parse_message
+from jobhunter.telegram import TelegramClient, agent_actions_keyboard, job_keyboard, main_menu_keyboard, parse_callback, parse_message
 
 
 class TelegramTests(unittest.TestCase):

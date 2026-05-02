@@ -25,7 +25,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
-    level_name = os.getenv("JOBBOT_LOG_LEVEL", "INFO").upper()
+    level_name = os.getenv("JOBHUNTER_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     root = logging.getLogger()
     if root.handlers:

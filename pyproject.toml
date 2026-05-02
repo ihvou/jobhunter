@@ -1,5 +1,5 @@
 [project]
-name = "jobhunter-openclaw-jobbot"
+name = "jobhunter"
 version = "0.1.0"
 description = "Safe human-in-the-loop job search bot designed for Docker-isolated OpenClaw workflows."
 requires-python = ">=3.9"

@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jobbot.agent_actions import AgentActionContext, apply_agent_action, sanitize_actions
-from jobbot.app import JobBot
-from jobbot.config import split_profile_sections
+from jobhunter.agent_actions import AgentActionContext, apply_agent_action, sanitize_actions
+from jobhunter.app import JobHunter
+from jobhunter.config import split_profile_sections
 from test_app import FakeTelegram, config_for
 
 
@@ -23,7 +23,7 @@ class AgentActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text("# About me\n\nBuilder PM\n\n# Directives\n", encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             context = AgentActionContext(config=config, database=bot.database, profile=bot.profile)
 
             result = apply_agent_action(
@@ -41,7 +41,7 @@ class AgentActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text("# About me\n\nBuilder PM\n\n# Directives\n", encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             context = AgentActionContext(config=config, database=bot.database, profile=bot.profile)
 
             result = apply_agent_action({"kind": "directive_edit", "payload": {"append": "X"}}, context)
@@ -54,7 +54,7 @@ class AgentActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text("# About me\n\nOld\n\n# Directives\nKeep this\n", encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             context = AgentActionContext(config=config, database=bot.database, profile=bot.profile)
 
             result = apply_agent_action(
@@ -71,7 +71,7 @@ class AgentActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text("# About me\n\nOld\n\n# Directives\n", encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             context = AgentActionContext(config=config, database=bot.database, profile=bot.profile)
 
             profile_result = apply_agent_action({"kind": "profile_edit", "payload": {"about_me": "New"}}, context)
@@ -89,7 +89,7 @@ class AgentActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text("# About me\n\nBuilder PM\n\n# Directives\n", encoding="utf-8")
-            bot = JobBot(config)
+            bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             session_id = bot.agent.create_request("remember this")
             response_path = config.workspace_dir / "agent" / ("response-%s.json" % session_id)

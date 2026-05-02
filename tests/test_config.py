@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jobbot.config import load_app_config, parse_optional_int, parse_profile_description
+from jobhunter.config import load_app_config, parse_optional_int, parse_profile_description
 
 
 class ConfigTests(unittest.TestCase):
@@ -21,13 +21,13 @@ class ConfigTests(unittest.TestCase):
             root = Path(tmp)
             config_dir = root / "config"
             config_dir.mkdir()
-            settings = config_dir / "jobbot.json"
+            settings = config_dir / "jobhunter.json"
             settings.write_text('{"digest_max_jobs": 10}', encoding="utf-8")
             old_env = dict(os.environ)
             try:
-                os.environ["JOBBOT_CONFIG_DIR"] = str(config_dir)
-                os.environ["JOBBOT_SETTINGS_PATH"] = str(settings)
-                os.environ["JOBBOT_DIGEST_MAX_JOBS"] = "5"
+                os.environ["JOBHUNTER_CONFIG_DIR"] = str(config_dir)
+                os.environ["JOBHUNTER_SETTINGS_PATH"] = str(settings)
+                os.environ["JOBHUNTER_DIGEST_MAX_JOBS"] = "5"
                 config = load_app_config()
             finally:
                 os.environ.clear()

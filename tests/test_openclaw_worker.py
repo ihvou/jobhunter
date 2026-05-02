@@ -123,7 +123,7 @@ worker.setRunCodexForTests(async () => {
   await new Promise((resolve) => setTimeout(resolve, 650));
   return {
     finalText: JSON.stringify({
-      tool_calls: [{id: "1", name: "read_file", arguments: {path: "/jobbot/config/missing"}}]
+      tool_calls: [{id: "1", name: "read_file", arguments: {path: "/jobhunter/config/missing"}}]
     })
   };
 });

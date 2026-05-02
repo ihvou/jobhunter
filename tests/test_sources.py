@@ -1,8 +1,8 @@
 import unittest
 from unittest import mock
 
-from jobbot.models import SourceConfig
-from jobbot.sources import SourceError, collect_ats, collect_link_page, collect_rss, infer_company, strip_html, validate_safe_url
+from jobhunter.models import SourceConfig
+from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, infer_company, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -26,7 +26,7 @@ class SourceTests(unittest.TestCase):
 
     def test_collect_rss(self):
         source = SourceConfig(id="rss", name="RSS", type="rss", url="https://example.com/rss")
-        with mock.patch("jobbot.sources.fetch_text", return_value=RSS):
+        with mock.patch("jobhunter.sources.fetch_text", return_value=RSS):
             jobs = collect_rss(source)
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].company, "ExampleCo")
@@ -39,7 +39,7 @@ class SourceTests(unittest.TestCase):
     def test_collect_link_page_extracts_job_links(self):
         source = SourceConfig(id="community", name="Community", type="community", url="https://example.com/jobs")
         html = '<a href="/roles/1">Senior AI Product Engineer</a><a href="/roles/2">Product Manager</a><a href="/about">About us</a>'
-        with mock.patch("jobbot.sources.fetch_text", return_value=html):
+        with mock.patch("jobhunter.sources.fetch_text", return_value=html):
             jobs = collect_link_page(source)
         self.assertEqual(len(jobs), 2)
         self.assertEqual(jobs[0].url, "https://example.com/roles/1")
@@ -47,7 +47,7 @@ class SourceTests(unittest.TestCase):
     def test_collect_greenhouse_ats(self):
         source = SourceConfig(id="gh", name="ExampleCo", type="ats", url="https://boards.greenhouse.io/exampleco")
         payload = '{"jobs":[{"id":1,"title":"Product Engineer","absolute_url":"https://boards.greenhouse.io/exampleco/jobs/1","location":{"name":"Remote"},"content":"Build AI products."}]}'
-        with mock.patch("jobbot.sources.fetch_text", return_value=payload):
+        with mock.patch("jobhunter.sources.fetch_text", return_value=payload):
             jobs = collect_ats(source)
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].company, "ExampleCo")
@@ -61,7 +61,7 @@ class SourceTests(unittest.TestCase):
     def test_spa_shell_is_reported_clearly(self):
         source = SourceConfig(id="spa", name="SPA", type="community", url="https://example.com/jobs")
         html = '<div id="root"></div><script src="bundle.js"></script>'
-        with mock.patch("jobbot.sources.fetch_text", return_value=html):
+        with mock.patch("jobhunter.sources.fetch_text", return_value=html):
             with self.assertRaisesRegex(SourceError, "JavaScript SPA"):
                 collect_link_page(source)
 

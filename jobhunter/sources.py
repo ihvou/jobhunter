@@ -22,13 +22,13 @@ from .logging_setup import log_context
 from .models import Job, SourceConfig
 
 LOGGER = logging.getLogger(__name__)
-MAX_BYTES = int(os.getenv("JOBBOT_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
-CHECK_ROBOTS = os.getenv("JOBBOT_CHECK_ROBOTS", "0").strip().lower() in ("1", "true", "yes", "on")
+MAX_BYTES = int(os.getenv("JOBHUNTER_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
+CHECK_ROBOTS = os.getenv("JOBHUNTER_CHECK_ROBOTS", "0").strip().lower() in ("1", "true", "yes", "on")
 HOST_LAST_FETCH: Dict[str, float] = {}
 
 
 DEFAULT_HEADERS = {
-    "User-Agent": "jobhunter-openclaw-jobbot/0.1 (+human-in-the-loop; contact: local-user)",
+    "User-Agent": "jobhunter-openclaw-jobhunter/0.1 (+human-in-the-loop; contact: local-user)",
     "Accept": "application/json, application/rss+xml, application/xml, text/xml, text/html;q=0.8",
 }
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCHER = ROOT / "jobhunter"
+LAUNCHER = ROOT / "bin" / "jobhunter"
 
 
 class LauncherTests(unittest.TestCase):
@@ -50,7 +50,7 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher("status")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(len(result.stdout.strip().splitlines()), 1)
-        self.assertIn("jobbot:", result.stdout)
+        self.assertIn("jobhunter:", result.stdout)
         self.assertIn("worker:", result.stdout)
 
 

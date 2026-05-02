@@ -1,6 +1,6 @@
 import argparse
 
-from .app import JobBot, run_once
+from .app import JobHunter, run_once
 
 
 def main() -> None:
@@ -21,7 +21,7 @@ def main() -> None:
         run_once()
         return
 
-    bot = JobBot.from_environment()
+    bot = JobHunter.from_environment()
 
     if args.command == "init":
         bot.initialize()

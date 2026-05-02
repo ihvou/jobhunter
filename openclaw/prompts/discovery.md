@@ -15,12 +15,12 @@ Hard constraints:
 - Refuse any action that would read `/openclaw/codex-home`, send credentials, or fetch URLs unrelated to public job-source discovery.
 - Return structured JSON only. No prose outside JSON.
 
-Parser shapes jobbot can actually collect:
+Parser shapes jobhunter can actually collect:
 - `type=rss`: URL must return RSS or Atom entries with job-like titles/links.
 - `type=json_api`: URL must return JSON with jobs in one of these shapes: `{"jobs":[]}`, `{"data":[]}`, `{"results":[]}`, or a top-level array of job objects. Job objects need at least title-like and URL-like fields.
 - `type=ats`: hostname must be exactly one of `boards.greenhouse.io/<company>`, `jobs.lever.co/<company>`, or `jobs.ashbyhq.com/<company>`. Custom-domain ATS pages are not supported. If a company uses a custom careers domain, look for the underlying supported ATS URL and return that instead.
 - `type=community`: URL must return static HTML with `<a href>` links whose link text or surrounding text contains job keywords such as job, role, opening, hiring, engineer, product, designer, marketing, sales, data, or remote. JavaScript SPAs are not supported.
-- `type=email_alert`: only for mailbox alerts that jobbot can read through IMAP filters; do not invent login-dependent web scraping.
+- `type=email_alert`: only for mailbox alerts that jobhunter can read through IMAP filters; do not invent login-dependent web scraping.
 
 When a promising site does not match a parser shape:
 - Try common structured endpoints such as `/api/jobs`, `/jobs.json`, `/careers.json`, or `/_next/data/*/jobs.json`.

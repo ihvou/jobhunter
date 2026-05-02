@@ -13,7 +13,7 @@ const maxPromptChars = Math.max(10000, Number(process.env.OPENCLAW_MAX_PROMPT_CH
 const maxSqlQueries = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_SQL_QUERIES || "20"));
 const maxFileReads = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_FILE_READS || "10"));
 const maxHttpFetches = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_HTTP_FETCHES || "5"));
-const dbPath = process.env.OPENCLAW_JOBBOT_DB_PATH || "/jobbot/data/jobs.sqlite";
+const dbPath = process.env.OPENCLAW_JOBHUNTER_DB_PATH || "/jobhunter/data/jobs.sqlite";
 const inFlight = new Set();
 const KINDS = ["discovery", "tuning", "agent"];
 
@@ -337,7 +337,7 @@ function resolveAllowedPath(inputPath) {
   if (absolute.endsWith("/.env") || absolute.includes("/.env/") || blocklist.some((root) => absolute === root || absolute.startsWith(root + "/"))) {
     throw new Error("read_file path blocked");
   }
-  const allowlist = ["/jobbot/config", "/jobbot/input", "/openclaw/workspace", "/openclaw/prompts", "/jobbot/data"];
+  const allowlist = ["/jobhunter/config", "/jobhunter/input", "/openclaw/workspace", "/openclaw/prompts", "/jobhunter/data"];
   if (!allowlist.some((root) => absolute === root || absolute.startsWith(root + "/"))) {
     throw new Error("path is outside allowlist");
   }

@@ -1,8 +1,8 @@
 import unittest
 from pathlib import Path
 
-from jobbot.models import Job, UserProfile
-from jobbot.scoring import load_scoring_rules, score_job, word_boundary_search
+from jobhunter.models import Job, UserProfile
+from jobhunter.scoring import load_scoring_rules, score_job, word_boundary_search
 
 
 class ScoringTests(unittest.TestCase):

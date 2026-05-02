@@ -111,7 +111,7 @@ approval click and is recorded with a one-tap undo.
 |---|---|
 | No browser profile mount | Do not mount Chrome/Safari/Firefox profiles or cookies |
 | No Docker socket mount | Do not mount `/var/run/docker.sock` into the OpenClaw container |
-| Narrow volumes only | Mount only `/jobbot/data`, `/jobbot/config`, and optional `/jobbot/input` |
+| Narrow volumes only | Mount only `/jobhunter/data`, `/jobhunter/config`, and optional `/jobhunter/input` |
 | Dedicated secrets | Use separate API keys/tokens only for this bot |
 | Non-root runtime | Prefer non-root container user after setup |
 | Network egress | Allow outbound HTTPS, but control behavior at application level |
@@ -119,7 +119,7 @@ approval click and is recorded with a one-tap undo.
 
 ## 5. High-Level Architecture
 
-The system runs as two cooperating Docker containers. **`jobbot`** owns
+The system runs as two cooperating Docker containers. **`jobhunter`** owns
 deterministic work — collection, dedupe, L1 scoring, Telegram I/O, the
 SQLite database, the OpenAI cover-note client, and the L2 relevance pass.
 **`openclaw-gateway`** is an isolated Codex CLI worker that handles every
@@ -140,7 +140,7 @@ recorded in an audit table with a one-tap undo.
 +============================= Docker Boundary =============================+
 |                                                                            |
 |  +---------------------------------+        +---------------------------+  |
-|  |  jobbot (Python, stdlib-only)   |        |  openclaw-gateway         |  |
+|  |  jobhunter (Python, stdlib-only)   |        |  openclaw-gateway         |  |
 |  |---------------------------------|        |  (Codex CLI worker)       |  |
 |  | Telegram poll loop              |        |---------------------------|  |
 |  | Reply keyboard + per-job inline |        | File-watch on workspace   |  |
@@ -164,10 +164,10 @@ recorded in an audit table with a one-tap undo.
 |            +-------------------------------------------+                   |
 |                                                                            |
 |  +------------------------+        +-----------------------------------+   |
-|  | jobbot private mounts: |        | OpenClaw private mounts:          |   |
-|  |  /jobbot/data (rw)     |        |  /jobbot/data/jobs.sqlite (ro)*   |   |
-|  |  /jobbot/config (rw)   |        |  /openclaw/codex-home (rw, auth)  |   |
-|  |  /jobbot/input (ro)    |        |  /openclaw/prompts (ro)           |   |
+|  | jobhunter private mounts: |        | OpenClaw private mounts:          |   |
+|  |  /jobhunter/data (rw)     |        |  /jobhunter/data/jobs.sqlite (ro)*   |   |
+|  |  /jobhunter/config (rw)   |        |  /openclaw/codex-home (rw, auth)  |   |
+|  |  /jobhunter/input (ro)    |        |  /openclaw/prompts (ro)           |   |
 |  +------------------------+        +-----------------------------------+   |
 |                                    *for query_sql tool only                |
 +============================================================================+
@@ -181,7 +181,7 @@ The diagram captures three patterns the rest of the spec relies on:
 
 | Pattern | Where it shows up |
 |---|---|
-| **Bounded action set** | jobbot accepts only the action `kind`s it has Python handlers for. Codex cannot ask jobbot to execute arbitrary code. See §6.6, §10. |
+| **Bounded action set** | jobhunter accepts only the action `kind`s it has Python handlers for. Codex cannot ask jobhunter to execute arbitrary code. See §6.6, §10. |
 | **Three LLM tiers** | L1 free, L2 OpenAI per-click ($), agent + cover note (Codex subscription / OpenAI). See §11. |
 | **File-only cross-container channel** | Every agent flow is a JSON file in `workspace/<kind>/`. No network between the two containers. See §12.1. |
 
@@ -199,8 +199,8 @@ A CV is optional and used only as secondary context for cover-note generation.
 |---:|---|---|---|
 | 1 | User | Writes `input/profile.local.md` with `# About me` section | Profile file |
 | 2 | User | Optionally adds a text CV at `input/cv.local.md` for richer cover notes | CV file (optional) |
-| 3 | User | Runs `./jobhunter login` once to authorize the Codex subscription | Codex auth token in `openclaw/codex-home/` |
-| 4 | User | Starts both containers with `./jobhunter start` | jobbot + openclaw worker running |
+| 3 | User | Runs `./bin/jobhunter login` once to authorize the Codex subscription | Codex auth token in `openclaw/codex-home/` |
+| 4 | User | Starts both containers with `./bin/jobhunter start` | jobhunter + openclaw worker running |
 | 5 | Bot | Parses profile description, sends Telegram setup summary, shows persistent reply keyboard | User confirms scope |
 | 6 | Bot | If a legacy `config/profile.local.json` is present, folds its lists into `# About me` and backs the JSON file up | Migrated profile |
 
@@ -271,7 +271,7 @@ Acceptance criteria:
 | Cross-source dedupe | Same company/title/canonical-URL not repeated across sources |
 | No re-spam | A digest never contains a job already shown in a prior digest unless explicitly snoozed and now due |
 | Hard filters respected | L1 hard-reject rules and L2 `not_relevant` verdicts both hide jobs from the digest |
-| L2 bounded | Per-click L2 cost is bounded by `JOBBOT_L2_MAX_JOBS` (default 30); skipped jobs are not retried unless `/agent rescore_jobs` is invoked |
+| L2 bounded | Per-click L2 cost is bounded by `JOBHUNTER_L2_MAX_JOBS` (default 30); skipped jobs are not retried unless `/agent rescore_jobs` is invoked |
 | Digest bounded | Max digest size is enforced; high-priority L2 verdicts surface above lower-priority higher-score jobs |
 | Card readability | Each card uses MarkdownV2: bold title (with company prefix de-duplicated), L2 reason inline, ≤250-char description excerpt, source URL |
 | Responsive | Button click is acknowledged in <2s; full digest delivered within ~30s for typical source counts |
@@ -279,7 +279,7 @@ Acceptance criteria:
 
 Note: a daily safety-net background fetch is intentionally out of scope. If
 the digest pool feels stale between user clicks, add it later as an opt-in
-`JOBBOT_DAILY_REFRESH=1` flag.
+`JOBHUNTER_DAILY_REFRESH=1` flag.
 
 ### 6.3 Scenario: Telegram Feedback Loop
 
@@ -332,7 +332,7 @@ Draft constraints:
 
 Source discovery is one specific shape of the broader agent flow described
 in §6.6: the user taps `Update sources` (or types `/agent please run a
-discovery cycle`); jobbot writes a request to the shared workspace; OpenClaw
+discovery cycle`); jobhunter writes a request to the shared workspace; OpenClaw
 runs Codex against it with read-only validation tools (HTTP HEAD, robots.txt
 check, sample fetch, SPA detection); Codex returns one or more
 `sources_proposal` actions; the user approves per-candidate before anything
@@ -361,7 +361,7 @@ Acceptance criteria:
 | Criterion | Pass Condition |
 |---|---|
 | On-demand only | No cron-driven discovery |
-| Validated candidates | Every approved candidate has been HEAD-probed by both OpenClaw (inside the worker) and jobbot (at apply time) before being written to `sources.json` |
+| Validated candidates | Every approved candidate has been HEAD-probed by both OpenClaw (inside the worker) and jobhunter (at apply time) before being written to `sources.json` |
 | User approval gate | Sources are not added to `sources.json` without an explicit Telegram approval click |
 | Provenance preserved | Manual and agent-discovered sources are visually distinguishable via `created_by` |
 | Subscription-only LLM cost | Discovery uses Codex via subscription; OpenAI per-call API is not invoked |
@@ -379,7 +379,7 @@ Examples the user can type:
 - *"please prioritize Product Builder roles that mention Claude or Codex"*
 - *"send applied jobs to Codex and ask to optimize sources based on them"*
 
-Each request flows through the same shape: jobbot packages context →
+Each request flows through the same shape: jobhunter packages context →
 OpenClaw runs Codex with bounded tools → Codex returns an answer plus zero
 or more `proposed_actions` → user approves per-action.
 
@@ -420,7 +420,7 @@ Acceptance criteria:
 | Single primitive | One Telegram entry (`/agent`) with two sugar aliases (`/feedback`, `/ask`) handles arbitrary requests; reply-keyboard buttons route through the same primitive under the hood |
 | Approval-gated writes | No write action is applied without an explicit Telegram approval tap (or typed CONFIRM for bulk operations per §6.9) |
 | Bounded action surface | Only allowlisted `kind`s are dispatched; unknown kinds are dropped + logged |
-| No code execution | No `kind` ever maps to "run arbitrary code"; new capabilities require a new Python handler in jobbot, not a new Codex output |
+| No code execution | No `kind` ever maps to "run arbitrary code"; new capabilities require a new Python handler in jobhunter, not a new Codex output |
 | Read-only tool surface | Codex can `SELECT`-only against the database, read allowlisted files, list allowlisted dirs, and `http_fetch` non-private URLs — nothing else |
 | Cost capped per request | Per-request caps on Codex turns (5), SQL queries (20), file reads (10), HTTP fetches (5), and wall-clock seconds (180) |
 | Cost capped per day | Daily caps on agent calls (20), source applies (5), scoring applies (3), bulk updates (2) |
@@ -614,7 +614,7 @@ signal. Algorithm updates are gated by user approval.
 | Layer | Runs | Cost per job | Updated by |
 |---|---|---|---|
 | Scoring rules (`config/scoring.json`) | Once per algorithm update | n/a | OpenClaw + Codex on demand (`Tune scoring` button) |
-| Rule interpreter (`jobbot/scoring.py`) | On every job | Free; deterministic | Code change (versioned in git) |
+| Rule interpreter (`jobhunter/scoring.py`) | On every job | Free; deterministic | Code change (versioned in git) |
 
 The interpreter exposes a fixed set of rule kinds (§8.3). Codex can only
 output rules in this DSL; it cannot inject arbitrary code. This keeps the
@@ -715,7 +715,7 @@ no rule update needed.
 
 | Step | Actor | Action | Output |
 |---:|---|---|---|
-| 1 | Bot | After L1, take the top N by score (default `JOBBOT_L2_MAX_JOBS=30`) | Candidate set |
+| 1 | Bot | After L1, take the top N by score (default `JOBHUNTER_L2_MAX_JOBS=30`) | Candidate set |
 | 2 | Bot | For each candidate, send a small prompt to OpenAI (`gpt-4o-mini` default) with: full `profile.local.md` + job title + company + first ~1500 chars of description | Per-job verdict |
 | 3 | LLM | Return `{verdict: relevant\|borderline\|not_relevant, priority: high\|medium\|low, reason: <=200 chars, evidence_phrases: [...]}` | Structured judgment |
 | 4 | Bot | Persist to `job_l2_verdicts` table; cache by job_id (one verdict per job, never re-asked) | Verdict cached |
@@ -745,7 +745,7 @@ Acceptance criteria:
 
 | Criterion | Pass Condition |
 |---|---|
-| Per-job cap | At most `JOBBOT_L2_MAX_JOBS` jobs per click reach OpenAI |
+| Per-job cap | At most `JOBHUNTER_L2_MAX_JOBS` jobs per click reach OpenAI |
 | Cached | A given job_id is sent to L2 at most once (re-runnable explicitly via `/agent rescore_jobs`) |
 | Directive-driven | Adding a directive ("skip German jobs") is reflected on the next click without a rule update |
 | Graceful fallback | When `OPENAI_API_KEY` is unset, the local fallback path runs and rejects only obvious bad role families |
@@ -972,8 +972,8 @@ where the work runs.
 
 | Tier | Engine | Where | Cost shape | Used for |
 |---|---|---|---|---|
-| **L1 — Deterministic** | None | jobbot (Python) | Free | Fetch, parse, dedupe, hard-reject, scoring rules, sort |
-| **L2 — Per-job LLM** | OpenAI API (`gpt-4o-mini` default) | jobbot | Pay-per-call (~$0.003/click for ~30 jobs) | L2 relevance pass on top L1 survivors (§8.5); cover notes; CV bullets (future) |
+| **L1 — Deterministic** | None | jobhunter (Python) | Free | Fetch, parse, dedupe, hard-reject, scoring rules, sort |
+| **L2 — Per-job LLM** | OpenAI API (`gpt-4o-mini` default) | jobhunter | Pay-per-call (~$0.003/click for ~30 jobs) | L2 relevance pass on top L1 survivors (§8.5); cover notes; CV bullets (future) |
 | **Agent — Subscription LLM** | Codex CLI (user's flat-fee subscription) | OpenClaw worker | No per-call cost; throttled by user clicks + per-day quota | Free-form `/agent` requests, source discovery, scoring tuning, profile refinement, ad-hoc data queries |
 
 Per-task routing:
@@ -1052,15 +1052,15 @@ threshold check skipped (§6.9).
 The shared workspace volume is the **only** path both containers can see.
 Everything else is private to one container.
 
-| Host Path | jobbot container | OpenClaw container | Purpose |
+| Host Path | jobhunter container | OpenClaw container | Purpose |
 |---|---|---|---|
-| `./data` | `/jobbot/data` rw | — (not mounted) | SQLite, logs, drafts |
-| `./input` | `/jobbot/input` ro | — (not mounted) | `profile.md`, optional `cv.md` |
-| `./config` | `/jobbot/config` rw | — (not mounted) | `sources.json`, `scoring.json`, `jobbot.json` |
-| `./openclaw/workspace` | `/jobbot/workspace` rw | `/openclaw/workspace` rw | Discovery & tuning request/response files |
+| `./data` | `/jobhunter/data` rw | — (not mounted) | SQLite, logs, drafts |
+| `./input` | `/jobhunter/input` ro | — (not mounted) | `profile.md`, optional `cv.md` |
+| `./config` | `/jobhunter/config` rw | — (not mounted) | `sources.json`, `scoring.json`, `jobhunter.json` |
+| `./openclaw/workspace` | `/jobhunter/workspace` rw | `/openclaw/workspace` rw | Discovery & tuning request/response files |
 | `./openclaw/config` | — (not mounted) | `/openclaw/config` rw | OpenClaw's own state |
 
-Note that **jobbot writes its DB and config files only to its own private
+Note that **jobhunter writes its DB and config files only to its own private
 volumes**; OpenClaw cannot read or modify them directly. All cross-container
 work happens through the shared `workspace/` volume via the JSON file
 contracts in §6.5 and §8.4.
@@ -1081,8 +1081,8 @@ Do not mount:
 | `OPENAI_API_KEY` | yes, if using OpenAI API | LLM calls |
 | `TELEGRAM_BOT_TOKEN` | yes | Telegram bot |
 | `TELEGRAM_ALLOWED_CHAT_ID` | yes | Restrict recipient |
-| `JOBBOT_DAILY_BUDGET_USD` | yes | App-level hard budget |
-| `JOBBOT_MONTHLY_BUDGET_USD` | yes | App-level hard budget |
+| `JOBHUNTER_DAILY_BUDGET_USD` | yes | App-level hard budget |
+| `JOBHUNTER_MONTHLY_BUDGET_USD` | yes | App-level hard budget |
 | `GMAIL_CLIENT_ID` | optional | Gmail alert reader |
 | `GMAIL_CLIENT_SECRET` | optional | Gmail alert reader |
 | `EMAIL_IMAP_URL` | optional | IMAP alert reader |
@@ -1091,9 +1091,9 @@ Do not mount:
 
 ```yaml
 services:
-  openclaw-jobbot:
+  openclaw-jobhunter:
     image: ghcr.io/openclaw/openclaw:latest
-    container_name: openclaw-jobbot
+    container_name: openclaw-jobhunter
     restart: unless-stopped
     ports:
       - "127.0.0.1:18789:18789"
@@ -1101,12 +1101,12 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
       TELEGRAM_ALLOWED_CHAT_ID: "${TELEGRAM_ALLOWED_CHAT_ID}"
-      JOBBOT_DAILY_BUDGET_USD: "0.50"
-      JOBBOT_MONTHLY_BUDGET_USD: "10.00"
+      JOBHUNTER_DAILY_BUDGET_USD: "0.50"
+      JOBHUNTER_MONTHLY_BUDGET_USD: "10.00"
     volumes:
-      - ./data:/jobbot/data
-      - ./input:/jobbot/input:ro
-      - ./config:/jobbot/config
+      - ./data:/jobhunter/data
+      - ./input:/jobhunter/input:ro
+      - ./config:/jobhunter/config
 ```
 
 This is a skeleton, not final production compose. The final compose should match the exact OpenClaw image, command, state directory, and channel setup used in the installed version.
@@ -1155,7 +1155,7 @@ This is a skeleton, not final production compose. The final compose should match
 
 | Feature | Included |
 |---|---|
-| `Update sources` flow: jobbot ↔ OpenClaw ↔ Codex via shared workspace | Yes |
+| `Update sources` flow: jobhunter ↔ OpenClaw ↔ Codex via shared workspace | Yes |
 | Per-candidate validation by OpenClaw (HTTP HEAD, robots.txt, sample fetch) | Yes |
 | Telegram approval gate; agent-discovered sources written to `sources.json` with `created_by='agent'` | Yes |
 | `discovery_runs` table for audit | Yes |
@@ -1164,7 +1164,7 @@ This is a skeleton, not final production compose. The final compose should match
 
 | Feature | Included |
 |---|---|
-| `Tune scoring` flow: jobbot ↔ OpenClaw ↔ Codex via shared workspace | Yes |
+| `Tune scoring` flow: jobhunter ↔ OpenClaw ↔ Codex via shared workspace | Yes |
 | Schema-validated rules output (DSL only, no codegen) | Yes |
 | Shadow test against last N=100 jobs before activation | Yes |
 | Telegram approval gate with diff and shadow-test report | Yes |
@@ -1191,20 +1191,20 @@ This is a skeleton, not final production compose. The final compose should match
 | CV ingestion in any format | Accept `cv.pdf`, `cv.docx`, `cv.doc`, or a public URL pointing to the CV; extract to text on `init`. Today only `cv.md` is read |
 | Interview follow-up tracking | Later workflow |
 | Recruiter outreach drafts | Draft only; user sends manually |
-| Daily safety-net background collection (`JOBBOT_DAILY_REFRESH=1`) | Opt-in only |
+| Daily safety-net background collection (`JOBHUNTER_DAILY_REFRESH=1`) | Opt-in only |
 
 ## 15. Acceptance Criteria
 
 | Area | Criteria |
 |---|---|
 | Safety | No LinkedIn cookies, no auto-apply, no outbound recruiter messaging |
-| Docker | Both containers run in Docker; jobbot ↔ OpenClaw share only `./openclaw/workspace/`; OpenClaw also gets `data/jobs.sqlite:ro` for the `query_sql` tool |
+| Docker | Both containers run in Docker; jobhunter ↔ OpenClaw share only `./openclaw/workspace/`; OpenClaw also gets `data/jobs.sqlite:ro` for the `query_sql` tool |
 | Telegram per-job | Digest and four required per-job buttons work; cards delete from chat after Irrelevant/Snooze/Applied |
 | Telegram reply keyboard | `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` buttons work; persistent across sessions |
 | Free-form commands | `/agent`, `/feedback`, `/ask`, `/profile`, `/history`, `/revert`, `/applied`, `/snoozed`, `/irrelevant` all parse and route correctly |
 | On-demand collection | No cron; rate-limited; cross-source dedupe; never re-shows previously digested jobs; high-priority sources fetch first |
 | L1 scoring | Fully deterministic; zero LLM calls per job; word-boundary matching only; rules live in `config/scoring.json` |
-| L2 relevance | Capped at `JOBBOT_L2_MAX_JOBS` per click; cached per job; reads full `# About me` + `# Directives`; gracefully falls back to local heuristic when no `OPENAI_API_KEY` |
+| L2 relevance | Capped at `JOBHUNTER_L2_MAX_JOBS` per click; cached per job; reads full `# About me` + `# Directives`; gracefully falls back to local heuristic when no `OPENAI_API_KEY` |
 | Single profile file | `input/profile.local.md` with `# About me` + `# Directives` is the sole source of truth; legacy `profile.local.json` is auto-migrated and backed up |
 | Source discovery | Triggered on demand via `Update sources` or `/agent`; OpenClaw + Codex iterate with read-only validation tools; user approves per-candidate; written to `sources.json` with `created_by='agent'` |
 | Scoring tuning | Triggered on demand; OpenClaw + Codex propose rules in the §8.3 DSL; shadow-tested; user approves before activation; previous version archived; ruleset schema validated before swap |

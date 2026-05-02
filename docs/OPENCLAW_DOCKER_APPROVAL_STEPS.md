@@ -17,19 +17,19 @@ approval because they involve tokens, accounts, or external services.
 |---|---|
 | Create dedicated OpenAI project/key | Enables paid cover-note calls |
 | Set project budget/alerts | Provider-side visibility |
-| Add `OPENAI_API_KEY` to `.env` | Lets `jobbot` generate cover notes only |
+| Add `OPENAI_API_KEY` to `.env` | Lets `jobhunter` generate cover notes only |
 
 The bot also enforces its own budget with:
 
 ```text
-JOBBOT_DAILY_BUDGET_USD=0.50
-JOBBOT_MONTHLY_BUDGET_USD=10.00
+JOBHUNTER_DAILY_BUDGET_USD=0.50
+JOBHUNTER_MONTHLY_BUDGET_USD=10.00
 ```
 
 ## 3. OpenClaw Gateway In Docker
 
-OpenClaw handles source discovery and scoring tuning through the shared workspace. `jobbot` writes
-request files; the OpenClaw/Codex side writes response/status files; `jobbot` then asks for Telegram
+OpenClaw handles source discovery and scoring tuning through the shared workspace. `jobhunter` writes
+request files; the OpenClaw/Codex side writes response/status files; `jobhunter` then asks for Telegram
 approval before changing sources or scoring.
 
 OpenClaw's Docker docs describe a setup/onboarding flow for the full Gateway. The important points
@@ -40,7 +40,7 @@ for this project:
 | Use prebuilt image | `ghcr.io/openclaw/openclaw:latest` |
 | Bind locally | `127.0.0.1:18789:18789` |
 | Persist only OpenClaw config/workspace | `./openclaw/config`, `./openclaw/workspace` |
-| Shared jobbot contract | `./openclaw/workspace` is also mounted at `/jobbot/workspace` |
+| Shared jobhunter contract | `./openclaw/workspace` is also mounted at `/jobhunter/workspace` |
 | Do not mount browser cookies | Not needed and unsafe |
 | Do not expose publicly | Use localhost or private network only |
 
@@ -73,7 +73,7 @@ The bot does not send email and does not log into LinkedIn.
 ## 5. Codex Subscription Boundary
 
 Source discovery and scoring tuning are designed to use Codex through the OpenClaw side of the
-workflow, not the paid OpenAI API key used by `jobbot`. Do not wire a fake Codex loop or reuse the
+workflow, not the paid OpenAI API key used by `jobhunter`. Do not wire a fake Codex loop or reuse the
 cover-note API key for per-job reasoning. Pick the concrete Codex runtime/auth mechanism before
 enabling the worker that consumes `openclaw/workspace/{discovery,tuning}`.
 

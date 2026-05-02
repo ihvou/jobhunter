@@ -86,32 +86,32 @@ def env_or_setting(env_name: str, settings: Dict, key: str, default, cast):
 
 
 def load_app_config() -> AppConfig:
-    data_dir = _default_path("JOBBOT_DATA_DIR", "data")
-    input_dir = _default_path("JOBBOT_INPUT_DIR", "input")
-    config_dir = _default_path("JOBBOT_CONFIG_DIR", "config")
-    profile_path = Path(os.getenv("JOBBOT_PROFILE_PATH", str(input_dir / "profile.local.md")))
-    cv_path = Path(os.getenv("JOBBOT_CV_PATH", str(input_dir / "cv.local.md")))
+    data_dir = _default_path("JOBHUNTER_DATA_DIR", "data")
+    input_dir = _default_path("JOBHUNTER_INPUT_DIR", "input")
+    config_dir = _default_path("JOBHUNTER_CONFIG_DIR", "config")
+    profile_path = Path(os.getenv("JOBHUNTER_PROFILE_PATH", str(input_dir / "profile.local.md")))
+    cv_path = Path(os.getenv("JOBHUNTER_CV_PATH", str(input_dir / "cv.local.md")))
     profile_settings_path = Path(
-        os.getenv("JOBBOT_PROFILE_SETTINGS_PATH", str(config_dir / "profile.local.json"))
+        os.getenv("JOBHUNTER_PROFILE_SETTINGS_PATH", str(config_dir / "profile.local.json"))
     )
-    sources_path = Path(os.getenv("JOBBOT_SOURCES_PATH", str(config_dir / "sources.json")))
-    scoring_path = Path(os.getenv("JOBBOT_SCORING_PATH", str(config_dir / "scoring.json")))
-    workspace_dir = Path(os.getenv("JOBBOT_WORKSPACE_DIR", "openclaw/workspace"))
-    heartbeat_path = Path(os.getenv("JOBBOT_HEARTBEAT_PATH", str(data_dir / "heartbeat")))
-    database_path = Path(os.getenv("JOBBOT_DATABASE_PATH", str(data_dir / "jobs.sqlite")))
+    sources_path = Path(os.getenv("JOBHUNTER_SOURCES_PATH", str(config_dir / "sources.json")))
+    scoring_path = Path(os.getenv("JOBHUNTER_SCORING_PATH", str(config_dir / "scoring.json")))
+    workspace_dir = Path(os.getenv("JOBHUNTER_WORKSPACE_DIR", "openclaw/workspace"))
+    heartbeat_path = Path(os.getenv("JOBHUNTER_HEARTBEAT_PATH", str(data_dir / "heartbeat")))
+    database_path = Path(os.getenv("JOBHUNTER_DATABASE_PATH", str(data_dir / "jobs.sqlite")))
 
-    settings_path = Path(os.getenv("JOBBOT_SETTINGS_PATH", str(config_dir / "jobbot.json")))
+    settings_path = Path(os.getenv("JOBHUNTER_SETTINGS_PATH", str(config_dir / "jobhunter.json")))
     settings = load_json(settings_path, {})
 
     cost_settings = settings.get("cost", {})
     cost = CostConfig(
-        daily_budget_usd=env_or_setting("JOBBOT_DAILY_BUDGET_USD", cost_settings, "daily_budget_usd", 0.50, float),
-        monthly_budget_usd=env_or_setting("JOBBOT_MONTHLY_BUDGET_USD", cost_settings, "monthly_budget_usd", 10.00, float),
+        daily_budget_usd=env_or_setting("JOBHUNTER_DAILY_BUDGET_USD", cost_settings, "daily_budget_usd", 0.50, float),
+        monthly_budget_usd=env_or_setting("JOBHUNTER_MONTHLY_BUDGET_USD", cost_settings, "monthly_budget_usd", 10.00, float),
         input_usd_per_million=env_or_setting(
-            "JOBBOT_INPUT_USD_PER_MILLION", cost_settings, "input_usd_per_million", 0.15, float
+            "JOBHUNTER_INPUT_USD_PER_MILLION", cost_settings, "input_usd_per_million", 0.15, float
         ),
         output_usd_per_million=env_or_setting(
-            "JOBBOT_OUTPUT_USD_PER_MILLION", cost_settings, "output_usd_per_million", 0.60, float
+            "JOBHUNTER_OUTPUT_USD_PER_MILLION", cost_settings, "output_usd_per_million", 0.60, float
         ),
     )
 
@@ -131,51 +131,51 @@ def load_app_config() -> AppConfig:
         telegram_allowed_chat_id=parse_optional_int(os.getenv("TELEGRAM_ALLOWED_CHAT_ID")),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", settings.get("openai_model", "gpt-4o-mini")),
-        digest_max_jobs=env_or_setting("JOBBOT_DIGEST_MAX_JOBS", settings, "digest_max_jobs", 10, int),
+        digest_max_jobs=env_or_setting("JOBHUNTER_DIGEST_MAX_JOBS", settings, "digest_max_jobs", 10, int),
         collect_interval_minutes=env_or_setting(
-            "JOBBOT_COLLECT_INTERVAL_MINUTES", settings, "collect_interval_minutes", 240, int
+            "JOBHUNTER_COLLECT_INTERVAL_MINUTES", settings, "collect_interval_minutes", 240, int
         ),
-        max_llm_jobs_per_run=env_or_setting("JOBBOT_MAX_LLM_JOBS_PER_RUN", settings, "max_llm_jobs_per_run", 30, int),
-        max_response_bytes=env_or_setting("JOBBOT_MAX_RESPONSE_BYTES", settings, "max_response_bytes", 8 * 1024 * 1024, int),
-        check_robots=env_or_setting("JOBBOT_CHECK_ROBOTS", settings, "check_robots", True, bool_from_value),
+        max_llm_jobs_per_run=env_or_setting("JOBHUNTER_MAX_LLM_JOBS_PER_RUN", settings, "max_llm_jobs_per_run", 30, int),
+        max_response_bytes=env_or_setting("JOBHUNTER_MAX_RESPONSE_BYTES", settings, "max_response_bytes", 8 * 1024 * 1024, int),
+        check_robots=env_or_setting("JOBHUNTER_CHECK_ROBOTS", settings, "check_robots", True, bool_from_value),
         rate_limit_collect_seconds=env_or_setting(
-            "JOBBOT_RATE_LIMIT_COLLECT_SECONDS", settings, "rate_limit_collect_seconds", 600, int
+            "JOBHUNTER_RATE_LIMIT_COLLECT_SECONDS", settings, "rate_limit_collect_seconds", 600, int
         ),
         rate_limit_discovery_per_day=env_or_setting(
-            "JOBBOT_RATE_LIMIT_DISCOVERY_PER_DAY", settings, "rate_limit_discovery_per_day", 3, int
+            "JOBHUNTER_RATE_LIMIT_DISCOVERY_PER_DAY", settings, "rate_limit_discovery_per_day", 3, int
         ),
         rate_limit_tuning_per_day=env_or_setting(
-            "JOBBOT_RATE_LIMIT_TUNING_PER_DAY", settings, "rate_limit_tuning_per_day", 3, int
+            "JOBHUNTER_RATE_LIMIT_TUNING_PER_DAY", settings, "rate_limit_tuning_per_day", 3, int
         ),
         rate_limit_cover_notes_per_day=env_or_setting(
-            "JOBBOT_RATE_LIMIT_COVER_NOTES_PER_DAY", settings, "rate_limit_cover_notes_per_day", 10, int
+            "JOBHUNTER_RATE_LIMIT_COVER_NOTES_PER_DAY", settings, "rate_limit_cover_notes_per_day", 10, int
         ),
         rate_limit_agent_per_day=env_or_setting(
-            "JOBBOT_RATE_LIMIT_AGENT_PER_DAY", settings, "rate_limit_agent_per_day", 20, int
+            "JOBHUNTER_RATE_LIMIT_AGENT_PER_DAY", settings, "rate_limit_agent_per_day", 20, int
         ),
         rate_limit_agent_seconds=env_or_setting(
-            "JOBBOT_RATE_LIMIT_AGENT_SECONDS", settings, "rate_limit_agent_seconds", 10, int
+            "JOBHUNTER_RATE_LIMIT_AGENT_SECONDS", settings, "rate_limit_agent_seconds", 10, int
         ),
         rate_limit_sources_apply_per_day=env_or_setting(
-            "JOBBOT_RATE_LIMIT_SOURCES_APPLY_PER_DAY", settings, "rate_limit_sources_apply_per_day", 5, int
+            "JOBHUNTER_RATE_LIMIT_SOURCES_APPLY_PER_DAY", settings, "rate_limit_sources_apply_per_day", 5, int
         ),
         rate_limit_scoring_apply_per_day=env_or_setting(
-            "JOBBOT_RATE_LIMIT_SCORING_APPLY_PER_DAY", settings, "rate_limit_scoring_apply_per_day", 3, int
+            "JOBHUNTER_RATE_LIMIT_SCORING_APPLY_PER_DAY", settings, "rate_limit_scoring_apply_per_day", 3, int
         ),
         rate_limit_bulk_apply_per_day=env_or_setting(
-            "JOBBOT_RATE_LIMIT_BULK_APPLY_PER_DAY", settings, "rate_limit_bulk_apply_per_day", 2, int
+            "JOBHUNTER_RATE_LIMIT_BULK_APPLY_PER_DAY", settings, "rate_limit_bulk_apply_per_day", 2, int
         ),
-        l2_max_jobs=env_or_setting("JOBBOT_L2_MAX_JOBS", settings, "l2_max_jobs", 30, int),
+        l2_max_jobs=env_or_setting("JOBHUNTER_L2_MAX_JOBS", settings, "l2_max_jobs", 30, int),
         agent_request_recent_jobs=env_or_setting(
-            "JOBBOT_AGENT_REQUEST_RECENT_JOBS", settings, "agent_request_recent_jobs", 15, int
+            "JOBHUNTER_AGENT_REQUEST_RECENT_JOBS", settings, "agent_request_recent_jobs", 15, int
         ),
         agent_request_desc_chars=env_or_setting(
-            "JOBBOT_AGENT_REQUEST_DESC_CHARS", settings, "agent_request_desc_chars", 250, int
+            "JOBHUNTER_AGENT_REQUEST_DESC_CHARS", settings, "agent_request_desc_chars", 250, int
         ),
         agent_request_feedback_items=env_or_setting(
-            "JOBBOT_AGENT_REQUEST_FEEDBACK_ITEMS", settings, "agent_request_feedback_items", 5, int
+            "JOBHUNTER_AGENT_REQUEST_FEEDBACK_ITEMS", settings, "agent_request_feedback_items", 5, int
         ),
-        codex_handoff_mode=str(os.getenv("JOBBOT_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
+        codex_handoff_mode=str(os.getenv("JOBHUNTER_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
         cost=cost,
     )
 
