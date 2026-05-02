@@ -113,6 +113,46 @@ console.log(JSON.stringify(result));
         self.assertEqual(result["select"], "select id from jobs")
         self.assertTrue(result["rejected"])
 
+    def test_extract_json_uses_last_balanced_object(self):
+        output = run_node(
+            """
+const worker = require("./openclaw/worker/watcher.js");
+const parsed = worker.extractJson("First {not json}. Then {\\\"ok\\\": true, \\\"n\\\": 2}");
+console.log(JSON.stringify(parsed));
+"""
+        )
+        self.assertEqual(json.loads(output), {"ok": True, "n": 2})
+
+    def test_tuning_validation_rejects_bad_rule_kind(self):
+        output = run_node(
+            """
+const worker = require("./openclaw/worker/watcher.js");
+let message = "";
+try {
+  worker.validateResponse("tuning", {version: 2, thresholds: {}, rules: [{id: "bad", kind: "eval_arbitrary_code"}]}, {current_version: 1});
+} catch (error) {
+  message = error.message;
+}
+process.stdout.write(message);
+"""
+        )
+        self.assertIn("unsupported kind", output)
+
+    def test_worker_repo_allowlist_and_secret_denylist(self):
+        output = run_node(
+            """
+const worker = require("./openclaw/worker/watcher.js");
+const result = {repo: worker.resolveAllowedPath("jobhunter/database.py"), envBlocked: false, profileBlocked: false};
+try { worker.resolveAllowedPath(".env"); } catch (_error) { result.envBlocked = true; }
+try { worker.resolveAllowedPath("input/profile.local.md"); } catch (_error) { result.profileBlocked = true; }
+console.log(JSON.stringify(result));
+"""
+        )
+        result = json.loads(output)
+        self.assertEqual(result["repo"], "/jobhunter/repo/jobhunter/database.py")
+        self.assertTrue(result["envBlocked"])
+        self.assertTrue(result["profileBlocked"])
+
     def test_agent_wall_clock_cap_aborts_multi_turn_run(self):
         output = run_node(
             """

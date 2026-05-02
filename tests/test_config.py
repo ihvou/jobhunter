@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jobhunter.config import load_app_config, parse_optional_int, parse_profile_description
+from jobhunter.config import ConfigError, ensure_profile_file, load_app_config, load_sources, parse_optional_int, parse_profile_description
+from test_app import config_for
 
 
 class ConfigTests(unittest.TestCase):
@@ -33,6 +34,25 @@ class ConfigTests(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update(old_env)
             self.assertEqual(config.digest_max_jobs, 5)
+
+    def test_missing_local_profile_and_cv_are_copied_from_examples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            (config.input_dir / "profile.example.md").write_text("# About me\nExample\n\n# Directives\n", encoding="utf-8")
+            (config.input_dir / "cv.example.md").write_text("Example CV", encoding="utf-8")
+
+            ensure_profile_file(config)
+
+            self.assertEqual(config.profile_path.read_text(encoding="utf-8"), "# About me\nExample\n\n# Directives\n")
+            self.assertEqual(config.cv_path.read_text(encoding="utf-8"), "Example CV")
+
+    def test_invalid_source_type_fails_at_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sources.json"
+            path.write_text('[{"id":"bad","name":"Bad","type":"html","url":"https://example.com/jobs"}]', encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "invalid type 'html'"):
+                load_sources(path)
 
 
 if __name__ == "__main__":

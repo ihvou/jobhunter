@@ -49,7 +49,7 @@ class AgentCoordinator:
                 "evidence_table": "optional rows/aggregates/file snippets/computed analyses for data_answer semantics",
                 "proposed_actions": [
                     {
-                        "kind": "directive_edit|profile_edit|sources_proposal|scoring_rule_proposal|data_answer|human_followup|rescore_jobs|bulk_update_jobs|backup_export",
+                        "kind": "directive_edit|profile_edit|sources_proposal|scoring_rule_proposal|data_answer|human_followup|rescore_jobs|bulk_update_jobs|backup_export|email_parser_proposal",
                         "summary": "one-line user-facing summary",
                         "payload": {},
                     }

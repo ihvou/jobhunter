@@ -13,7 +13,7 @@ from .coordinators import validate_scoring_ruleset
 from .logging_setup import log_context
 from .models import SourceConfig, UserProfile, utc_now_iso
 from .scoring import load_scoring_rules, score_job
-from .sources import SourceError, validate_safe_url
+from .sources import SourceError, VALID_SOURCE_TYPES, normalize_source_type, validate_safe_url
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ ALLOWED_ACTION_KINDS = {
     "rescore_jobs",
     "bulk_update_jobs",
     "backup_export",
+    "email_parser_proposal",
 }
 
 
@@ -47,6 +48,7 @@ class AgentActionContext:
     source_reachable: Optional[Callable[[str], bool]] = None
     shadow_test: Optional[Callable[[Dict], Dict]] = None
     run_l2: Optional[Callable[[List], None]] = None
+    confirmed: bool = False
 
 
 def validate_payload_keys(kind: str, payload: Dict, required: List[str], optional: List[str] = None) -> Optional[ActionResult]:
@@ -136,7 +138,7 @@ def sources_proposal(payload: Dict, context: AgentActionContext) -> ActionResult
     if not isinstance(operations, list):
         return ActionResult(False, "sources_proposal operations must be a list")
     disables = [op for op in operations if isinstance(op, dict) and op.get("op") == "disable"]
-    if len(disables) > 5:
+    if len(disables) > 5 and not context.confirmed:
         return ActionResult(False, "Disabling more than 5 sources requires typed CONFIRM", requires_confirm=True)
     path = context.config.sources_path
     existing = json.loads(read_text(path) or "[]")
@@ -192,7 +194,7 @@ def scoring_rule_proposal(payload: Dict, context: AgentActionContext) -> ActionR
     current = load_scoring_rules(context.config.scoring_path)
     current_version = int(current.get("version", 0) or 0)
     removed_count = max(0, len(current.get("rules", [])) - len(proposed.get("rules", [])))
-    if removed_count > 5:
+    if removed_count > 5 and not context.confirmed:
         return ActionResult(False, "Removing more than 5 scoring rules requires typed CONFIRM", requires_confirm=True)
     validate_scoring_ruleset(proposed, current_version)
     archive = archive_file(context.config.scoring_path)
@@ -224,7 +226,7 @@ def human_followup(payload: Dict, _context: AgentActionContext) -> ActionResult:
     )
     if validation:
         return validation
-    tasks_path = Path.cwd() / "tasks.md"
+    tasks_path = _context.config.tasks_path
     if not tasks_path.exists():
         return ActionResult(False, "tasks.md not found")
     title = sanitize_text(payload.get("title") or "Agent follow-up", 120)
@@ -257,18 +259,48 @@ def rescore_jobs(payload: Dict, context: AgentActionContext) -> ActionResult:
             placeholders = ",".join("?" for _ in source_ids[:20])
             rows = list(
                 conn.execute(
-                    "select * from jobs where last_seen_at >= ? and source_id in (%s) order by last_seen_at desc" % placeholders,
+                    """
+                    select j.*, s.score
+                    from jobs j
+                    left join job_scores s on s.job_id = j.id
+                    where j.last_seen_at >= ? and j.source_id in (%s)
+                    order by j.last_seen_at desc
+                    """ % placeholders,
                     (cutoff, *[str(source_id) for source_id in source_ids[:20]]),
                 )
             )
         else:
-            rows = list(conn.execute("select * from jobs where last_seen_at >= ? order by last_seen_at desc", (cutoff,)))
+            rows = list(
+                conn.execute(
+                    """
+                    select j.*, s.score
+                    from jobs j
+                    left join job_scores s on s.job_id = j.id
+                    where j.last_seen_at >= ?
+                    order by j.last_seen_at desc
+                    """,
+                    (cutoff,),
+                )
+            )
+    shifts = {"up": 0, "down": 0, "same": 0}
     for row in rows:
         job = row_to_job(row)
-        context.database.save_score(row["id"], score_job(job, context.profile, rules))
+        old_score = int(row["score"] or 0) if "score" in row.keys() else 0
+        result = score_job(job, context.profile, rules)
+        if result.score > old_score:
+            shifts["up"] += 1
+        elif result.score < old_score:
+            shifts["down"] += 1
+        else:
+            shifts["same"] += 1
+        context.database.save_score(row["id"], result)
     if context.run_l2 and rows:
         context.run_l2(rows[: context.config.l2_max_jobs])
-    return ActionResult(True, "Rescored %s job(s) from the last %sh" % (len(rows), hours))
+    return ActionResult(
+        True,
+        "Rescored %s job(s) from the last %sh; score shifts up=%s down=%s same=%s; L2 refreshed for up to %s jobs"
+        % (len(rows), hours, shifts["up"], shifts["down"], shifts["same"], min(len(rows), context.config.l2_max_jobs)),
+    )
 
 
 def bulk_update_jobs(payload: Dict, context: AgentActionContext) -> ActionResult:
@@ -284,7 +316,7 @@ def bulk_update_jobs(payload: Dict, context: AgentActionContext) -> ActionResult
     with context.database.connection() as conn:
         rows = conn.execute(filter_sql).fetchall()
         job_ids = [row["id"] for row in rows if "id" in row.keys()][:100]
-        if len(job_ids) > 10:
+        if len(job_ids) > 10 and not context.confirmed:
             return ActionResult(False, "Updating more than 10 jobs requires typed CONFIRM", requires_confirm=True)
         conn.executemany("update jobs set status = ? where id = ?", [(new_status, job_id) for job_id in job_ids])
     return ActionResult(True, "Updated %s job(s) to %s" % (len(job_ids), new_status))
@@ -308,6 +340,30 @@ def backup_export(payload: Dict, context: AgentActionContext) -> ActionResult:
     return ActionResult(True, "Backup created: %s (%s bytes)" % (out_path, out_path.stat().st_size), "", str(out_path))
 
 
+def email_parser_proposal(payload: Dict, context: AgentActionContext) -> ActionResult:
+    validation = validate_payload_keys("email_parser_proposal", payload, ["template"])
+    if validation:
+        return validation
+    template = payload.get("template") if isinstance(payload.get("template"), dict) else {}
+    required = ("id", "source_id", "sender_pattern", "subject_pattern", "parser_config")
+    missing = [key for key in required if key not in template]
+    if missing:
+        return ActionResult(False, "email_parser_proposal missing template key(s): %s" % ", ".join(missing))
+    archive = ""
+    context.database.upsert_email_template(
+        {
+            "id": sanitize_id(template.get("id")),
+            "source_id": sanitize_id(template.get("source_id")),
+            "sender_pattern": sanitize_text(template.get("sender_pattern"), 300),
+            "subject_pattern": sanitize_text(template.get("subject_pattern"), 300),
+            "parser_config": template.get("parser_config") if isinstance(template.get("parser_config"), dict) else {},
+            "status": template.get("status") if template.get("status") in ("test", "active", "disabled") else "test",
+            "priority": template.get("priority") if template.get("priority") in ("high", "medium", "low") else "medium",
+        }
+    )
+    return ActionResult(True, "Email parser template saved: %s" % sanitize_id(template.get("id")), archive, "email_templates")
+
+
 KIND_HANDLERS = {
     "directive_edit": directive_edit,
     "profile_edit": profile_edit,
@@ -318,14 +374,13 @@ KIND_HANDLERS = {
     "rescore_jobs": rescore_jobs,
     "bulk_update_jobs": bulk_update_jobs,
     "backup_export": backup_export,
+    "email_parser_proposal": email_parser_proposal,
 }
 
 
 def normalize_source_row(source: Dict) -> Dict:
     source_id = sanitize_id(source.get("id") or source.get("name") or source.get("url") or "agent-source")
-    source_type = str(source.get("type") or "json_api").strip().lower()
-    if source_type == "email_alert":
-        source_type = "imap"
+    source_type = normalize_source_type(source.get("type") or "json_api")
     row = {
         "id": source_id,
         "name": sanitize_text(source.get("name") or source_id, 80),
@@ -344,6 +399,11 @@ def normalize_source_row(source: Dict) -> Dict:
 
 
 def validate_source_row(row: Dict, source_reachable: Optional[Callable[[str], bool]]) -> None:
+    if row["type"] not in VALID_SOURCE_TYPES:
+        raise SourceError(
+            "Source '%s' has invalid type '%s'; allowed: %s"
+            % (row["id"], row["type"], "/".join(sorted(VALID_SOURCE_TYPES)))
+        )
     validate_source_url(row["url"], row["type"])
     if row["type"] != "imap":
         validate_safe_url(row["url"])
@@ -407,6 +467,8 @@ def default_summary(kind: str, payload: Dict) -> str:
         return "Apply scoring ruleset"
     if kind == "human_followup":
         return str(payload.get("title") or "Create follow-up task")
+    if kind == "email_parser_proposal":
+        return "Apply email parser template"
     return kind
 
 

@@ -1,6 +1,7 @@
 import unittest
+from unittest import mock
 
-from jobhunter.telegram import TelegramClient, agent_actions_keyboard, job_keyboard, main_menu_keyboard, parse_callback, parse_message
+from jobhunter.telegram import TelegramClient, TelegramError, agent_actions_keyboard, job_keyboard, main_menu_keyboard, parse_callback, parse_message
 
 
 class TelegramTests(unittest.TestCase):
@@ -52,7 +53,8 @@ class TelegramTests(unittest.TestCase):
         for text, expected in cases.items():
             with self.subTest(text=text):
                 self.assertEqual(parse_message(text).action, expected)
-        self.assertIsNone(parse_message("hello"))
+        self.assertEqual(parse_message("hello").action, "agent")
+        self.assertEqual(parse_message("hello").text, "hello")
 
     def test_parse_agent_commands(self):
         action = parse_message("/agent why did you miss this URL?")
@@ -60,10 +62,14 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(action.action, "agent")
         self.assertIn("miss this URL", action.text)
         feedback = parse_message("/feedback skip German jobs")
-        self.assertTrue(feedback.text.startswith("User feedback:"))
+        self.assertEqual(feedback.action, "agent")
+        self.assertEqual(feedback.text, "/feedback skip German jobs")
         revert = parse_message("/revert 12")
         self.assertEqual(revert.action, "revert")
         self.assertEqual(revert.target_id, "12")
+        confirm = parse_message("CONFIRM #34")
+        self.assertEqual(confirm.action, "confirm")
+        self.assertEqual(confirm.target_id, "34")
 
     def test_agent_keyboard_skips_data_answer_buttons(self):
         keyboard = agent_actions_keyboard(
@@ -163,6 +169,12 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(actions[0].action, "usage")
         self.assertEqual(actions[0].chat_id, 123)
         self.assertEqual(client.offset, 8)
+
+    def test_urlopen_timeout_is_wrapped_as_telegram_error(self):
+        client = TelegramClient("token", 123)
+        with mock.patch("jobhunter.telegram.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaisesRegex(TelegramError, "timed out"):
+                client._get("getUpdates")
 
 
 if __name__ == "__main__":

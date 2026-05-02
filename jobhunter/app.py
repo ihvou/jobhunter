@@ -33,7 +33,7 @@ from .logging_setup import configure_logging, log_context
 from .models import SourceConfig, utc_now_iso
 from .scoring import load_scoring_rules, score_job
 from . import sources as source_module
-from .sources import SourceError, collect_from_source, validate_safe_url
+from .sources import SourceError, VALID_SOURCE_TYPES, collect_from_source, normalize_source_type, validate_safe_url
 from .telegram import TelegramClient, TelegramError
 
 LOGGER = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ class JobHunter:
         self.llm = LLMClient(config, self.budget)
         source_module.MAX_BYTES = config.max_response_bytes
         source_module.CHECK_ROBOTS = config.check_robots
+        source_module.ROBOTS_TXT_RESPECT = config.robots_txt_respect
         self.discovery = DiscoveryCoordinator(config, self.database, self.profile)
         self.scoring = ScoringCoordinator(config, self.database, self.profile)
         self.agent = AgentCoordinator(config, self.database, self.profile)
@@ -99,6 +100,8 @@ class JobHunter:
         )
         for source in sources:
             source.imap_last_uid = self.database.source_imap_last_uid(source.id)
+            if source.type == "imap":
+                source.email_templates = self.database.email_templates_for_source(source.id)
         self.database.upsert_sources(sources)
         ruleset = load_scoring_rules(self.config.scoring_path)
         total_fetched = 0
@@ -247,7 +250,7 @@ class JobHunter:
             self.start_agent_request(action.text, action)
             return
         if action.action == "agent_help":
-            self.answer_action(action, "Use /agent <request>, /feedback <note>, or /ask <question>.")
+            self.answer_action(action, "Use /agent <request>, or just type your request as a normal message.")
             return
         if action.action == "history":
             self.answer_action(action, "History sent", send_message_if_no_callback=False)
@@ -255,6 +258,9 @@ class JobHunter:
             return
         if action.action == "revert":
             self.handle_revert_action(action)
+            return
+        if action.action == "confirm":
+            self.handle_confirm_action(action)
             return
         if action.action in ("list_applied", "list_snoozed", "list_irrelevant"):
             status = {"list_applied": "applied", "list_snoozed": "snoozed", "list_irrelevant": "rejected"}[action.action]
@@ -364,6 +370,8 @@ class JobHunter:
                 return
             self.telegram.answer_callback(action.callback_id, "Generating cover note")
             self.submit_background(self.generate_cover_note, action.job_id, False)
+            if hasattr(self.telegram, "delete_message"):
+                self.telegram.delete_message(action.message_id)
             return
         self.telegram.answer_callback(action.callback_id, "Unknown job action")
 
@@ -462,7 +470,7 @@ class JobHunter:
         user_intent = run["user_text"] if run else response.get("user_intent_summary", "")
         for proposed in selected:
             result = apply_agent_action(proposed, context)
-            status = "applied" if result.applied else "failed"
+            status = "pending_confirm" if result.requires_confirm else "applied" if result.applied else "failed"
             row_id = self.database.record_agent_action(
                 action.target_id,
                 proposed.get("kind", ""),
@@ -476,19 +484,70 @@ class JobHunter:
             )
             if result.applied:
                 applied += 1
-            messages.append("#%s %s: %s" % (row_id, proposed.get("kind", ""), result.message))
+            if result.requires_confirm:
+                messages.append("#%s %s: %s. Reply `CONFIRM %s` to apply." % (row_id, proposed.get("kind", ""), result.message, row_id))
+            else:
+                messages.append("#%s %s: %s" % (row_id, proposed.get("kind", ""), result.message))
             log_context(
                 LOGGER,
-                logging.INFO if result.applied else logging.WARNING,
-                "agent_action_applied" if result.applied else "agent_action_failed",
+                logging.INFO if result.applied or result.requires_confirm else logging.WARNING,
+                "agent_action_pending_confirm" if result.requires_confirm else "agent_action_applied" if result.applied else "agent_action_failed",
                 action_id=row_id,
                 kind=proposed.get("kind"),
                 result_message=result.message,
             )
-        self.telegram.answer_callback(action.callback_id, "Applied %s/%s action(s)" % (applied, len(selected)))
+        pending = len([line for line in messages if "Reply `CONFIRM " in line])
+        self.telegram.answer_callback(action.callback_id, "Applied %s/%s action(s); pending confirm %s" % (applied, len(selected), pending))
         self.telegram.send_message("Agent action results:\n%s\n\nAudit: session %s" % ("\n".join(messages), action.target_id))
         if hasattr(self.telegram, "delete_message"):
             self.telegram.delete_message(action.message_id)
+
+    def handle_confirm_action(self, action) -> None:
+        try:
+            action_id = int(str(action.target_id or "").strip())
+        except ValueError:
+            self.answer_action(action, "Use CONFIRM <agent_action_id>")
+            return
+        row = self.database.get_agent_action(action_id)
+        if not row:
+            self.answer_action(action, "No agent action #%s" % action_id)
+            return
+        if row["status"] != "pending_confirm":
+            self.answer_action(action, "Agent action #%s is not pending confirmation" % action_id)
+            return
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            self.answer_action(action, "Agent action #%s has invalid payload" % action_id)
+            return
+        context = AgentActionContext(
+            config=self.config,
+            database=self.database,
+            profile=self.profile,
+            source_reachable=self.source_candidate_reachable,
+            shadow_test=self.scoring.shadow_test,
+            run_l2=self.run_l2_relevance,
+            confirmed=True,
+        )
+        result = apply_agent_action({"kind": row["kind"], "payload": payload}, context)
+        status = "applied" if result.applied else "failed"
+        self.database.update_agent_action_result(
+            action_id,
+            status,
+            archive_path=result.archive_path,
+            target_path=result.target_path,
+            result_message=result.message,
+        )
+        log_context(
+            LOGGER,
+            logging.INFO if result.applied else logging.WARNING,
+            "agent_action_confirmed" if result.applied else "agent_action_confirm_failed",
+            action_id=action_id,
+            kind=row["kind"],
+            result_message=result.message,
+        )
+        self.answer_action(action, "Confirmed action #%s" % action_id, send_message_if_no_callback=False)
+        self.telegram.send_message("Confirmed agent action #%s: %s\nAudit: status %s" % (action_id, result.message, status))
 
     def handle_revert_action(self, action) -> None:
         try:
@@ -619,7 +678,12 @@ class JobHunter:
         existing_urls = {source.get("url") for source in existing}
         result = {"appended": 0, "skipped_duplicates": 0, "skipped_invalid": 0}
         for candidate in candidates:
-            source_type = normalize_discovered_source_type(candidate.get("type", "json_api"))
+            try:
+                source_type = normalize_discovered_source_type(candidate.get("type", "json_api"))
+            except ValueError as exc:
+                result["skipped_invalid"] += 1
+                log_context(LOGGER, logging.WARNING, "discovery_candidate_rejected", reason=str(exc))
+                continue
             source_url = sanitize_agent_string(candidate.get("url"), 500)
             if source_type == "imap" and not source_url:
                 source_url = "imap://job-alerts"
@@ -860,12 +924,10 @@ def slugify(value: str) -> str:
 
 
 def normalize_discovered_source_type(value: str) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized == "email_alert":
-        return "imap"
-    if normalized in ("rss", "json_api", "ats", "community", "imap"):
-        return normalized
-    return "json_api"
+    normalized = normalize_source_type(value or "json_api")
+    if normalized not in VALID_SOURCE_TYPES:
+        raise ValueError("invalid source type '%s'; allowed: %s" % (value, "/".join(sorted(VALID_SOURCE_TYPES))))
+    return normalized
 
 
 def sanitize_agent_string(value, max_length: int) -> str:

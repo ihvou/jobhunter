@@ -18,6 +18,7 @@ services:
       JOBHUNTER_WORKSPACE_DIR: /jobhunter/workspace
       JOBHUNTER_DATABASE_PATH: /jobhunter/data/jobs.sqlite
       JOBHUNTER_HEARTBEAT_PATH: /jobhunter/data/heartbeat
+      JOBHUNTER_TASKS_PATH: /jobhunter/repo/tasks.md
       JOBHUNTER_PROFILE_PATH: /jobhunter/input/profile.local.md
       JOBHUNTER_CV_PATH: /jobhunter/input/cv.local.md
       JOBHUNTER_PROFILE_SETTINGS_PATH: /jobhunter/config/profile.local.json
@@ -25,6 +26,7 @@ services:
       JOBHUNTER_SCORING_PATH: /jobhunter/config/scoring.json
       JOBHUNTER_SETTINGS_PATH: /jobhunter/config/jobhunter.json
       JOBHUNTER_CODEX_HANDOFF_MODE: ${JOBHUNTER_CODEX_HANDOFF_MODE:-auto}
+      JOBHUNTER_ROBOTS_TXT_RESPECT: ${JOBHUNTER_ROBOTS_TXT_RESPECT:-trust}
       EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
       EMAIL_IMAP_USERNAME: ${EMAIL_IMAP_USERNAME:-}
       EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
@@ -34,6 +36,7 @@ services:
       - ./config:/jobhunter/config
       - ./input:/jobhunter/input
       - ./openclaw/workspace:/jobhunter/workspace
+      - ./:/jobhunter/repo:ro
     command: ["python", "-m", "jobhunter", "serve"]
     read_only: true
     tmpfs:
@@ -70,6 +73,7 @@ services:
       - ./openclaw/codex-home:/openclaw/codex-home
       - ./openclaw/prompts:/openclaw/prompts:ro
       - ./openclaw/workspace:/openclaw/workspace
+      - ./:/jobhunter/repo:ro
       - ./config:/jobhunter/config:ro
       - ./input:/jobhunter/input:ro
       - ./data:/jobhunter/data:ro

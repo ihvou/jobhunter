@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 
 class Database:
@@ -48,6 +48,9 @@ class Database:
             if current < 4:
                 migrate_v4(conn)
                 set_schema_version(conn, 4)
+            if current < 5:
+                migrate_v5(conn)
+                set_schema_version(conn, 5)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -541,6 +544,24 @@ class Database:
         with self.connection() as conn:
             conn.execute("update agent_actions set status = ? where id = ?", (status, action_id))
 
+    def update_agent_action_result(
+        self,
+        action_id: int,
+        status: str,
+        archive_path: str = "",
+        target_path: str = "",
+        result_message: str = "",
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                update agent_actions
+                set status = ?, archive_path = ?, target_path = ?, result_message = ?, applied_at = ?
+                where id = ?
+                """,
+                (status, archive_path, target_path, result_message, utc_now_iso(), action_id),
+            )
+
     def recent_jobs_by_status(self, status: str, limit: int = 10) -> List[sqlite3.Row]:
         with self.connection() as conn:
             return list(
@@ -682,6 +703,71 @@ class Database:
                     (limit,),
                 )
             )
+
+    def upsert_email_template(self, template: Dict) -> None:
+        parser_config = template.get("parser_config") or {}
+        parser_id = template.get("parser_config_id") or ("%s-parser" % template["id"])
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into email_parser_configs (id, config_json, created_at)
+                values (?, ?, ?)
+                on conflict(id) do update set config_json = excluded.config_json
+                """,
+                (parser_id, json.dumps(parser_config, sort_keys=True), utc_now_iso()),
+            )
+            conn.execute(
+                """
+                insert into email_templates (
+                    id, source_id, sender_pattern, subject_pattern, parser_config_id,
+                    status, priority, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(id) do update set
+                    source_id = excluded.source_id,
+                    sender_pattern = excluded.sender_pattern,
+                    subject_pattern = excluded.subject_pattern,
+                    parser_config_id = excluded.parser_config_id,
+                    status = excluded.status,
+                    priority = excluded.priority
+                """,
+                (
+                    template["id"],
+                    template["source_id"],
+                    template.get("sender_pattern", ".*"),
+                    template.get("subject_pattern", ".*"),
+                    parser_id,
+                    template.get("status", "test"),
+                    template.get("priority", "medium"),
+                    utc_now_iso(),
+                ),
+            )
+
+    def email_templates_for_source(self, source_id: str) -> List[Dict]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                select t.*, c.config_json
+                from email_templates t
+                join email_parser_configs c on c.id = t.parser_config_id
+                where t.source_id = ? and t.status != 'disabled'
+                order by case t.priority when 'high' then 0 when 'medium' then 1 else 2 end, t.id
+                """,
+                (source_id,),
+            ).fetchall()
+        templates = []
+        for row in rows:
+            templates.append(
+                {
+                    "id": row["id"],
+                    "source_id": row["source_id"],
+                    "sender_pattern": row["sender_pattern"],
+                    "subject_pattern": row["subject_pattern"],
+                    "parser_config": json.loads(row["config_json"] or "{}"),
+                    "status": row["status"],
+                    "priority": row["priority"],
+                }
+            )
+        return templates
 
 
 def migrate_v1(conn) -> None:
@@ -909,6 +995,30 @@ def migrate_v4(conn) -> None:
         );
         create index if not exists idx_agent_actions_session on agent_actions(session_id);
         create index if not exists idx_agent_actions_status on agent_actions(status);
+        """
+    )
+
+
+def migrate_v5(conn) -> None:
+    conn.executescript(
+        """
+        create table if not exists email_parser_configs (
+            id text primary key,
+            config_json text not null,
+            created_at text not null
+        );
+
+        create table if not exists email_templates (
+            id text primary key,
+            source_id text not null,
+            sender_pattern text not null,
+            subject_pattern text not null,
+            parser_config_id text not null,
+            status text not null default 'test',
+            priority text not null default 'medium',
+            created_at text not null
+        );
+        create index if not exists idx_email_templates_source on email_templates(source_id, status);
         """
     )
 

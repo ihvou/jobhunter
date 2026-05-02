@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -229,19 +230,21 @@ class TelegramClient:
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     return json.loads(response.read().decode("utf-8"))
-            except urllib.error.URLError as exc:
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
                 last_error = exc
+                detail = getattr(exc, "reason", exc)
                 log_context(
                     LOGGER,
                     logging.WARNING if attempt == 0 else logging.ERROR,
                     "telegram_url_error",
                     method=method,
-                    error=str(exc.reason),
+                    error=str(detail),
                     attempt=attempt + 1,
                 )
                 if attempt == 0:
                     time.sleep(1)
-        raise TelegramError("Telegram request failed for %s: %s" % (method, last_error.reason))
+        detail = getattr(last_error, "reason", last_error)
+        raise TelegramError("Telegram request failed for %s: %s" % (method, detail))
 
     def _check_ok(self, method: str, data: Dict) -> Dict:
         if data.get("ok", True) is False:
@@ -255,34 +258,27 @@ class TelegramClient:
 
 def parse_message(text: str) -> Optional[TelegramAction]:
     raw = str(text or "").strip()
+    if not raw:
+        return None
     command, rest = split_command(raw)
-    if command in ("/agent", "/feedback", "/ask"):
-        hint = {
-            "/agent": "",
-            "/feedback": "User feedback: ",
-            "/ask": "Answer this question using allowed read-only tools: ",
-        }[command]
+    first, tail = split_first_word(raw)
+    if first.upper() == "CONFIRM" and tail:
+        return TelegramAction(scope="bot", action="confirm", target_id=tail.lstrip("#").strip())
+    if command == "/agent":
         if not rest:
             return TelegramAction(scope="bot", action="agent_help")
-        return TelegramAction(scope="bot", action="agent", text=hint + rest)
+        return TelegramAction(scope="bot", action="agent", text=rest)
     if command == "/revert":
         return TelegramAction(scope="bot", action="revert", target_id=rest.strip())
-    if command == "/profile":
-        if not rest:
-            return TelegramAction(scope="profile", action="show")
-        profile_command, profile_rest = split_first_word(rest)
-        if profile_command in ("show", "set", "refine"):
-            return TelegramAction(scope="profile", action=profile_command, text=profile_rest)
-        return TelegramAction(scope="profile", action="show")
     if command == "/scoring":
         sub, _tail = split_first_word(rest)
         if sub == "history":
             return TelegramAction(scope="bot", action="scoring_history")
     normalized = normalize_message_text(text)
     action = BOT_MESSAGE_ACTIONS.get(normalized)
-    if not action:
-        return None
-    return TelegramAction(scope="bot", action=action)
+    if action:
+        return TelegramAction(scope="bot", action=action)
+    return TelegramAction(scope="bot", action="agent", text=raw)
 
 
 def normalize_message_text(text: str) -> str:
@@ -313,8 +309,6 @@ def parse_callback(data: str) -> Optional[TelegramAction]:
     if parts[0] == "agent" and len(parts) == 4:
         index = None if parts[3] == "all" else int(parts[3]) if parts[3].isdigit() else None
         return TelegramAction(scope="agent", action=parts[1], target_id=parts[2], index=index)
-    if parts[0] == "profile" and len(parts) == 3:
-        return TelegramAction(scope="profile", action=parts[1], target_id=parts[2])
     return None
 
 

@@ -7,7 +7,7 @@ A safe, low-cost Telegram-driven job-search assistant. Two Docker containers, on
 - Collects jobs on demand from public RSS, JSON APIs, ATS boards, and IMAP email alerts (LinkedIn / Wellfound / Djinni / company alerts) — no logged-in scraping.
 - Ranks jobs in two layers: free deterministic L1 rules, then a bounded LLM L2 pass that reads your free-form profile and skips obvious mismatches (wrong role family, wrong language, wrong seniority).
 - Sends a Telegram digest of new (not previously shown) jobs with per-job buttons: **Irrelevant**, **Remind me tomorrow**, **Give me cover note**, **Applied**.
-- Refines itself through chat: type `/feedback`, `/agent`, or `/ask` and Codex (via your subscription) proposes bounded changes you approve per-action — sources, scoring rules, profile directives, ad-hoc data answers.
+- Refines itself through chat: type `/agent <request>` or any normal free-form message and Codex (via your subscription) investigates, answers, and proposes bounded changes you approve per-action — sources, scoring rules, profile directives, ad-hoc data answers.
 - Generates tailored cover notes via OpenAI (paid, budget-gated).
 - **Never** applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 - Every change the agent proposes is approval-gated, auto-archived, and one-tap reversible via `/revert <id>`.
@@ -39,7 +39,7 @@ The bot will DM you a ready message with a persistent reply keyboard.
 | `TELEGRAM_ALLOWED_CHAT_ID` | yes | Your numeric chat ID; restricts the bot to your chat only |
 | `OPENAI_API_KEY` | optional | Enables cover-note generation and the OpenAI-backed L2 relevance pass. Without it, L2 falls back to a coarser local heuristic and cover notes use a generic template. |
 
-All other env vars (model, budget caps, agent quotas, IMAP credentials) have sensible defaults; see `.env.example` if you want to tune them.
+All other env vars (model, budget caps, agent quotas, IMAP credentials) have sensible defaults; see `.env.example` if you want to tune them. Source fetches use `JOBHUNTER_ROBOTS_TXT_RESPECT=trust` by default: vetted/user-added low-risk sources can fetch documented feeds, while unknown sources still respect robots.txt unless you explicitly override per source.
 
 ## How To Use It
 
@@ -47,16 +47,17 @@ All other env vars (model, budget caps, agent quotas, IMAP credentials) have sen
 
 After `./bin/jobhunter start`:
 
-1. **Set your profile** — type `/profile set <paste your free-text description>`. Example:
+1. **Set your profile** — type a normal message such as `please replace my about-me profile with: ...`, or use `/agent <same request>`. Example:
     ```
-    /profile set Product manager / product builder. Goal: build product prototypes
+    please replace my about-me profile with: Product manager / product builder.
+    Goal: build product prototypes
     or implement features in existing products with Claude Code, Codex, or related
     AI tooling. Strengths: discovery, product analytics, fast prototyping. Avoid:
     internships, junior-only roles.
     ```
 2. **Get your first digest** — tap `Get more jobs`. The bot collects, scores, and sends you the top matches.
 3. **React to each card** — tap `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied`. The card disappears from chat after the action.
-4. **Teach the system in plain English** — `/feedback skip jobs that mention German required` or `/feedback prioritize Product Builder roles building with Claude or Codex`. The agent proposes a directive change; you approve; the next `Get more jobs` reflects it.
+4. **Teach the system in plain English** — type `skip jobs that mention German required` or `prioritize Product Builder roles building with Claude or Codex`. The agent proposes a directive change; you approve; the next `Get more jobs` reflects it.
 5. **Refine sources and scoring when needed** — tap `Update sources` or `Tune scoring`. The agent proposes changes; you approve per-candidate or per-rule.
 
 ### Operator commands
@@ -81,11 +82,7 @@ After `./bin/jobhunter start`:
 | Command | Use |
 |---|---|
 | `/agent <text>` | Ask the agent to investigate and propose bounded actions |
-| `/feedback <text>` | Same path, hinted toward editing your `# Directives` |
-| `/ask <text>` | Same path, hinted toward read-only data answers |
-| `/profile` | Show your current `# About me` content + directive count |
-| `/profile set <text>` | Replace `# About me` (preserves directives, two-tap diff confirmation) |
-| `/profile refine` | Codex cleans up wording without changing intent; you approve the diff |
+| any normal text | Same agent path; good for feedback, questions, and profile/source/scoring requests |
 | `/history` | Last 10 agent-applied actions |
 | `/revert <id>` | Restore the archived file for a reversible agent action |
 | `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status (since cards leave the chat after each action) |
@@ -97,15 +94,15 @@ What `/agent` requests actually look like. Each one routes through OpenClaw + Co
 
 | You type | Bot returns | Approve to apply |
 |---|---|---|
-| `/feedback skip jobs whose description is primarily in German` | "I'll add a directive to skip German-language jobs." | `directive_edit` writes a timestamped line under `# Directives` |
-| `/feedback prioritize Product Builder roles that build with Claude or Codex; deprioritize generic PM` | "Got it — adding a priority directive that L2 will apply per-job." | `directive_edit`. Next `Get more jobs` reflects it via L2's `priority: high` tag |
-| `/feedback please remove the directive about language` | "I'll drop that directive." | `directive_edit` with a removal patch |
+| `skip jobs whose description is primarily in German` | "I'll add a directive to skip German-language jobs." | `directive_edit` writes a timestamped line under `# Directives` |
+| `prioritize Product Builder roles that build with Claude or Codex; deprioritize generic PM` | "Got it — adding a priority directive that L2 will apply per-job." | `directive_edit`. Next `Get more jobs` reflects it via L2's `priority: high` tag |
+| `please remove the directive about language` | "I'll drop that directive." | `directive_edit` with a removal patch |
 | `/agent please add this and figure out how to fetch it: https://jobs.dou.ua/vacancies/?category=Product%20Manager` | "I fetched the page, found the RSS at /feeds/?category=Product+Manager, and validated it returns 30 entries." | `sources_proposal` (add the RSS) + `directive_edit` (mark it priority) |
 | `/agent you missed https://weworkremotely.com/remote-jobs/webpt-principal-product-manager from 2 days ago. why?` | Root-cause analysis with two repair options | `sources_proposal` (change source type) **or** `human_followup` (file a task) |
-| `/ask which sources produced jobs I applied to in the last 30 days?` | "RemoteOK: 4, We Work Remotely: 2, Arbeitnow: 1." | None; `data_answer` shown inline |
-| `/ask jobs I applied to yesterday` | List with timestamps | None; just data |
+| `which sources produced jobs I applied to in the last 30 days?` | "RemoteOK: 4, We Work Remotely: 2, Arbeitnow: 1." | None; `data_answer` shown inline |
+| `jobs I applied to yesterday` | List with timestamps | None; just data |
 | `/agent suggest 3 niche aggregators I'm missing` | Three candidates with rationale | `sources_proposal` with 3 entries; HEAD-probed before approval prompt |
-| `/profile refine` | "Tightened wording. Diff: ..." | `profile_edit` replaces `# About me`; `# Directives` untouched |
+| `refine my about-me profile for clarity without changing intent` | "Tightened wording. Diff: ..." | `profile_edit` replaces `# About me`; `# Directives` untouched |
 | `/agent stop suggesting individual company career pages — focus on aggregators` | "Captured. Future discovery runs will steer toward aggregators." | `directive_edit` |
 | `/agent backup my config and profile` | Path to the new tar.gz | `backup_export` already executed |
 | `/agent show me what rule fires most often` | Top-firing rules with counts | None; just analysis |
@@ -152,7 +149,7 @@ Then add a source row per sender (you can do this from Telegram via `/agent plea
 }
 ```
 
-The IMAP collector tracks per-source UID high-water marks, so old messages are not reprocessed forever.
+The IMAP collector tracks per-source UID high-water marks, so old messages are not reprocessed forever. If a digest email contains several jobs, the agent can now propose an `email_parser_proposal` template so future emails from that sender produce distinct job rows instead of one generic row per link.
 
 ## Troubleshooting
 
@@ -161,8 +158,8 @@ The IMAP collector tracks per-source UID high-water marks, so old messages are n
 | No Telegram messages | Verify bot token + chat ID; `./bin/jobhunter logs jobhunter` |
 | `Get more jobs` says wait | Collection rate limit kicked in; try after the shown wait |
 | Digest is empty | `/agent please tune scoring to be more permissive`, or add sources |
-| Bad jobs reach the digest | `/feedback <pattern to skip>`; approve the resulting `directive_edit` |
-| Good jobs are hidden | `/ask why was [URL] not in my last digest?`, then `/feedback` to teach |
+| Bad jobs reach the digest | Type the pattern to skip; approve the resulting `directive_edit` |
+| Good jobs are hidden | Ask `why was [URL] not in my last digest?`, then teach the fix in plain English |
 | Same job repeats | Snoozed-due jobs are allowed to reappear once; otherwise check `digest_log` |
 | Cover note denied | Use `Usage` to see budget; approve the one-time override only if intended |
 | Agent proposal never appears | `./bin/jobhunter logs worker` and inspect `openclaw/workspace/agent/status-*.json` for `state=failed` |
@@ -191,7 +188,7 @@ You usually don't need to touch these. Telegram covers everything once the bot i
 
 | File | What it is | Day-to-day editing |
 |---|---|---|
-| `input/profile.local.md` | Your profile (`# About me` + `# Directives`). Required to bootstrap before you can talk to Telegram. | Use `/profile set` and `/feedback` from chat after bootstrap. Direct file edits also work. |
+| `input/profile.local.md` | Your profile (`# About me` + `# Directives`). Required to bootstrap before you can talk to Telegram. | Use normal agent chat after bootstrap. Direct file edits also work. |
 | `input/cv.local.md` | Optional CV text, used only for cover notes. | Edit the file; no Telegram command for CV today. |
 | `config/sources.json` | Source registry. Ships with sensible defaults (Remotive, RemoteOK, Arbeitnow, WeWorkRemotely, optional IMAP). | Tap `Update sources` in Telegram or `/agent please add ...`. Direct edits also work. |
 | `config/scoring.json` | Active scoring ruleset. Ships with a baseline. | Tap `Tune scoring` in Telegram. Direct edits work but the agent's shadow-test path is safer. |
@@ -202,11 +199,11 @@ For the very first run, copy the example files:
 
 ```bash
 cp .env.example .env
-cp input/profile.example.md input/profile.local.md   # or use /profile set after bootstrap
+cp input/profile.example.md input/profile.local.md   # optional; init copies the example if missing
 cp input/cv.example.md input/cv.local.md             # optional, only for cover notes
 ```
 
-The bot auto-creates an empty `input/profile.local.md` if you skip the copy, and you can fill it via `/profile set` immediately. If you have a legacy `config/profile.local.json`, the bot folds it into `# About me` on first init and backs the JSON up.
+The bot auto-copies `input/profile.example.md` and `input/cv.example.md` into the local files if you skip the copy. If you have a legacy `config/profile.local.json`, the bot folds it into `# About me` on first init and backs the JSON up.
 
 ## Source Lifecycle and Priority
 

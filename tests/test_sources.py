@@ -1,8 +1,9 @@
 import unittest
+import email
 from unittest import mock
 
 from jobhunter.models import SourceConfig
-from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, infer_company, strip_html, validate_safe_url
+from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, infer_company, jobs_from_email, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -64,6 +65,59 @@ class SourceTests(unittest.TestCase):
         with mock.patch("jobhunter.sources.fetch_text", return_value=html):
             with self.assertRaisesRegex(SourceError, "JavaScript SPA"):
                 collect_link_page(source)
+
+    def test_email_template_parses_distinct_job_rows(self):
+        source = SourceConfig(id="email", name="Email", type="imap", url="imap://job-alerts")
+        source.email_templates = [
+            {
+                "id": "linkedin",
+                "source_id": "email",
+                "sender_pattern": "linkedin",
+                "subject_pattern": "jobs",
+                "parser_config": {"max_jobs": 5},
+            }
+        ]
+        message = email.message_from_string(
+            """From: jobs-noreply@linkedin.com
+Subject: 2 new product jobs
+Message-ID: <m1>
+Content-Type: text/html; charset=utf-8
+
+<a href="https://www.linkedin.com/jobs/view/1">Senior Product Manager</a>
+<a href="https://www.linkedin.com/jobs/view/2">AI Product Lead</a>
+"""
+        )
+
+        jobs = jobs_from_email(source, message)
+
+        self.assertEqual([job.title for job in jobs], ["Senior Product Manager", "AI Product Lead"])
+        self.assertEqual(jobs[0].url, "https://www.linkedin.com/jobs/view/1")
+
+    def test_email_template_invalid_regex_falls_back_to_generic(self):
+        source = SourceConfig(id="email", name="Email", type="imap", url="imap://job-alerts")
+        source.email_templates = [
+            {
+                "id": "bad",
+                "source_id": "email",
+                "sender_pattern": "alerts",
+                "subject_pattern": "jobs",
+                "parser_config": {"title_pattern": "(", "max_jobs": "many"},
+            }
+        ]
+        message = email.message_from_string(
+            """From: alerts@example.com
+Subject: 1 new jobs
+Message-ID: <m2>
+Content-Type: text/html; charset=utf-8
+
+<a href="https://example.com/jobs/1">Product Builder</a>
+"""
+        )
+
+        jobs = jobs_from_email(source, message)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Product Builder")
 
 
 if __name__ == "__main__":

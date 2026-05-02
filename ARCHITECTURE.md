@@ -7,8 +7,8 @@ This specification defines a Docker-isolated OpenClaw job-search agent that find
 The agent runs as a user-driven scout and analyst, not an autonomous applicant. It searches when the user asks, refines its sources and scoring rules with the user's approval, sends a ranked Telegram digest, and waits for explicit human feedback before drafting cover notes or marking actions as complete.
 
 Primary interaction happens through a Telegram bot. Per-job decisions stay
-inline; everything else lives on a persistent reply keyboard plus free-form
-slash commands:
+inline; everything else lives on a persistent reply keyboard plus one
+free-form agent surface:
 
 | Per-job inline button | Meaning |
 |---|---|
@@ -27,9 +27,7 @@ slash commands:
 | Free-form command | Meaning |
 |---|---|
 | `/agent <text>` | Ask OpenClaw + Codex to investigate, answer, and propose bounded actions (§6.6) |
-| `/feedback <text>` | Same as `/agent`, hinted toward editing your `# Directives` |
-| `/ask <text>` | Same as `/agent`, hinted toward read-only data answers (§6.10) |
-| `/profile [show\|set\|refine]` | Manage your `# About me` profile section (§6.7) |
+| any normal text | Same agent surface; useful for feedback, read-only data questions, source/scoring requests, and profile edits |
 | `/history`, `/revert <id>` | Audit and undo agent-applied changes (§6.8) |
 | `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status |
 
@@ -144,7 +142,7 @@ recorded in an audit table with a one-tap undo.
 |  |---------------------------------|        |  (Codex CLI worker)       |  |
 |  | Telegram poll loop              |        |---------------------------|  |
 |  | Reply keyboard + per-job inline |        | File-watch on workspace   |  |
-|  | /agent /feedback /ask /profile  |        | Multi-turn Codex loop     |  |
+|  | /agent + normal text            |        | Multi-turn Codex loop     |  |
 |  | Action approval + audit/revert  |        | Read-only tools:          |  |
 |  | Collectors (RSS/API/IMAP/HTML)  |        |   query_sql (SELECT only) |  |
 |  | L1 deterministic scoring        |        |   read_file (allowlist)   |  |
@@ -226,9 +224,10 @@ multi-stakeholder environments.
 [2026-05-02] Source priority: aggregators first; individual company pages only for AI-tooling vendors like Lovable.
 ```
 
-The user can edit the file directly, or use Telegram (`/profile set`,
-`/feedback`, `/agent`). The agent always preserves the section split and
-archives the previous version before any change (§6.7, §6.8).
+The user can edit the file directly, or ask the agent in Telegram via
+`/agent <text>` or normal free-form text. The agent always preserves the
+section split and archives the previous version before any change (§6.7,
+§6.8).
 
 Acceptance criteria:
 
@@ -290,7 +289,7 @@ via `/applied`, `/snoozed`, or `/irrelevant`.
 
 | Button | User Intent | Immediate Action | Card behavior | Signal Used By |
 |---|---|---|---|---|
-| `Irrelevant` | Bad fit | Mark job rejected. Bot replies: "Why was it irrelevant? Reply with `/feedback <reason>` if there's a pattern I should learn." | Card deleted | L2 directives, scoring tuning |
+| `Irrelevant` | Bad fit | Mark job rejected. Bot replies with a short prompt to send a one-line reason if there is a pattern to learn. | Card deleted | L2 directives, scoring tuning |
 | `Remind me tomorrow` | Revisit later | Snooze 24 hours. When re-shown, the job sorts BELOW fresh jobs (§6.2 step 9) | Card deleted | None (neutral) |
 | `Give me cover note` | Interested | Generate cover note via OpenAI API; budget-gated; promotes source from `test → active` | Card stays; cover-note message follows | Positive source signal |
 | `Applied` | Application completed | Mark applied; promotes source from `test → active` | Card deleted | Strong positive source signal; included as training example for next scoring tuning |
@@ -306,7 +305,8 @@ gone from chat but every action is recorded. Use:
 | `/history` | Last 10 agent-applied actions (§6.8) |
 
 For deeper analysis ("which sources had the highest applied rate?", "show me
-patterns across my applied jobs"), use `/ask <question>` — see §6.10.
+patterns across my applied jobs"), ask in normal text or use `/agent
+<question>` — see §6.10.
 
 ### 6.4 Scenario: Cover Note Generation
 
@@ -385,7 +385,7 @@ or more `proposed_actions` → user approves per-action.
 
 | Step | Actor | Action | Output |
 |---:|---|---|---|
-| 1 | User | Types `/agent <text>` (or `/feedback <text>`, `/ask <text>` — both are sugar) in Telegram | Trigger event |
+| 1 | User | Types `/agent <text>` or any normal free-form message in Telegram | Trigger event |
 | 2 | Bot | Checks per-action cooldown (10s) and daily agent quota (default 20/day) | Allow or "wait/quota reached" reply |
 | 3 | Bot | Writes `agent/request-<sid>.json` containing user text + full profile + sources summary + recent jobs sample + recent feedback summary | Agent request |
 | 4 | Bot | Replies "Agent request queued · daily quota M/N" | TG ack |
@@ -407,6 +407,7 @@ Allowed action kinds and what they do:
 | `scoring_rule_proposal` | Replace `config/scoring.json` after schema validation + shadow test (§8.4) |
 | `data_answer` | Read-only — content is shown to the user but no file is written |
 | `human_followup` | Append a row to `tasks.md` for work that needs a human implementer |
+| `email_parser_proposal` | Add an approved parser template for digest-style IMAP alert emails |
 | `rescore_jobs` | Re-run L1 + L2 against jobs in a window |
 | `bulk_update_jobs` | Status updates on a SELECT-defined set of jobs (terminal states only, hard-capped, CONFIRM required for >10 rows) |
 | `backup_export` | Write a tar.gz of config + input + scoring archives to `data/backup/` |
@@ -417,7 +418,7 @@ Acceptance criteria:
 
 | Criterion | Pass Condition |
 |---|---|
-| Single primitive | One Telegram entry (`/agent`) with two sugar aliases (`/feedback`, `/ask`) handles arbitrary requests; reply-keyboard buttons route through the same primitive under the hood |
+| Single primitive | One agent entry (`/agent`, plus normal free-form text) handles arbitrary requests; reply-keyboard buttons route through the same primitive under the hood |
 | Approval-gated writes | No write action is applied without an explicit Telegram approval tap (or typed CONFIRM for bulk operations per §6.9) |
 | Bounded action surface | Only allowlisted `kind`s are dispatched; unknown kinds are dropped + logged |
 | No code execution | No `kind` ever maps to "run arbitrary code"; new capabilities require a new Python handler in jobhunter, not a new Codex output |
@@ -426,28 +427,28 @@ Acceptance criteria:
 | Cost capped per day | Daily caps on agent calls (20), source applies (5), scoring applies (3), bulk updates (2) |
 | Audit trail | Every applied action lands in `agent_actions` with `archive_path`, `target_path`, and `result_message`; `/history` lists recent rows |
 
-### 6.7 Scenario: Profile Management via Telegram (`/profile`)
+### 6.7 Scenario: Profile Management via Agent Chat
 
 The user can read and edit `# About me` from chat without leaving Telegram.
-The `# Directives` section is preserved across all these flows; for directive
-edits, use `/feedback` or `/agent` (§6.6).
+There are no separate `/profile`, `/feedback`, or `/ask` command families:
+profile work is handled by the same agent surface as everything else. The
+`# Directives` section is preserved unless the user explicitly asks to edit
+directives.
 
 | Step | Actor | Action | Output |
 |---:|---|---|---|
-| 1 | User | Types `/profile` (no args) | Bot replies with current `# About me` + a one-line directive count |
-| 2 | User | Types `/profile set <multi-line text>` | Bot stages new text, sends a unified diff against current, shows `[Confirm replace] [Cancel]` |
-| 3 | User | Taps `Confirm replace` | Bot archives previous to `input/profile.<ts>.md.bak`, writes new `# About me`, preserves `# Directives` |
-| 4 | User | Types `/profile refine` | Bot routes through `/agent` with intent "refine wording for clarity and grammar without changing intent" |
-| 5 | OpenClaw + Codex | Read current profile, propose a `profile_edit` action with cleaned-up text | Approval prompt with diff |
-| 6 | User | Approves the proposed edit | Standard agent-action apply path (§6.6 step 11) — same archive + audit + revert chain |
+| 1 | User | Types "show me my current profile" | Agent reads `input/profile.local.md` and returns a `data_answer` |
+| 2 | User | Types "replace my about-me with ..." | Agent proposes a `profile_edit` action |
+| 3 | User | Types "refine my about-me wording without changing intent" | Agent proposes a `profile_edit` action with cleaned-up text |
+| 4 | User | Approves the proposed edit | Standard agent-action apply path (§6.6 step 11) — same archive + audit + revert chain |
 
 Acceptance criteria:
 
 | Criterion | Pass Condition |
 |---|---|
-| Section split preserved | All three flows touch `# About me` only; `# Directives` is byte-identical before and after |
-| Two-tap confirmation | `/profile set` requires a confirmation tap before the file changes |
-| Refine is bounded | `/profile refine` produces a `profile_edit` action with a diff the user reviews before applying |
+| Section split preserved | `profile_edit` touches `# About me` only; `# Directives` is byte-identical before and after |
+| Approval-gated | Profile replacement requires the standard agent approval tap before the file changes |
+| Refine is bounded | Refinement produces a `profile_edit` action with text the user reviews before applying |
 | Reversible | Every `# About me` change is archived; `/revert <id>` restores it |
 
 ### 6.8 Scenario: Audit and Revert
@@ -502,10 +503,10 @@ Acceptance criteria:
 | Time-bounded | Pending confirms expire after 60s |
 | Audited | Both the approval tap and the CONFIRM reply are recorded in the chat; the eventual `agent_actions` row notes the bulk count |
 
-### 6.10 Scenario: Read-Only Data Query (`/ask`)
+### 6.10 Scenario: Read-Only Data Query
 
-For "what does my data say?" questions, `/ask` is sugar over `/agent` that
-hints toward read-only output. Codex uses the worker's `query_sql`,
+For "what does my data say?" questions, the user asks in normal text or via
+`/agent <question>`. Codex uses the worker's `query_sql`,
 `read_file`, and `list_dir` tools to gather the data, then returns a
 `data_answer` action with a prose answer plus an optional `evidence_table`
 of rows.
@@ -521,8 +522,8 @@ Examples:
 
 | Step | Actor | Action | Output |
 |---:|---|---|---|
-| 1 | User | Types `/ask <question>` | Trigger event |
-| 2 | Bot | Same as `/agent` (§6.6) — writes the request file with a hint that read-only output is expected | Agent request |
+| 1 | User | Types a data question | Trigger event |
+| 2 | Bot | Same as `/agent` (§6.6) — writes the request file | Agent request |
 | 3 | OpenClaw | Codex issues tool calls (`query_sql`, `read_file`, etc.) until it has enough data | Tool round trips |
 | 4 | OpenClaw | Returns final JSON with `data_answer` action containing `answer` (prose) + `rows` (optional) + `evidence_table` (optional) | Response file |
 | 5 | Bot | Renders `answer` + `evidence_table` (capped to first 10 rows) inline in Telegram; no approval buttons since no write actions are present | Read-only reply |
@@ -531,7 +532,7 @@ Acceptance criteria:
 
 | Criterion | Pass Condition |
 |---|---|
-| Read-only by construction | `/ask` responses contain only `data_answer` actions; no write actions are emitted |
+| Read-only by construction | Data-answer responses contain only `data_answer` actions; no write actions are emitted |
 | SQL safety | All `query_sql` calls are SELECT-only; PRAGMA / INSERT / UPDATE / DELETE / ATTACH are rejected |
 | File safety | `read_file` allows `config/`, `input/`, `openclaw/workspace/`, `openclaw/prompts/`, `data/jobs.sqlite`; blocks `.env`, `codex-home/`, `/etc/`, `/home/`, `/root/` |
 | Bounded results | Tables capped to 10 rows in chat; full results stay in the response file in `openclaw/workspace/agent/` |
@@ -988,8 +989,8 @@ Per-task routing:
 | Cover note generation | L2 | On demand, per click |
 | Source discovery (`Update sources`, `/agent`) | Agent | On demand |
 | Scoring tuning (`Tune scoring`, `/agent`) | Agent | On demand |
-| Free-form `/agent` requests, `/feedback`, `/ask` | Agent | On demand |
-| Profile refinement (`/profile refine`) | Agent | On demand |
+| Free-form `/agent` requests and normal text | Agent | On demand |
+| Profile refinement | Agent | On demand |
 | `data_answer` queries (read-only SQL + file reads) | Agent | On demand |
 
 ### 11.2 Budget Rules
@@ -1201,14 +1202,14 @@ This is a skeleton, not final production compose. The final compose should match
 | Docker | Both containers run in Docker; jobhunter ↔ OpenClaw share only `./openclaw/workspace/`; OpenClaw also gets `data/jobs.sqlite:ro` for the `query_sql` tool |
 | Telegram per-job | Digest and four required per-job buttons work; cards delete from chat after Irrelevant/Snooze/Applied |
 | Telegram reply keyboard | `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` buttons work; persistent across sessions |
-| Free-form commands | `/agent`, `/feedback`, `/ask`, `/profile`, `/history`, `/revert`, `/applied`, `/snoozed`, `/irrelevant` all parse and route correctly |
+| Free-form commands | `/agent`, normal text, `/history`, `/revert`, `/applied`, `/snoozed`, `/irrelevant` all parse and route correctly |
 | On-demand collection | No cron; rate-limited; cross-source dedupe; never re-shows previously digested jobs; high-priority sources fetch first |
 | L1 scoring | Fully deterministic; zero LLM calls per job; word-boundary matching only; rules live in `config/scoring.json` |
 | L2 relevance | Capped at `JOBHUNTER_L2_MAX_JOBS` per click; cached per job; reads full `# About me` + `# Directives`; gracefully falls back to local heuristic when no `OPENAI_API_KEY` |
 | Single profile file | `input/profile.local.md` with `# About me` + `# Directives` is the sole source of truth; legacy `profile.local.json` is auto-migrated and backed up |
 | Source discovery | Triggered on demand via `Update sources` or `/agent`; OpenClaw + Codex iterate with read-only validation tools; user approves per-candidate; written to `sources.json` with `created_by='agent'` |
 | Scoring tuning | Triggered on demand; OpenClaw + Codex propose rules in the §8.3 DSL; shadow-tested; user approves before activation; previous version archived; ruleset schema validated before swap |
-| Agent surface — bounded | Only allowlisted action `kind`s are dispatched (`directive_edit`, `profile_edit`, `sources_proposal`, `scoring_rule_proposal`, `data_answer`, `human_followup`, `rescore_jobs`, `bulk_update_jobs`, `backup_export`); unknown kinds dropped + logged; no kind maps to "execute arbitrary code" |
+| Agent surface — bounded | Only allowlisted action `kind`s are dispatched (`directive_edit`, `profile_edit`, `sources_proposal`, `scoring_rule_proposal`, `email_parser_proposal`, `data_answer`, `human_followup`, `rescore_jobs`, `bulk_update_jobs`, `backup_export`); unknown kinds dropped + logged; no kind maps to "execute arbitrary code" |
 | Agent surface — approval-gated | Every write action requires a Telegram approval tap; bulk operations require an additional typed `CONFIRM <id>` reply within 60s |
 | Agent surface — audit + revert | Every applied action lands in `agent_actions` with `archive_path` + `target_path`; `/history` lists recent actions; `/revert <id>` restores file-mutating actions byte-for-byte |
 | Agent surface — read-only tools | Codex's worker tools are SELECT-only SQL, allowlist-only file reads, allowlist-only directory listings, and HTTP fetch with private-IP rejection |

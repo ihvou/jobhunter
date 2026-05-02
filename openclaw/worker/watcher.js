@@ -16,6 +16,15 @@ const maxHttpFetches = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_HTTP_FE
 const dbPath = process.env.OPENCLAW_JOBHUNTER_DB_PATH || "/jobhunter/data/jobs.sqlite";
 const inFlight = new Set();
 const KINDS = ["discovery", "tuning", "agent"];
+const SUPPORTED_RULE_KINDS = new Set([
+  "match_any_word",
+  "match_all_word",
+  "hard_reject_word",
+  "field_equals",
+  "numeric_at_least",
+  "feedback_similarity",
+]);
+const VALID_SOURCE_TYPES = new Set(["rss", "json_api", "ats", "community", "imap"]);
 
 function log(level, message, fields = {}) {
   process.stdout.write(JSON.stringify({ level, message, ts: new Date().toISOString(), ...fields }) + "\n");
@@ -58,18 +67,63 @@ function extractJson(text) {
   if (!trimmed) {
     throw new Error("Codex returned an empty response");
   }
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  const candidate = fenced ? fenced[1].trim() : trimmed;
+  const fences = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi)];
+  const candidate = fences.length ? fences[fences.length - 1][1].trim() : trimmed;
   try {
     return JSON.parse(candidate);
-  } catch (_err) {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(candidate.slice(start, end + 1));
+  } catch (err) {
+    const balanced = lastBalancedJsonObject(candidate);
+    if (balanced) {
+      return JSON.parse(balanced);
     }
-    throw _err;
+    throw err;
   }
+}
+
+function lastBalancedJsonObject(text) {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let last = "";
+  for (let idx = 0; idx < text.length; idx += 1) {
+    const ch = text[idx];
+    if (start < 0) {
+      if (ch === "{") {
+        start = idx;
+        depth = 1;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const candidate = text.slice(start, idx + 1);
+        try {
+          JSON.parse(candidate);
+          last = candidate;
+        } catch (_err) {
+          // Keep scanning; a later balanced object may be valid JSON.
+        }
+        start = -1;
+      }
+    }
+  }
+  return last;
 }
 
 function buildPrompt(kind, requestPath) {
@@ -123,12 +177,17 @@ function shouldProcess(kind, sessionId) {
   }
 }
 
-function validateResponse(kind, payload) {
+function validateResponse(kind, payload, requestPayload = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("Codex response must be a JSON object");
   }
   if (kind === "discovery" && !Array.isArray(payload.candidates)) {
     throw new Error("Discovery response must contain candidates[]");
+  }
+  if (kind === "discovery") {
+    for (const candidate of payload.candidates) {
+      validateSourceType(candidate && candidate.type, candidate && (candidate.id || candidate.name || candidate.url || "candidate"));
+    }
   }
   if (kind === "agent") {
     if (typeof payload.user_intent_summary !== "string" || typeof payload.answer !== "string") {
@@ -137,12 +196,56 @@ function validateResponse(kind, payload) {
     if (payload.proposed_actions && !Array.isArray(payload.proposed_actions)) {
       throw new Error("Agent proposed_actions must be an array");
     }
+    for (const action of payload.proposed_actions || []) {
+      if (action && action.kind === "sources_proposal") {
+        for (const operation of (action.payload && action.payload.operations) || []) {
+          validateSourceType(operation && operation.source && operation.source.type, operation && operation.source && (operation.source.id || operation.source.name || operation.source.url || "source"));
+        }
+      }
+    }
   }
   if (kind === "tuning") {
     const ruleset = payload.ruleset || payload.proposed_rules || payload;
-    if (!Array.isArray(ruleset.rules)) {
-      throw new Error("Tuning response must contain a scoring rules[] array");
+    validateScoringRuleset(ruleset, Number(requestPayload.current_version || payload.current_version || 0));
+  }
+}
+
+function validateScoringRuleset(ruleset, currentVersion = 0) {
+  if (!ruleset || typeof ruleset !== "object" || Array.isArray(ruleset)) {
+    throw new Error("ruleset must be an object");
+  }
+  if (!Number.isInteger(ruleset.version)) {
+    throw new Error("version must be an integer");
+  }
+  if (ruleset.version < currentVersion) {
+    throw new Error("version must be >= current version");
+  }
+  if (!Array.isArray(ruleset.rules)) {
+    throw new Error("rules must be a list");
+  }
+  if (!ruleset.thresholds || typeof ruleset.thresholds !== "object" || Array.isArray(ruleset.thresholds)) {
+    throw new Error("thresholds must be an object");
+  }
+  for (let idx = 0; idx < ruleset.rules.length; idx += 1) {
+    const rule = ruleset.rules[idx];
+    if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+      throw new Error(`rule ${idx} must be an object`);
     }
+    if (typeof rule.id !== "string" || !rule.id.trim()) {
+      throw new Error(`rule ${idx} must have a string id`);
+    }
+    if (!SUPPORTED_RULE_KINDS.has(rule.kind)) {
+      throw new Error(`rule ${rule.id || idx} has unsupported kind '${rule.kind}'`);
+    }
+  }
+}
+
+function validateSourceType(rawType, label) {
+  const sourceType = String(rawType || "json_api").trim().toLowerCase() === "email_alert"
+    ? "imap"
+    : String(rawType || "json_api").trim().toLowerCase();
+  if (!VALID_SOURCE_TYPES.has(sourceType)) {
+    throw new Error(`Source '${label}' has invalid type '${rawType}'; allowed: ${[...VALID_SOURCE_TYPES].sort().join("/")}`);
   }
 }
 
@@ -332,16 +435,36 @@ function resolveAllowedPath(inputPath) {
   if (!requested || requested.includes("\0")) {
     throw new Error("path is required");
   }
-  const absolute = path.resolve(requested.startsWith("/") ? requested : path.join("/openclaw", requested));
+  const absolute = path.resolve(requested.startsWith("/") ? requested : defaultRelativePath(requested));
   const blocklist = ["/openclaw/codex-home", "/etc", "/home", "/root"];
-  if (absolute.endsWith("/.env") || absolute.includes("/.env/") || blocklist.some((root) => absolute === root || absolute.startsWith(root + "/"))) {
+  if (isBlockedPath(absolute) || blocklist.some((root) => absolute === root || absolute.startsWith(root + "/"))) {
     throw new Error("read_file path blocked");
   }
-  const allowlist = ["/jobhunter/config", "/jobhunter/input", "/openclaw/workspace", "/openclaw/prompts", "/jobhunter/data"];
+  const allowlist = ["/jobhunter/config", "/jobhunter/input", "/openclaw/workspace", "/openclaw/prompts", "/jobhunter/data", "/jobhunter/repo"];
   if (!allowlist.some((root) => absolute === root || absolute.startsWith(root + "/"))) {
     throw new Error("path is outside allowlist");
   }
   return absolute;
+}
+
+function defaultRelativePath(requested) {
+  if (/^(jobhunter|tests|config|input|openclaw|docs|bin)(\/|$)/.test(requested) || /^(README\.md|ARCHITECTURE\.md|AGENTS\.md|CLAUDE\.md|tasks\.md|docker-compose\.yml|Dockerfile)$/.test(requested)) {
+    return path.join("/jobhunter/repo", requested);
+  }
+  return path.join("/openclaw", requested);
+}
+
+function isBlockedPath(absolute) {
+  const normalized = absolute.replace(/\\/g, "/");
+  return (
+    normalized.endsWith("/.env")
+    || normalized.includes("/.env/")
+    || normalized.includes("/.git/")
+    || normalized.endsWith("/.git")
+    || normalized.includes("/codex-home/")
+    || /\/profile\.local\.[^/]+$/.test(normalized)
+    || /\/cv\.local\.[^/]+$/.test(normalized)
+  );
 }
 
 function readFileTool(inputPath) {
@@ -429,10 +552,11 @@ async function processRequest(kind, requestPath) {
     });
     log("INFO", "codex_run_started", { kind, session_id: sessionId, request_path: requestPath });
     const prompt = buildPrompt(kind, requestPath);
+    const requestPayload = JSON.parse(fs.readFileSync(requestPath, "utf8"));
     const parsed = kind === "agent"
       ? await runAgentCodex(kind, sessionId, prompt)
       : extractJson((await runCodex(kind, sessionId, prompt)).finalText);
-    validateResponse(kind, parsed);
+    validateResponse(kind, parsed, requestPayload);
     writeJson(responsePath(kind, sessionId), parsed);
     writeJson(statusFile, {
       state: "done",
@@ -489,7 +613,10 @@ module.exports = {
   readFileTool,
   listDirTool,
   httpFetchTool,
+  resolveAllowedPath,
   looksLikeSpa,
   validateResponse,
+  validateScoringRuleset,
+  validateSourceType,
   start,
 };

@@ -18,6 +18,7 @@ class SourceConfig:
     created_by: str = "user"
     imap_last_uid: int = 0
     last_seen_uid: int = 0
+    robots_check: Optional[bool] = None
 
     @property
     def enabled(self) -> bool:

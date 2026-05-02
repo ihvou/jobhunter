@@ -68,6 +68,7 @@ def config_for(tmp):
         scoring_path=config_dir / "scoring.json",
         workspace_dir=workspace,
         heartbeat_path=data_dir / "heartbeat",
+        tasks_path=root / "tasks.md",
         cost=CostConfig(),
     )
 
@@ -206,6 +207,44 @@ class AppTests(unittest.TestCase):
             bot.handle_action(action)
             rows = bot.database.count_since("job_feedback", datetime(1970, 1, 1), "action = ?", ("applied",))
             self.assertEqual(rows, 1)
+
+    def test_bulk_agent_action_requires_and_accepts_confirm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            for index in range(12):
+                add_scored_job(bot, "bulk-%s" % index)
+            session_id = "bulk1"
+            agent_dir = bot.config.workspace_dir / "agent"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "response-bulk1.json").write_text(
+                json.dumps(
+                    {
+                        "answer": "Archive old matches",
+                        "proposed_actions": [
+                            {
+                                "kind": "bulk_update_jobs",
+                                "summary": "Archive all jobs",
+                                "payload": {"filter_sql": "select id from jobs", "new_status": "archived"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bot.database.create_agent_run(session_id, "archive jobs", str(agent_dir / "request-bulk1.json"), str(agent_dir / "status-bulk1.json"))
+
+            bot.handle_action(TelegramAction(scope="agent", action="apply", target_id=session_id, callback_id="cb"))
+            pending = bot.database.recent_agent_actions(1)[0]
+            self.assertEqual(pending["status"], "pending_confirm")
+            self.assertIn("CONFIRM", bot.telegram.messages[-1][0])
+
+            bot.handle_action(TelegramAction(scope="bot", action="confirm", target_id=str(pending["id"])))
+            confirmed = bot.database.get_agent_action(pending["id"])
+            self.assertEqual(confirmed["status"], "applied")
+            with bot.database.connection() as conn:
+                archived = conn.execute("select count(*) as c from jobs where status = 'archived'").fetchone()["c"]
+            self.assertEqual(archived, 12)
 
     def test_discovery_approval_appends_test_source(self):
         with tempfile.TemporaryDirectory() as tmp:

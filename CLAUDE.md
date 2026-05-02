@@ -146,7 +146,7 @@ docker compose --profile openclaw up -d openclaw-gateway
 | Discovery request/approval | Implemented; automated worker writes OpenClaw/Codex response file |
 | Tuning request/shadow/apply | Implemented; automated worker writes OpenClaw/Codex response file |
 | OpenClaw worker runtime | Implemented in `openclaw/worker/` with Codex CLI |
-| Agentic free-form loop | Implemented: `/agent`, `/feedback`, `/ask`, shared `agent/` workspace, multi-action response schema |
+| Agentic free-form loop | Implemented: `/agent` plus normal free-form text, shared `agent/` workspace, multi-action response schema |
 | Agent action registry | Implemented with bounded handlers and audit/revert rows |
 | L2 relevance pass | Implemented: cached OpenAI/API-or-local-fallback verdicts sorted into digest |
 | Single profile file | Implemented: `input/profile.local.md` with `# About me` and `# Directives`; legacy JSON folds into it |

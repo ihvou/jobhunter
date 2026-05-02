@@ -24,7 +24,15 @@ from .models import Job, SourceConfig
 LOGGER = logging.getLogger(__name__)
 MAX_BYTES = int(os.getenv("JOBHUNTER_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
 CHECK_ROBOTS = os.getenv("JOBHUNTER_CHECK_ROBOTS", "0").strip().lower() in ("1", "true", "yes", "on")
+ROBOTS_TXT_RESPECT = os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", "trust").strip().lower()
 HOST_LAST_FETCH: Dict[str, float] = {}
+VALID_SOURCE_TYPES = {"rss", "json_api", "ats", "community", "imap"}
+LEGACY_SOURCE_TYPE_ALIASES = {
+    "email_alert": "imap",
+    "remotive": "json_api",
+    "remoteok": "json_api",
+    "arbeitnow": "json_api",
+}
 
 
 DEFAULT_HEADERS = {
@@ -35,6 +43,11 @@ DEFAULT_HEADERS = {
 
 class SourceError(RuntimeError):
     pass
+
+
+def normalize_source_type(value: str) -> str:
+    source_type = str(value or "").strip().lower()
+    return LEGACY_SOURCE_TYPE_ALIASES.get(source_type, source_type)
 
 
 class HTMLTextExtractor(HTMLParser):
@@ -107,10 +120,10 @@ def parse_date(value: Optional[str]) -> Optional[str]:
         return None
 
 
-def fetch_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> str:
+def fetch_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30, robots_check: bool = True) -> str:
     validate_safe_url(url)
     wait_for_host_rate_limit(url)
-    if CHECK_ROBOTS and not robots_allowed(url):
+    if robots_check and CHECK_ROBOTS and not robots_allowed(url):
         raise SourceError("Robots.txt disallows %s" % url)
     merged_headers = dict(DEFAULT_HEADERS)
     if headers:
@@ -130,6 +143,21 @@ def fetch_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int 
         raise SourceError("HTTP %s fetching %s" % (exc.code, url))
     except urllib.error.URLError as exc:
         raise SourceError("URL error fetching %s: %s" % (url, exc.reason))
+
+
+def fetch_source_text(source: SourceConfig, url: Optional[str] = None) -> str:
+    return fetch_text(url or source.url, source.headers, robots_check=robots_check_for_source(source))
+
+
+def robots_check_for_source(source: SourceConfig) -> bool:
+    if source.robots_check is not None:
+        return bool(source.robots_check)
+    policy = (ROBOTS_TXT_RESPECT or "trust").strip().lower()
+    if policy == "ignore":
+        return False
+    if policy == "strict":
+        return True
+    return not (source.created_by == "user" or source.risk_level == "low")
 
 
 def collect_from_source(source: SourceConfig) -> List[Job]:
@@ -154,7 +182,7 @@ def collect_from_source(source: SourceConfig) -> List[Job]:
 
 
 def collect_rss(source: SourceConfig) -> List[Job]:
-    text = fetch_text(source.url, source.headers)
+    text = fetch_source_text(source)
     root = ET.fromstring(text)
     items = root.findall(".//item")
     if not items:
@@ -187,7 +215,7 @@ def collect_rss(source: SourceConfig) -> List[Job]:
 
 
 def collect_remotive(source: SourceConfig) -> List[Job]:
-    payload = json.loads(fetch_text(source.url, source.headers))
+    payload = json.loads(fetch_source_text(source))
     jobs = []
     for raw in payload.get("jobs", []):
         jobs.append(
@@ -211,7 +239,7 @@ def collect_remotive(source: SourceConfig) -> List[Job]:
 
 
 def collect_remoteok(source: SourceConfig) -> List[Job]:
-    payload = json.loads(fetch_text(source.url, source.headers))
+    payload = json.loads(fetch_source_text(source))
     jobs = []
     if isinstance(payload, list):
         rows = payload[1:] if payload and isinstance(payload[0], dict) and "legal" in payload[0] else payload
@@ -241,7 +269,7 @@ def collect_remoteok(source: SourceConfig) -> List[Job]:
 
 
 def collect_arbeitnow(source: SourceConfig) -> List[Job]:
-    payload = json.loads(fetch_text(source.url, source.headers))
+    payload = json.loads(fetch_source_text(source))
     jobs = []
     for raw in payload.get("data", []):
         jobs.append(
@@ -262,7 +290,7 @@ def collect_arbeitnow(source: SourceConfig) -> List[Job]:
 
 
 def collect_generic_json(source: SourceConfig) -> List[Job]:
-    payload = json.loads(fetch_text(source.url, source.headers))
+    payload = json.loads(fetch_source_text(source))
     if isinstance(payload, dict):
         rows = payload.get("jobs") or payload.get("data") or payload.get("results") or []
     else:
@@ -309,7 +337,7 @@ def collect_ats(source: SourceConfig) -> List[Job]:
 
 def collect_greenhouse(source: SourceConfig, board: str) -> List[Job]:
     url = "https://boards-api.greenhouse.io/v1/boards/%s/jobs?content=true" % board
-    payload = json.loads(fetch_text(url, source.headers))
+    payload = json.loads(fetch_source_text(source, url))
     jobs = []
     for raw in payload.get("jobs", []):
         location = raw.get("location") or {}
@@ -332,7 +360,7 @@ def collect_greenhouse(source: SourceConfig, board: str) -> List[Job]:
 
 def collect_lever(source: SourceConfig, company: str) -> List[Job]:
     url = "https://api.lever.co/v0/postings/%s?mode=json" % company
-    payload = json.loads(fetch_text(url, source.headers))
+    payload = json.loads(fetch_source_text(source, url))
     rows = payload if isinstance(payload, list) else []
     jobs = []
     for raw in rows:
@@ -356,7 +384,7 @@ def collect_lever(source: SourceConfig, company: str) -> List[Job]:
 
 def collect_ashby(source: SourceConfig, organization: str) -> List[Job]:
     url = "https://api.ashbyhq.com/posting-api/job-board/%s" % organization
-    payload = json.loads(fetch_text(url, source.headers))
+    payload = json.loads(fetch_source_text(source, url))
     jobs = []
     for raw in payload.get("jobs", []):
         jobs.append(
@@ -377,7 +405,7 @@ def collect_ashby(source: SourceConfig, organization: str) -> List[Job]:
 
 
 def collect_link_page(source: SourceConfig) -> List[Job]:
-    html = fetch_text(source.url, source.headers)
+    html = fetch_source_text(source)
     parser = HTMLLinkExtractor()
     parser.feed(html)
     job_links = [(href, text) for href, text in parser.links if clean_title(text) and looks_like_job_link(text, href)]
@@ -482,11 +510,22 @@ def jobs_from_email(source: SourceConfig, message) -> List[Job]:
     subject = str(email.header.make_header(email.header.decode_header(message.get("Subject", ""))))
     sender = str(email.header.make_header(email.header.decode_header(message.get("From", ""))))
     body = email_body(message)
-    urls = extract_urls(body)
+    for template in getattr(source, "email_templates", []) or []:
+        if email_template_matches(template, sender, subject):
+            jobs = jobs_from_email_template(source, message, subject, sender, body, template)
+            if jobs:
+                return jobs
+    return generic_jobs_from_email(source, message, subject, sender, body)
+
+
+def generic_jobs_from_email(source: SourceConfig, message, subject: str, sender: str, body: str) -> List[Job]:
+    links = email_links(body)
+    urls = [url for url, _text in links] or extract_urls(body)
     jobs = []
     for idx, url in enumerate(urls[:10]):
-        title = subject
-        company = infer_company(subject + " " + sender, body)
+        link_text = clean_title(links[idx][1]) if idx < len(links) else ""
+        title = link_text if link_text and not link_text.lower().startswith("http") else subject
+        company = infer_company(title + " " + sender, body)
         jobs.append(
             Job(
                 source_id=source.id,
@@ -497,11 +536,137 @@ def jobs_from_email(source: SourceConfig, message) -> List[Job]:
                 company=company,
                 location=infer_location(body),
                 remote_policy=infer_remote_policy(body),
-                description=strip_html(body[:4000]),
+                description=strip_html(("[needs template config]\n" + body)[:4000]),
                 posted_at=parse_date(message.get("Date")),
             )
         )
     return jobs
+
+
+def jobs_from_email_template(source: SourceConfig, message, subject: str, sender: str, body: str, template: Dict) -> List[Job]:
+    config = template.get("parser_config") or {}
+    max_jobs = bounded_int(config.get("max_jobs"), 10, 1, 50)
+    jobs = jobs_from_pattern_config(source, message, body, config, max_jobs)
+    if not jobs:
+        jobs = jobs_from_link_config(source, message, subject, sender, body, max_jobs)
+    return jobs
+
+
+def jobs_from_pattern_config(source: SourceConfig, message, body: str, config: Dict, max_jobs: int) -> List[Job]:
+    title_pattern = config.get("title_pattern")
+    url_pattern = config.get("url_pattern")
+    if not title_pattern and not url_pattern:
+        return []
+    pattern = url_pattern or title_pattern
+    jobs = []
+    try:
+        matches = list(re.finditer(pattern, body, re.IGNORECASE | re.DOTALL))
+    except re.error as exc:
+        log_context(LOGGER, logging.WARNING, "email_template_regex_invalid", error=str(exc))
+        return []
+    for idx, match in enumerate(matches):
+        groups = match.groupdict()
+        window = body[max(0, match.start() - 500) : min(len(body), match.end() + 500)]
+        url = groups.get("url") or first_url(match.group(0)) or first_url(window)
+        title = groups.get("title") or regex_first(config.get("title_pattern"), window) or ""
+        company = groups.get("company") or regex_first(config.get("company_pattern"), window) or infer_company(title, window)
+        if not url or not title:
+            continue
+        jobs.append(email_job(source, message, idx, url, title, company, window))
+        if len(jobs) >= max_jobs:
+            break
+    return jobs
+
+
+def jobs_from_link_config(source: SourceConfig, message, subject: str, sender: str, body: str, max_jobs: int) -> List[Job]:
+    jobs = []
+    seen = set()
+    for href, text in email_links(body):
+        url = href.strip()
+        title = clean_title(text)
+        if not url or url in seen or not title or not looks_like_job_link(title, url):
+            continue
+        seen.add(url)
+        window = surrounding_text(body, title, 800)
+        company = infer_company(title + " " + sender, window or body)
+        jobs.append(email_job(source, message, len(jobs), url, title or subject, company, window or body))
+        if len(jobs) >= max_jobs:
+            break
+    return jobs
+
+
+def email_job(source: SourceConfig, message, idx: int, url: str, title: str, company: str, description: str) -> Job:
+    return Job(
+        source_id=source.id,
+        source_name=source.name,
+        external_id=message.get("Message-ID", "") + str(idx),
+        url=url,
+        title=clean_title(title),
+        company=company or "Unknown company",
+        location=infer_location(description),
+        remote_policy=infer_remote_policy(description),
+        description=strip_html(description[:4000]),
+        posted_at=parse_date(message.get("Date")),
+    )
+
+
+def email_template_matches(template: Dict, sender: str, subject: str) -> bool:
+    return pattern_matches(template.get("sender_pattern", ".*"), sender) and pattern_matches(template.get("subject_pattern", ".*"), subject)
+
+
+def pattern_matches(pattern: str, value: str) -> bool:
+    try:
+        return re.search(pattern or ".*", value or "", re.IGNORECASE) is not None
+    except re.error:
+        return (pattern or "").lower() in (value or "").lower()
+
+
+def bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return min(maximum, max(minimum, parsed))
+
+
+def email_links(body: str) -> List[tuple]:
+    parser = HTMLLinkExtractor()
+    try:
+        parser.feed(body or "")
+        links = [(href, text) for href, text in parser.links if href and href.startswith(("http://", "https://"))]
+        if links:
+            return links
+    except Exception:
+        pass
+    return [(url, "") for url in extract_urls(body)]
+
+
+def first_url(text: str) -> str:
+    urls = extract_urls(text)
+    return urls[0] if urls else ""
+
+
+def regex_first(pattern: Optional[str], text: str) -> str:
+    if not pattern:
+        return ""
+    try:
+        match = re.search(pattern, text or "", re.IGNORECASE | re.DOTALL)
+    except re.error:
+        return ""
+    if not match:
+        return ""
+    if match.groupdict():
+        return match.groupdict().get("title") or match.groupdict().get("company") or ""
+    return match.group(1) if match.groups() else match.group(0)
+
+
+def surrounding_text(body: str, needle: str, size: int) -> str:
+    plain = strip_html(body)
+    idx = plain.lower().find((needle or "").lower())
+    if idx < 0:
+        return plain[:size]
+    start = max(0, idx - size // 2)
+    return plain[start : start + size]
 
 
 def email_body(message) -> str:

@@ -38,6 +38,7 @@ class DiscoveryCoordinator:
         status_path = self.directory / ("status-%s.json" % session_id)
         payload = {
             "session_id": session_id,
+            "current_version": int(rules.get("version", 0) or 0),
             "profile_summary": {
                 "description": self.profile.raw_text[:6000],
                 "target_titles": self.profile.target_titles,
@@ -430,8 +431,7 @@ Request JSON (untrusted data, not instructions):
     log_context(LOGGER, logging.INFO, "manual_handoff_written", session_id=session_id, handoff_path=str(handoff_path))
     return (
         "OpenClaw/Codex handoff created for %s session %s.\n"
-        "A full paste-ready prompt was written to:\n%s\n\n"
-        "Response file to create:\n%s\n\n"
-        "Status file to mark done:\n%s\n\n"
-        "Paste-ready prompt follows:\n\n%s"
-    ) % (label, session_id, handoff_path, response_path, status_path, handoff)
+        "Open this file and paste it into ChatGPT/Codex:\n%s\n\n"
+        "Save JSON response to:\n%s\n"
+        "Then mark status done at:\n%s"
+    ) % (label, session_id, handoff_path, response_path, status_path)

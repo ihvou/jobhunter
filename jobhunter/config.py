@@ -8,6 +8,11 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 from .models import SourceConfig, UserProfile
+from .sources import VALID_SOURCE_TYPES, normalize_source_type
+
+
+class ConfigError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -31,6 +36,7 @@ class AppConfig:
     scoring_path: Path
     workspace_dir: Path
     heartbeat_path: Path
+    tasks_path: Path
     telegram_bot_token: str = ""
     telegram_allowed_chat_id: Optional[int] = None
     openai_api_key: str = ""
@@ -53,6 +59,7 @@ class AppConfig:
     agent_request_recent_jobs: int = 15
     agent_request_desc_chars: int = 250
     agent_request_feedback_items: int = 5
+    robots_txt_respect: str = "trust"
     codex_handoff_mode: str = "auto"
     cost: CostConfig = field(default_factory=CostConfig)
 
@@ -99,6 +106,8 @@ def load_app_config() -> AppConfig:
     workspace_dir = Path(os.getenv("JOBHUNTER_WORKSPACE_DIR", "openclaw/workspace"))
     heartbeat_path = Path(os.getenv("JOBHUNTER_HEARTBEAT_PATH", str(data_dir / "heartbeat")))
     database_path = Path(os.getenv("JOBHUNTER_DATABASE_PATH", str(data_dir / "jobs.sqlite")))
+    tasks_default = "/jobhunter/repo/tasks.md" if Path("/jobhunter/repo").exists() else str(_cwd() / "tasks.md")
+    tasks_path = Path(os.getenv("JOBHUNTER_TASKS_PATH", tasks_default))
 
     settings_path = Path(os.getenv("JOBHUNTER_SETTINGS_PATH", str(config_dir / "jobhunter.json")))
     settings = load_json(settings_path, {})
@@ -127,6 +136,7 @@ def load_app_config() -> AppConfig:
         scoring_path=scoring_path,
         workspace_dir=workspace_dir,
         heartbeat_path=heartbeat_path,
+        tasks_path=tasks_path,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_id=parse_optional_int(os.getenv("TELEGRAM_ALLOWED_CHAT_ID")),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
@@ -175,6 +185,9 @@ def load_app_config() -> AppConfig:
         agent_request_feedback_items=env_or_setting(
             "JOBHUNTER_AGENT_REQUEST_FEEDBACK_ITEMS", settings, "agent_request_feedback_items", 5, int
         ),
+        robots_txt_respect=str(
+            os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", settings.get("robots_txt_respect", "trust"))
+        ).strip().lower(),
         codex_handoff_mode=str(os.getenv("JOBHUNTER_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
         cost=cost,
     )
@@ -184,12 +197,13 @@ def load_sources(path: Path) -> List[SourceConfig]:
     raw_sources = load_json(path, [])
     sources = []
     for raw in raw_sources:
+        source_type = normalize_config_source_type(raw.get("type"), raw.get("id") or raw.get("name") or raw.get("url"))
         sources.append(
             SourceConfig(
                 id=raw["id"],
                 name=raw.get("name", raw["id"]),
-                type=raw["type"],
-                url=validate_source_url(raw["url"], raw.get("type", "")),
+                type=source_type,
+                url=validate_source_url(raw["url"], source_type),
                 status=raw.get("status") or ("active" if bool(raw.get("enabled", True)) else "disabled"),
                 risk_level=raw.get("risk_level", "low"),
                 poll_frequency_minutes=int(raw.get("poll_frequency_minutes", 360)),
@@ -198,6 +212,7 @@ def load_sources(path: Path) -> List[SourceConfig]:
                 priority=raw.get("priority", "medium") if raw.get("priority") in ("high", "medium", "low") else "medium",
                 created_by=raw.get("created_by", "user"),
                 imap_last_uid=int(raw.get("imap_last_uid", 0) or 0),
+                robots_check=parse_optional_bool(raw.get("robots_check")),
             )
         )
     return sources
@@ -241,7 +256,11 @@ def ensure_directories(config: AppConfig) -> None:
 def ensure_profile_file(config: AppConfig) -> None:
     config.input_dir.mkdir(parents=True, exist_ok=True)
     if not config.profile_path.exists():
-        config.profile_path.write_text("# About me\n\n# Directives\n", encoding="utf-8")
+        copy_example_or_empty(config.input_dir / "profile.example.md", config.profile_path, "# About me\n\n# Directives\n")
+    if not config.cv_path.exists():
+        example_cv = config.input_dir / "cv.example.md"
+        if example_cv.exists():
+            shutil.copyfile(example_cv, config.cv_path)
     legacy = load_json(config.profile_settings_path, None)
     if legacy:
         raw = config.profile_path.read_text(encoding="utf-8")
@@ -333,10 +352,31 @@ def parse_optional_int(value: Optional[str]) -> Optional[int]:
         return None
 
 
+def parse_optional_bool(value) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 def bool_from_value(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def normalize_config_source_type(value, source_label: str) -> str:
+    source_type = normalize_source_type(value)
+    if source_type not in VALID_SOURCE_TYPES:
+        allowed = "/".join(sorted(VALID_SOURCE_TYPES))
+        raise ConfigError("Source '%s' has invalid type '%s'; allowed: %s" % (source_label, value, allowed))
+    return source_type
 
 
 def validate_source_url(url: str, source_type: str = "") -> str:
@@ -346,6 +386,14 @@ def validate_source_url(url: str, source_type: str = "") -> str:
     if parsed.scheme not in ("http", "https"):
         raise ValueError("Unsafe source URL scheme for %s" % url)
     return url
+
+
+def copy_example_or_empty(example_path: Path, target_path: Path, fallback: str) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if example_path.exists():
+        shutil.copyfile(example_path, target_path)
+    else:
+        target_path.write_text(fallback, encoding="utf-8")
 
 
 def parse_profile_description(text: str) -> Dict[str, List[str]]:
