@@ -15,6 +15,9 @@ Hard constraints:
 - Do not add broad description-level hard rejects that would reject senior roles for mentoring junior colleagues.
 - Keep per-job scoring deterministic and free.
 - Preserve or increment `version`; include `generated_by: "codex+openclaw"`.
+- Use `training_signals` when present. Proposed changes should be surgical and justified by concrete applied, irrelevant, snoozed, or cover-note examples.
+- Do not over-weight generic words from the profile such as "discovery" unless the job also has target-role and AI-building evidence.
+- Reject or strongly penalize Product Marketing Manager, MLOps, DevOps, pure engineering, and unsupported-language requirements when the profile directives say so.
 
 Response schema: a complete scoring ruleset matching `config/scoring.json`.
 

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -43,6 +44,12 @@ class AppConfig:
     rate_limit_discovery_per_day: int = 3
     rate_limit_tuning_per_day: int = 3
     rate_limit_cover_notes_per_day: int = 10
+    rate_limit_agent_per_day: int = 20
+    rate_limit_agent_seconds: int = 10
+    rate_limit_sources_apply_per_day: int = 5
+    rate_limit_scoring_apply_per_day: int = 3
+    rate_limit_bulk_apply_per_day: int = 2
+    l2_max_jobs: int = 30
     codex_handoff_mode: str = "auto"
     cost: CostConfig = field(default_factory=CostConfig)
 
@@ -140,6 +147,22 @@ def load_app_config() -> AppConfig:
         rate_limit_cover_notes_per_day=env_or_setting(
             "JOBBOT_RATE_LIMIT_COVER_NOTES_PER_DAY", settings, "rate_limit_cover_notes_per_day", 10, int
         ),
+        rate_limit_agent_per_day=env_or_setting(
+            "JOBBOT_RATE_LIMIT_AGENT_PER_DAY", settings, "rate_limit_agent_per_day", 20, int
+        ),
+        rate_limit_agent_seconds=env_or_setting(
+            "JOBBOT_RATE_LIMIT_AGENT_SECONDS", settings, "rate_limit_agent_seconds", 10, int
+        ),
+        rate_limit_sources_apply_per_day=env_or_setting(
+            "JOBBOT_RATE_LIMIT_SOURCES_APPLY_PER_DAY", settings, "rate_limit_sources_apply_per_day", 5, int
+        ),
+        rate_limit_scoring_apply_per_day=env_or_setting(
+            "JOBBOT_RATE_LIMIT_SCORING_APPLY_PER_DAY", settings, "rate_limit_scoring_apply_per_day", 3, int
+        ),
+        rate_limit_bulk_apply_per_day=env_or_setting(
+            "JOBBOT_RATE_LIMIT_BULK_APPLY_PER_DAY", settings, "rate_limit_bulk_apply_per_day", 2, int
+        ),
+        l2_max_jobs=env_or_setting("JOBBOT_L2_MAX_JOBS", settings, "l2_max_jobs", 30, int),
         codex_handoff_mode=str(os.getenv("JOBBOT_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
         cost=cost,
     )
@@ -160,6 +183,7 @@ def load_sources(path: Path) -> List[SourceConfig]:
                 poll_frequency_minutes=int(raw.get("poll_frequency_minutes", 360)),
                 headers=raw.get("headers", {}),
                 query=raw.get("query"),
+                priority=raw.get("priority", "medium") if raw.get("priority") in ("high", "medium", "low") else "medium",
                 created_by=raw.get("created_by", "user"),
                 imap_last_uid=int(raw.get("imap_last_uid", 0) or 0),
             )
@@ -168,12 +192,10 @@ def load_sources(path: Path) -> List[SourceConfig]:
 
 
 def load_profile(config: AppConfig) -> UserProfile:
-    profile_settings = load_json(config.profile_settings_path, None)
-    if profile_settings is None:
-        profile_settings = load_json(config.config_dir / "profile.example.json", {})
     raw_text = ""
     if config.profile_path.exists():
         raw_text = config.profile_path.read_text(encoding="utf-8")
+    sections = split_profile_sections(raw_text)
     cv_text = ""
     if config.cv_path.exists():
         cv_text = config.cv_path.read_text(encoding="utf-8")
@@ -182,14 +204,16 @@ def load_profile(config: AppConfig) -> UserProfile:
     return UserProfile(
         raw_text=raw_text,
         cv_text=cv_text,
-        target_titles=merge_lists(parsed["target_titles"], _list(profile_settings.get("target_titles"))),
-        positive_keywords=merge_lists(parsed["positive_keywords"], _list(profile_settings.get("positive_keywords"))),
-        negative_keywords=_list(profile_settings.get("negative_keywords")),
-        required_locations=_list(profile_settings.get("required_locations")),
-        excluded_locations=_list(profile_settings.get("excluded_locations")),
-        excluded_domains=_list(profile_settings.get("excluded_domains")),
-        salary_floor=profile_settings.get("salary_floor"),
-        currency=profile_settings.get("currency", "USD"),
+        about_me=sections["about_me"],
+        directives=sections["directives"],
+        target_titles=parsed["target_titles"],
+        positive_keywords=parsed["positive_keywords"],
+        negative_keywords=[],
+        required_locations=[],
+        excluded_locations=[],
+        excluded_domains=[],
+        salary_floor=None,
+        currency="USD",
     )
 
 
@@ -199,6 +223,76 @@ def ensure_directories(config: AppConfig) -> None:
     config.workspace_dir.mkdir(parents=True, exist_ok=True)
     (config.workspace_dir / "discovery").mkdir(parents=True, exist_ok=True)
     (config.workspace_dir / "tuning").mkdir(parents=True, exist_ok=True)
+    (config.workspace_dir / "agent").mkdir(parents=True, exist_ok=True)
+
+
+def ensure_profile_file(config: AppConfig) -> None:
+    config.input_dir.mkdir(parents=True, exist_ok=True)
+    if not config.profile_path.exists():
+        config.profile_path.write_text("# About me\n\n# Directives\n", encoding="utf-8")
+    legacy = load_json(config.profile_settings_path, None)
+    if legacy:
+        raw = config.profile_path.read_text(encoding="utf-8")
+        sections = split_profile_sections(raw)
+        folded = legacy_profile_text(legacy)
+        if folded and folded not in sections["about_me"]:
+            archive = config.profile_settings_path.with_suffix(config.profile_settings_path.suffix + ".bak")
+            shutil.copyfile(config.profile_settings_path, archive)
+            config.profile_path.write_text(
+                compose_profile("\n\n".join(part for part in [sections["about_me"], folded] if part.strip()), sections["directives"]),
+                encoding="utf-8",
+            )
+            config.profile_settings_path.unlink()
+    if not config.profile_path.exists():
+        return
+    raw_text = config.profile_path.read_text(encoding="utf-8")
+    if "# About me" not in raw_text and "# Directives" not in raw_text:
+        config.profile_path.write_text("# About me\n\n%s\n\n# Directives\n" % raw_text.strip(), encoding="utf-8")
+
+
+def split_profile_sections(text: str) -> Dict[str, str]:
+    text = text or ""
+    if "# About me" not in text and "# Directives" not in text:
+        return {"about_me": text.strip(), "directives": ""}
+    about = ""
+    directives = ""
+    current = None
+    buffers = {"about_me": [], "directives": []}
+    for line in text.splitlines():
+        normalized = line.strip().lower()
+        if normalized == "# about me":
+            current = "about_me"
+            continue
+        if normalized == "# directives":
+            current = "directives"
+            continue
+        if current in buffers:
+            buffers[current].append(line)
+    about = "\n".join(buffers["about_me"]).strip()
+    directives = "\n".join(buffers["directives"]).strip()
+    return {"about_me": about, "directives": directives}
+
+
+def compose_profile(about_me: str, directives: str) -> str:
+    return "# About me\n\n%s\n\n# Directives\n%s\n" % ((about_me or "").strip(), ("\n" + directives.strip()) if directives else "")
+
+
+def legacy_profile_text(profile_settings: Dict) -> str:
+    lines = []
+    for key, label in [
+        ("target_titles", "Target titles"),
+        ("positive_keywords", "Positive keywords"),
+        ("negative_keywords", "Negative keywords"),
+        ("required_locations", "Required locations"),
+        ("excluded_locations", "Excluded locations"),
+        ("excluded_domains", "Excluded domains"),
+    ]:
+        values = _list(profile_settings.get(key))
+        if values:
+            lines.append("%s: %s" % (label, ", ".join(values)))
+    if profile_settings.get("salary_floor"):
+        lines.append("Salary floor: %s %s" % (profile_settings.get("salary_floor"), profile_settings.get("currency", "USD")))
+    return "\n".join(lines)
 
 
 def _list(value: Optional[object]) -> List[str]:

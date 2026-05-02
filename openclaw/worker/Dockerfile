@@ -5,7 +5,7 @@ ENV NODE_ENV=production
 WORKDIR /openclaw
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates python3 \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --create-home --uid 10002 openclaw \
   && npm install -g @openai/codex

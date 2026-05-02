@@ -14,6 +14,7 @@ class SourceConfig:
     poll_frequency_minutes: int = 360
     headers: Dict[str, str] = field(default_factory=dict)
     query: Optional[str] = None
+    priority: str = "medium"
     created_by: str = "user"
     imap_last_uid: int = 0
     last_seen_uid: int = 0
@@ -27,6 +28,8 @@ class SourceConfig:
 class UserProfile:
     raw_text: str
     cv_text: str = ""
+    about_me: str = ""
+    directives: str = ""
     target_titles: List[str] = field(default_factory=list)
     positive_keywords: List[str] = field(default_factory=list)
     negative_keywords: List[str] = field(default_factory=list)
@@ -72,6 +75,7 @@ class TelegramAction:
     action: str
     target_id: Optional[str] = None
     index: Optional[int] = None
+    text: str = ""
     callback_id: Optional[str] = None
     chat_id: Optional[int] = None
     message_id: Optional[int] = None

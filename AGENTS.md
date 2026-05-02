@@ -6,8 +6,8 @@ Orientation for AI coding agents (Claude Code, Codex, Cursor, etc.) and human co
 
 A safe, low-cost job-search assistant that runs as two cooperating Docker containers:
 
-1. **`jobbot`** — deterministic Python service. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
-2. **`openclaw-gateway`** — isolated Codex CLI worker container. Handles source discovery and scoring-tuning agent work through the shared workspace. Codex auth lives in gitignored `openclaw/codex-home/`, not the host home directory.
+1. **`jobbot`** — deterministic Python service plus bounded OpenAI API calls for cover notes and L2 relevance. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
+2. **`openclaw-gateway`** — isolated Codex CLI worker container. Handles `/agent` strategy/data/source/filter work through the shared workspace. Codex auth lives in gitignored `openclaw/codex-home/`, not the host home directory.
 
 The user interacts through Telegram. There is no web UI in `jobbot`. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 
@@ -17,19 +17,20 @@ Everything is on-demand. There is no cron-driven collection.
 
 | Entry Point | Behavior |
 |---|---|
-| `Get more jobs` | Rate-limited collection across enabled sources, cross-source dedupe, deterministic scoring, fresh digest of jobs not previously shown |
-| `Update sources` | Writes a discovery request into `/jobbot/workspace/discovery`; waits for OpenClaw/Codex response; user approves sources in Telegram; approved rows are appended as `created_by: "agent", status: "test"` |
-| `Tune scoring` | Writes a tuning request into `/jobbot/workspace/tuning`; shadow-tests proposed rules; user applies/rejects in Telegram |
-| `Usage` | Shows OpenAI API spend and usage counters |
+| `Get more jobs` | Rate-limited collection across enabled sources, cross-source dedupe, deterministic L1 scoring, capped L2 relevance, fresh digest of jobs not previously shown |
+| `Update sources` | Routes a canned `/agent` request; OpenClaw/Codex proposes `sources_proposal` actions; user approves in Telegram |
+| `Tune scoring` | Routes a canned `/agent` request; OpenClaw/Codex proposes `scoring_rule_proposal` actions; user approves in Telegram |
+| `Usage` | Routes a canned `/agent` read-only data request |
+| `/agent <text>` | Writes an agent request into `/jobbot/workspace/agent`; response may include `data_answer` plus bounded proposed actions |
 
 Two LLM tiers stay separate:
 
 | Tier | Location | Use |
 |---|---|---|
-| Codex subscription | OpenClaw side | Source discovery and scoring-rule tuning |
-| OpenAI API | `jobbot` | Cover notes only, behind local budget gates and per-day count caps |
+| Codex subscription | OpenClaw side | Source discovery, strategy analysis, read-only data answers, and scoring/filter tuning |
+| OpenAI API | `jobbot` | Cover notes and capped L2 relevance only, behind local budget gates and per-day count caps |
 
-Per-job scoring is deterministic and free. The agent updates rules; it does not score every job with an LLM.
+L1 scoring is deterministic and free. L2 relevance is an optional, cached, budget-gated OpenAI API pass on top L1 candidates; Codex is not used to score every job.
 
 ## Source Of Truth
 
@@ -46,12 +47,14 @@ Per-job scoring is deterministic and free. The agent updates rules; it does not 
 .
 ├── jobbot/
 │   ├── __main__.py          # CLI entry
+│   ├── agent.py             # /agent request/response workspace contract
+│   ├── agent_actions.py     # Bounded proposed-action registry and handlers
 │   ├── app.py               # Thin-ish orchestration for Telegram/workspace/actions
 │   ├── budget.py            # OpenAI spend gate
 │   ├── config.py            # Settings, source/profile loading, safe path defaults
 │   ├── coordinators.py      # Discovery/tuning file-contract writers and approval helpers
 │   ├── database.py          # SQLite schema, migrations, dedupe, audit tables
-│   ├── llm.py               # OpenAI cover-note client only
+│   ├── llm.py               # OpenAI cover-note + L2 relevance client
 │   ├── logging_setup.py     # JSON logging + secret masking
 │   ├── models.py            # Dataclasses
 │   ├── scoring.py           # Deterministic rule interpreter
@@ -98,7 +101,9 @@ openclaw/workspace/
 - Telegram messages are plain text; do not introduce Markdown/HTML parsing casually.
 - Word-boundary matching only for job-text rules.
 - Never put secrets in URLs or logs.
-- All cross-container IO is file-based in `/jobbot/workspace/{discovery,tuning}/`. No HTTP between containers and no shared SQLite.
+- All cross-container IO is file-based in `/jobbot/workspace/{agent,discovery,tuning}/`. No HTTP between containers.
+- `/agent` write actions must go through `jobbot/agent_actions.py`; never add an action kind that executes code or shell commands.
+- The OpenClaw worker tool surface is read-only: `query_sql`, `read_file`, `list_dir`, `http_fetch`, with caps and allowlists.
 
 ## Build / Test / Run
 
@@ -141,6 +146,11 @@ docker compose --profile openclaw up -d openclaw-gateway
 | Discovery request/approval | Implemented; automated worker writes OpenClaw/Codex response file |
 | Tuning request/shadow/apply | Implemented; automated worker writes OpenClaw/Codex response file |
 | OpenClaw worker runtime | Implemented in `openclaw/worker/` with Codex CLI |
+| Agentic free-form loop | Implemented: `/agent`, `/feedback`, `/ask`, shared `agent/` workspace, multi-action response schema |
+| Agent action registry | Implemented with bounded handlers and audit/revert rows |
+| L2 relevance pass | Implemented: cached OpenAI/API-or-local-fallback verdicts sorted into digest |
+| Single profile file | Implemented: `input/profile.local.md` with `# About me` and `# Directives`; legacy JSON folds into it |
+| Worker read-only tools | Implemented for agent loop with SELECT/file/path/http caps |
 | IMAP source filters | Implemented via per-source `query` and UID high-water |
 | Source lifecycle | Implemented: `active`, `test`, `disabled`; `test` promotes on cover note/applied |
 | Budget override | Implemented for cover notes |
@@ -180,7 +190,7 @@ Scoring rules belong in `config/scoring.json`, not hardcoded Python. The interpr
 - No auto-apply, recruiter messaging, or outbound email.
 - No browser profiles, host home, SSH keys, or `/var/run/docker.sock` mounts.
 - No silent edits to `config/sources.json` or `config/scoring.json`; agent proposals require Telegram approval.
-- No per-job LLM scoring.
+- No per-job Codex scoring. OpenAI L2 relevance is capped, cached, budget-gated, and optional.
 - No cron/scheduler unless the user explicitly asks for the opt-in future mode.
 - Do not commit `.env`, `data/`, local profile/CV files, generated drafts, API keys, or workspace request/response files.
 

@@ -2,9 +2,12 @@
 data/
 config/profile.local.json
 config/*.private.json
+config/*.bak
+config/scoring.v*.json
 input/profile.local.md
 input/cv.local.md
 input/*.private.md
+input/*.bak
 openclaw/config/
 openclaw/codex-home/
 openclaw/workspace/

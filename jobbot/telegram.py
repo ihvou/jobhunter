@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -34,6 +35,10 @@ BOT_MESSAGE_ACTIONS = {
     "/scoring": "tune_scoring",
     "usage": "usage",
     "/usage": "usage",
+    "/history": "history",
+    "/applied": "list_applied",
+    "/snoozed": "list_snoozed",
+    "/irrelevant": "list_irrelevant",
     "menu": "menu",
     "/start": "menu",
     "/help": "menu",
@@ -55,7 +60,7 @@ class TelegramClient:
         self.send_message(text, reply_markup=main_menu_keyboard())
 
     def send_job(self, row) -> None:
-        self.send_message(format_job_message(row), reply_markup=job_keyboard(row["id"]))
+        self.send_message(format_job_message(row), reply_markup=job_keyboard(row["id"]), parse_mode="MarkdownV2")
 
     def send_cover_override_prompt(self, job_id: str, reason: str) -> None:
         self.send_message(
@@ -81,7 +86,38 @@ class TelegramClient:
     def send_tuning_approval(self, session_id: str, report: str) -> None:
         self.send_message("Scoring tuning proposal:\n\n%s" % report, reply_markup=tuning_keyboard(session_id))
 
-    def send_message(self, text: str, reply_markup: Optional[Dict] = None) -> None:
+    def send_agent_response(self, session_id: str, response: Dict) -> None:
+        lines = [
+            response.get("answer") or "Agent response ready.",
+            "",
+        ]
+        actions = response.get("proposed_actions") or []
+        write_actions = [action for action in actions if action.get("kind") != "data_answer"]
+        if actions:
+            lines.append("Proposed actions:")
+            for idx, action in enumerate(actions):
+                lines.append("%s. %s: %s" % (idx + 1, action.get("kind"), action.get("summary", "")))
+        usage = response.get("usage") or {}
+        footer = "Audit: session %s" % session_id
+        if usage:
+            footer += " · Codex turns: %s · SQL: %s · fetches: %s · duration: %ss" % (
+                usage.get("codex_turns", 0),
+                usage.get("sql_queries", 0),
+                usage.get("http_fetches", 0),
+                usage.get("duration_seconds", 0),
+            )
+        lines.extend(["", footer])
+        self.send_message("\n".join(lines), reply_markup=agent_actions_keyboard(session_id, actions) if write_actions else main_menu_keyboard())
+
+    def delete_message(self, message_id: Optional[int]) -> None:
+        if not self.enabled or not message_id:
+            return
+        try:
+            self._post("deleteMessage", {"chat_id": str(self.allowed_chat_id), "message_id": str(message_id)})
+        except TelegramError as exc:
+            log_context(LOGGER, logging.WARNING, "telegram_delete_message_failed", error=str(exc), message_id=message_id)
+
+    def send_message(self, text: str, reply_markup: Optional[Dict] = None, parse_mode: Optional[str] = None) -> None:
         if not self.enabled:
             print(text)
             return
@@ -90,6 +126,8 @@ class TelegramClient:
             "text": text,
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
         self._post("sendMessage", payload)
@@ -203,6 +241,30 @@ class TelegramClient:
 
 
 def parse_message(text: str) -> Optional[TelegramAction]:
+    raw = str(text or "").strip()
+    command, rest = split_command(raw)
+    if command in ("/agent", "/feedback", "/ask"):
+        hint = {
+            "/agent": "",
+            "/feedback": "User feedback: ",
+            "/ask": "Answer this question using allowed read-only tools: ",
+        }[command]
+        if not rest:
+            return TelegramAction(scope="bot", action="agent_help")
+        return TelegramAction(scope="bot", action="agent", text=hint + rest)
+    if command == "/revert":
+        return TelegramAction(scope="bot", action="revert", target_id=rest.strip())
+    if command == "/profile":
+        if not rest:
+            return TelegramAction(scope="profile", action="show")
+        profile_command, profile_rest = split_first_word(rest)
+        if profile_command in ("show", "set", "refine"):
+            return TelegramAction(scope="profile", action=profile_command, text=profile_rest)
+        return TelegramAction(scope="profile", action="show")
+    if command == "/scoring":
+        sub, _tail = split_first_word(rest)
+        if sub == "history":
+            return TelegramAction(scope="bot", action="scoring_history")
     normalized = normalize_message_text(text)
     action = BOT_MESSAGE_ACTIONS.get(normalized)
     if not action:
@@ -235,6 +297,11 @@ def parse_callback(data: str) -> Optional[TelegramAction]:
         return TelegramAction(scope="disc", action=parts[1], target_id=parts[2], index=index)
     if parts[0] == "tune" and len(parts) == 3:
         return TelegramAction(scope="tune", action=parts[1], target_id=parts[2])
+    if parts[0] == "agent" and len(parts) == 4:
+        index = None if parts[3] == "all" else int(parts[3]) if parts[3].isdigit() else None
+        return TelegramAction(scope="agent", action=parts[1], target_id=parts[2], index=index)
+    if parts[0] == "profile" and len(parts) == 3:
+        return TelegramAction(scope="profile", action=parts[1], target_id=parts[2])
     return None
 
 
@@ -299,34 +366,87 @@ def tuning_keyboard(session_id: str) -> Dict:
     }
 
 
+def agent_actions_keyboard(session_id: str, actions: List[Dict]) -> Dict:
+    rows = []
+    current = []
+    for idx, action in enumerate(actions):
+        if action.get("kind") == "data_answer":
+            continue
+        current.append({"text": "Apply %s" % (idx + 1), "callback_data": "agent:apply:%s:%s" % (session_id, idx)})
+        if len(current) == 2:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append(current)
+    rows.append(
+        [
+            {"text": "Apply all", "callback_data": "agent:apply:%s:all" % session_id},
+            {"text": "Reject all", "callback_data": "agent:reject:%s:all" % session_id},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
 def format_job_message(row) -> str:
     reasons = reasons_from_row(row)
-    concerns = concerns_from_row(row)
-    reason_text = "\n".join("- %s" % reason for reason in reasons[:5]) or "- Match details unavailable"
-    concern_text = "\n".join("- %s" % concern for concern in concerns[:3]) or "- None flagged"
+    reason = row["l2_reason"] if "l2_reason" in row.keys() and row["l2_reason"] else (reasons[0] if reasons else "Match details unavailable")
+    title = strip_company_prefix(row["title"], row["company"])
     new_source = " (from new source)" if row["source_status"] == "test" else ""
-    return """%s - %s
-Score: %s
-Source: %s%s
-Location: %s
+    priority = ""
+    if "l2_priority" in row.keys() and row["l2_priority"] == "high":
+        priority = "High priority · "
+    excerpt = strip_html(row["description"] if "description" in row.keys() else "")[:250]
+    return """*%s* — %s
+Score %s · %s%s · %s%s
 
-Why it matches:
 %s
 
-Concerns:
-%s
+> %s
 
 %s""" % (
-        row["title"],
-        row["company"],
+        mdv2_escape(title),
+        mdv2_escape(row["company"]),
         row["score"],
-        row["source_name"],
-        new_source,
-        row["location"] or row["remote_policy"] or "Unknown",
-        reason_text,
-        concern_text,
-        row["url"],
+        mdv2_escape(row["location"] or row["remote_policy"] or "Unknown"),
+        mdv2_escape(new_source),
+        mdv2_escape(row["source_name"]),
+        "",
+        mdv2_escape(priority + reason),
+        mdv2_escape(excerpt or "No description excerpt available."),
+        mdv2_escape(row["url"]),
     )
+
+
+def split_command(text: str):
+    if not text.startswith("/"):
+        return "", text
+    first, rest = split_first_word(text)
+    return first.split("@", 1)[0].lower(), rest
+
+
+def split_first_word(text: str):
+    parts = str(text or "").strip().split(None, 1)
+    if not parts:
+        return "", ""
+    return parts[0].lower(), parts[1] if len(parts) > 1 else ""
+
+
+def strip_company_prefix(title: str, company: str) -> str:
+    title = str(title or "").strip()
+    company = str(company or "").strip()
+    if company and title.lower().startswith(company.lower() + ":"):
+        return title[len(company) + 1 :].strip()
+    if company and title.lower().startswith(company.lower() + " - "):
+        return title[len(company) + 3 :].strip()
+    return title
+
+
+def strip_html(text: str) -> str:
+    return " ".join(re.sub(r"<[^>]+>", " ", str(text or "")).split())
+
+
+def mdv2_escape(text) -> str:
+    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text or ""))
 
 
 def split_message(text: str, max_len: int) -> List[str]:

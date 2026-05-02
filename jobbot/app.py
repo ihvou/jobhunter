@@ -1,8 +1,10 @@
 import atexit
+import difflib
 import json
 import logging
 import re
 import signal
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -11,7 +13,19 @@ from pathlib import Path
 from typing import List
 
 from .budget import BudgetGate
-from .config import AppConfig, ensure_directories, load_app_config, load_profile, load_sources, validate_source_url
+from .agent import AgentCoordinator, read_agent_response
+from .agent_actions import AgentActionContext, apply_agent_action
+from .config import (
+    AppConfig,
+    compose_profile,
+    ensure_directories,
+    ensure_profile_file,
+    load_app_config,
+    load_profile,
+    load_sources,
+    split_profile_sections,
+    validate_source_url,
+)
 from .coordinators import DiscoveryCoordinator, ScoringCoordinator, read_json
 from .database import Database, tomorrow_iso
 from .llm import BudgetExceeded, LLMClient, LLMError
@@ -30,6 +44,7 @@ class JobBot:
         configure_logging()
         self.config = config
         ensure_directories(config)
+        ensure_profile_file(config)
         self.database = Database(config.database_path)
         self.database.init_schema()
         self.profile = load_profile(config)
@@ -40,6 +55,7 @@ class JobBot:
         source_module.CHECK_ROBOTS = config.check_robots
         self.discovery = DiscoveryCoordinator(config, self.database, self.profile)
         self.scoring = ScoringCoordinator(config, self.database, self.profile)
+        self.agent = AgentCoordinator(config, self.database, self.profile)
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.futures = set()
         self.shutdown_requested = False
@@ -76,7 +92,11 @@ class JobBot:
         print("Initialized jobbot with %s sources and database %s" % (len(sources), self.config.database_path))
 
     def collect(self) -> None:
-        sources = [source for source in load_sources(self.config.sources_path) if source.enabled]
+        priority_rank = {"high": 0, "medium": 1, "low": 2}
+        sources = sorted(
+            [source for source in load_sources(self.config.sources_path) if source.enabled],
+            key=lambda source: (priority_rank.get(source.priority, 1), source.id),
+        )
         for source in sources:
             source.imap_last_uid = self.database.source_imap_last_uid(source.id)
         self.database.upsert_sources(sources)
@@ -128,6 +148,12 @@ class JobBot:
     def send_digest(self) -> None:
         ruleset = load_scoring_rules(self.config.scoring_path)
         min_show_score = int(ruleset.get("thresholds", {}).get("min_show_score", 0) or 0)
+        pre_rows = self.database.jobs_for_digest(
+            max(self.config.digest_max_jobs, self.config.l2_max_jobs),
+            min_score=min_show_score,
+            include_l2_rejected=True,
+        )
+        self.run_l2_relevance(pre_rows[: self.config.l2_max_jobs])
         rows = self.database.jobs_for_digest(self.config.digest_max_jobs, min_score=min_show_score)
         usage = self.database.usage_summary()
         body = (
@@ -171,6 +197,12 @@ class JobBot:
         if action.scope == "bot":
             self.handle_bot_action(action)
             return
+        if action.scope == "agent":
+            self.handle_agent_action(action)
+            return
+        if action.scope == "profile":
+            self.handle_profile_action(action)
+            return
         if action.scope == "disc":
             self.handle_discovery_action(action)
             return
@@ -199,29 +231,62 @@ class JobBot:
             if not allowed:
                 self.answer_action(action, "Discovery limit reached today")
                 return
-            session_id = self.discovery.create_request(load_sources(self.config.sources_path), self.source_metrics_markdown())
-            self.database.add_feedback("__system__", "bot:discover_sources", session_id)
-            self.answer_action(action, "Discovery in progress", send_message_if_no_callback=False)
-            self.send_codex_request_notice("source discovery", session_id, self.discovery.handoff_message(session_id))
+            self.start_agent_request("Please run a source discovery strategy cycle and propose new high-signal sources.", action)
             return
         if action.action == "tune_scoring":
             allowed, _count = self.database.rate_limit_daily("bot:tune_scoring", self.config.rate_limit_tuning_per_day)
             if not allowed:
                 self.answer_action(action, "Tuning limit reached today")
                 return
-            session_id = self.scoring.create_request()
-            self.database.add_feedback("__system__", "bot:tune_scoring", session_id)
-            self.answer_action(action, "Scoring tuning request created", send_message_if_no_callback=False)
-            self.send_codex_request_notice("scoring tuning", session_id, self.scoring.handoff_message(session_id))
+            self.start_agent_request("Please propose scoring/filtering improvements based on recent feedback and job quality.", action)
             return
         if action.action == "usage":
-            self.answer_action(action, "Usage sent", send_message_if_no_callback=False)
-            self.telegram.send_message(format_usage(self.database.usage_summary()))
+            self.start_agent_request("Please show me a usage and quota report for today.", action)
+            return
+        if action.action == "agent":
+            self.start_agent_request(action.text, action)
+            return
+        if action.action == "agent_help":
+            self.answer_action(action, "Use /agent <request>, /feedback <note>, or /ask <question>.")
+            return
+        if action.action == "history":
+            self.answer_action(action, "History sent", send_message_if_no_callback=False)
+            self.telegram.send_message(self.format_agent_history())
+            return
+        if action.action == "revert":
+            self.handle_revert_action(action)
+            return
+        if action.action in ("list_applied", "list_snoozed", "list_irrelevant"):
+            status = {"list_applied": "applied", "list_snoozed": "snoozed", "list_irrelevant": "rejected"}[action.action]
+            self.answer_action(action, "List sent", send_message_if_no_callback=False)
+            self.telegram.send_message(self.format_jobs_by_status(status))
+            return
+        if action.action == "scoring_history":
+            self.answer_action(action, "Scoring history sent", send_message_if_no_callback=False)
+            self.telegram.send_message(self.format_scoring_history())
             return
         if action.action == "menu":
             self.telegram.send_digest_header("Jobbot ready", "Use the keyboard buttons below.")
             return
         self.answer_action(action, "Unknown bot action")
+
+    def start_agent_request(self, text: str, action) -> None:
+        allowed, wait = self.database.rate_limit_check("bot:agent", self.config.rate_limit_agent_seconds)
+        if not allowed:
+            self.answer_action(action, "Please wait %ss before another /agent request" % wait)
+            return
+        allowed, count = self.database.rate_limit_daily("bot:agent", self.config.rate_limit_agent_per_day)
+        if not allowed:
+            self.answer_action(action, "Daily agent quota reached (%s/%s)" % (count, self.config.rate_limit_agent_per_day))
+            return
+        self.refresh_profile()
+        session_id = self.agent.create_request(text)
+        self.database.add_feedback("__system__", "bot:agent", session_id)
+        self.answer_action(action, "Agent request queued", send_message_if_no_callback=False)
+        self.telegram.send_message(
+            "Agent request queued for OpenClaw/Codex.\nSession: %s\nAudit: daily quota %s/%s"
+            % (session_id, count + 1, self.config.rate_limit_agent_per_day)
+        )
 
     def answer_action(self, action, text: str, send_message_if_no_callback: bool = True) -> None:
         if action.callback_id:
@@ -261,6 +326,9 @@ class JobBot:
             self.database.add_feedback(action.job_id, "irrelevant")
             log_context(LOGGER, logging.INFO, "job_marked_irrelevant", job_id=action.job_id, source_id=job["source_id"])
             self.telegram.answer_callback(action.callback_id, "Marked irrelevant")
+            if hasattr(self.telegram, "delete_message"):
+                self.telegram.delete_message(action.message_id)
+            self.telegram.send_message("Why was it irrelevant? Reply with /feedback <reason> if there is a pattern I should learn.")
             self.recalculate_source_scores()
             return
         if action.action == "snooze_1d":
@@ -268,6 +336,8 @@ class JobBot:
             self.database.add_feedback(action.job_id, "snooze_1d")
             log_context(LOGGER, logging.INFO, "job_snoozed", job_id=action.job_id, source_id=job["source_id"])
             self.telegram.answer_callback(action.callback_id, "Will remind you tomorrow")
+            if hasattr(self.telegram, "delete_message"):
+                self.telegram.delete_message(action.message_id)
             return
         if action.action == "applied":
             if current_status == "applied":
@@ -278,6 +348,8 @@ class JobBot:
             self.database.promote_source_if_test(job["source_id"])
             log_context(LOGGER, logging.INFO, "job_marked_applied", job_id=action.job_id, source_id=job["source_id"])
             self.telegram.answer_callback(action.callback_id, "Marked applied")
+            if hasattr(self.telegram, "delete_message"):
+                self.telegram.delete_message(action.message_id)
             self.recalculate_source_scores()
             return
         if action.action == "cover_note":
@@ -352,6 +424,163 @@ class JobBot:
                 continue
             log_context(LOGGER, logging.INFO, "sending_tuning_approval", session_id=item["session_id"])
             self.telegram.send_tuning_approval(item["session_id"], json.dumps(item["report"], indent=2, sort_keys=True))
+        for item in self.agent.poll_done():
+            if item.get("error"):
+                log_context(LOGGER, logging.WARNING, "sending_agent_failure", session_id=item["session_id"], error=item["error"])
+                self.telegram.send_message("Agent request failed for session %s: %s" % (item["session_id"], item["error"]))
+                continue
+            log_context(LOGGER, logging.INFO, "sending_agent_response", session_id=item["session_id"])
+            self.telegram.send_agent_response(item["session_id"], item["response"])
+
+    def handle_agent_action(self, action) -> None:
+        if action.action == "reject":
+            self.telegram.answer_callback(action.callback_id, "Rejected agent actions")
+            return
+        if action.action != "apply":
+            self.telegram.answer_callback(action.callback_id, "Unknown agent action")
+            return
+        response = read_agent_response(self.config, action.target_id)
+        actions = response.get("proposed_actions") or []
+        selected = [item for item in actions if item.get("kind") != "data_answer"] if action.index is None else [actions[action.index]] if 0 <= action.index < len(actions) else []
+        if selected and selected[0].get("kind") == "data_answer":
+            self.telegram.answer_callback(action.callback_id, "Read-only answer already shown")
+            return
+        if not selected:
+            self.telegram.answer_callback(action.callback_id, "No action selected")
+            return
+        context = AgentActionContext(
+            config=self.config,
+            database=self.database,
+            profile=self.profile,
+            source_reachable=self.source_candidate_reachable,
+            shadow_test=self.scoring.shadow_test,
+            run_l2=self.run_l2_relevance,
+        )
+        applied = 0
+        messages = []
+        run = self.database.get_agent_run(action.target_id)
+        user_intent = run["user_text"] if run else response.get("user_intent_summary", "")
+        for proposed in selected:
+            result = apply_agent_action(proposed, context)
+            status = "applied" if result.applied else "failed"
+            row_id = self.database.record_agent_action(
+                action.target_id,
+                proposed.get("kind", ""),
+                user_intent,
+                proposed.get("summary", ""),
+                proposed.get("payload", {}),
+                status,
+                archive_path=result.archive_path,
+                target_path=result.target_path,
+                result_message=result.message,
+            )
+            if result.applied:
+                applied += 1
+            messages.append("#%s %s: %s" % (row_id, proposed.get("kind", ""), result.message))
+            log_context(
+                LOGGER,
+                logging.INFO if result.applied else logging.WARNING,
+                "agent_action_applied" if result.applied else "agent_action_failed",
+                action_id=row_id,
+                kind=proposed.get("kind"),
+                result_message=result.message,
+            )
+        self.telegram.answer_callback(action.callback_id, "Applied %s/%s action(s)" % (applied, len(selected)))
+        self.telegram.send_message("Agent action results:\n%s\n\nAudit: session %s" % ("\n".join(messages), action.target_id))
+        if hasattr(self.telegram, "delete_message"):
+            self.telegram.delete_message(action.message_id)
+
+    def handle_revert_action(self, action) -> None:
+        try:
+            action_id = int(str(action.target_id or "").strip())
+        except ValueError:
+            self.answer_action(action, "Use /revert <action_id>")
+            return
+        row = self.database.get_agent_action(action_id)
+        if not row:
+            self.answer_action(action, "Agent action #%s not found" % action_id)
+            return
+        if row["status"] == "reverted":
+            self.answer_action(action, "Agent action #%s already reverted" % action_id)
+            return
+        archive_path = Path(row["archive_path"] or "")
+        target_path = Path(row["target_path"] or "")
+        if not archive_path.exists() or not str(target_path):
+            self.answer_action(action, "Agent action #%s has no reversible archive" % action_id)
+            return
+        shutil.copyfile(archive_path, target_path)
+        self.database.update_agent_action_status(action_id, "reverted")
+        revert_id = self.database.record_agent_action(
+            row["session_id"],
+            "revert",
+            "revert %s" % action_id,
+            "Reverted action #%s" % action_id,
+            {"reverted_action_id": action_id},
+            "applied",
+            target_path=str(target_path),
+            result_message="Restored %s from %s" % (target_path, archive_path),
+            revert_target_id=action_id,
+        )
+        self.answer_action(action, "Reverted action #%s as audit #%s" % (action_id, revert_id))
+
+    def handle_profile_action(self, action) -> None:
+        self.refresh_profile()
+        sections = split_profile_sections(self.profile.raw_text)
+        if action.action == "show":
+            self.telegram.send_message(
+                "# About me\n%s\n\nDirectives: %s line(s)" % (sections["about_me"] or "(empty)", len([line for line in sections["directives"].splitlines() if line.strip()]))
+            )
+            return
+        if action.action == "set":
+            new_about = action.text.strip()
+            if not new_about:
+                self.telegram.send_message("Use /profile set <new About me text>")
+                return
+            archive = self.config.profile_path.with_name("profile.%s.md.bak" % utc_now_iso().replace(":", "").replace("-", ""))
+            shutil.copyfile(self.config.profile_path, archive)
+            old_lines = sections["about_me"].splitlines()
+            new_lines = new_about.splitlines()
+            diff = "\n".join(difflib.unified_diff(old_lines, new_lines, fromfile="old About me", tofile="new About me", lineterm=""))
+            self.config.profile_path.write_text(compose_profile(new_about, sections["directives"]), encoding="utf-8")
+            self.refresh_profile()
+            self.telegram.send_message("Profile About me replaced.\nArchive: %s\n\n%s" % (archive, diff[:3000]))
+            return
+        if action.action == "refine":
+            self.start_agent_request("Refine the # About me wording for clarity and grammar without changing intent.", action)
+            return
+        self.telegram.send_message("Unknown profile action")
+
+    def run_l2_relevance(self, rows) -> None:
+        for row in rows:
+            if self.database.latest_l2_verdict(row["id"]):
+                continue
+            try:
+                verdict = self.llm.relevance(self.profile, row)
+            except (BudgetExceeded, LLMError) as exc:
+                log_context(LOGGER, logging.WARNING, "l2_relevance_skipped", job_id=row["id"], error=str(exc))
+                return
+            self.database.save_l2_verdict(
+                row["id"],
+                verdict["verdict"],
+                verdict["priority"],
+                verdict["reason"],
+                verdict.get("evidence_phrases", []),
+                self.config.openai_model if self.config.openai_api_key else "local-fallback",
+            )
+            log_context(
+                LOGGER,
+                logging.INFO,
+                "l2_relevance_saved",
+                job_id=row["id"],
+                verdict=verdict["verdict"],
+                priority=verdict["priority"],
+            )
+
+    def refresh_profile(self) -> None:
+        self.profile = load_profile(self.config)
+        self.discovery.profile = self.profile
+        self.scoring.profile = self.profile
+        self.agent.profile = self.profile
 
     def handle_discovery_action(self, action) -> None:
         row = self.database.get_discovery_run(action.target_id)
@@ -495,6 +724,38 @@ class JobBot:
                     row["applied_count"] or 0,
                 )
             )
+        return "\n".join(lines)
+
+    def format_agent_history(self) -> str:
+        rows = self.database.recent_agent_actions(10)
+        if not rows:
+            return "No agent actions yet."
+        lines = ["Recent agent actions:"]
+        for row in rows:
+            lines.append(
+                "#%s %s %s - %s"
+                % (row["id"], row["kind"], row["status"], (row["summary"] or row["result_message"] or "")[:120])
+            )
+        lines.append("\nUse /revert <id> for reversible applied file edits.")
+        return "\n".join(lines)
+
+    def format_jobs_by_status(self, status: str) -> str:
+        rows = self.database.recent_jobs_by_status(status, 10)
+        if not rows:
+            return "No recent %s jobs." % status
+        lines = ["Recent %s jobs:" % status]
+        for row in rows:
+            lines.append("- %s - %s (%s)\n  %s" % (row["title"], row["company"], row["score"] or 0, row["url"]))
+        return "\n".join(lines)
+
+    def format_scoring_history(self) -> str:
+        with self.database.connection() as conn:
+            rows = list(conn.execute("select * from scoring_versions order by id desc limit 10"))
+        if not rows:
+            return "No scoring versions recorded yet."
+        lines = ["Scoring history:"]
+        for row in rows:
+            lines.append("v%s %s %s" % (row["version"], row["status"], row["activated_at"] or ""))
         return "\n".join(lines)
 
     def serve(self) -> None:

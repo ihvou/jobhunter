@@ -1,6 +1,6 @@
 import unittest
 
-from jobbot.telegram import TelegramClient, job_keyboard, main_menu_keyboard, parse_callback, parse_message
+from jobbot.telegram import TelegramClient, agent_actions_keyboard, job_keyboard, main_menu_keyboard, parse_callback, parse_message
 
 
 class TelegramTests(unittest.TestCase):
@@ -21,6 +21,9 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(parse_callback("tune:apply:session1").scope, "tune")
         self.assertEqual(parse_callback("tune:reject:session1").action, "reject")
         self.assertEqual(parse_callback("cover:override:job1").scope, "cover")
+        agent = parse_callback("agent:apply:session1:2")
+        self.assertEqual(agent.scope, "agent")
+        self.assertEqual(agent.index, 2)
 
     def test_parse_reply_keyboard_messages_and_commands(self):
         cases = {
@@ -39,6 +42,29 @@ class TelegramTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_message(text).action, expected)
         self.assertIsNone(parse_message("hello"))
+
+    def test_parse_agent_commands(self):
+        action = parse_message("/agent why did you miss this URL?")
+        self.assertEqual(action.scope, "bot")
+        self.assertEqual(action.action, "agent")
+        self.assertIn("miss this URL", action.text)
+        feedback = parse_message("/feedback skip German jobs")
+        self.assertTrue(feedback.text.startswith("User feedback:"))
+        revert = parse_message("/revert 12")
+        self.assertEqual(revert.action, "revert")
+        self.assertEqual(revert.target_id, "12")
+
+    def test_agent_keyboard_skips_data_answer_buttons(self):
+        keyboard = agent_actions_keyboard(
+            "s1",
+            [
+                {"kind": "data_answer", "summary": "read only"},
+                {"kind": "directive_edit", "summary": "write"},
+            ],
+        )
+        labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+        self.assertIn("Apply 2", labels)
+        self.assertNotIn("Apply 1", labels)
 
     def test_main_menu_is_reply_keyboard(self):
         keyboard = main_menu_keyboard()

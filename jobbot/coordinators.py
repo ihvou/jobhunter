@@ -9,7 +9,7 @@ from .config import AppConfig
 from .database import Database
 from .logging_setup import log_context
 from .models import SourceConfig, UserProfile, utc_now_iso
-from .scoring import load_scoring_rules, score_job
+from .scoring import _json_list, load_scoring_rules, score_job
 
 LOGGER = logging.getLogger(__name__)
 SUPPORTED_RULE_KINDS = {
@@ -140,6 +140,7 @@ class ScoringCoordinator:
             },
             "current_rules": rules,
             "recent_feedback": self.feedback_summary(),
+            "training_signals": self.training_signals(),
             "score_distribution": score_distribution(recent),
             "instructions": (
                 "Propose updated scoring rules using only the supported DSL. Use word-boundary matching. "
@@ -204,7 +205,7 @@ class ScoringCoordinator:
         return completed
 
     def shadow_test(self, proposed_rules: Dict) -> Dict:
-        recent = self.database.recent_jobs(100)
+        recent = self.database.recent_jobs(500)
         proposed_scores = []
         current_scores = []
         false_rejects = 0
@@ -271,6 +272,14 @@ class ScoringCoordinator:
         rows = self.database.source_feedback_metrics()
         return {row["id"]: {"irrelevant": row["irrelevant_count"], "cover_note": row["cover_note_count"], "applied": row["applied_count"]} for row in rows}
 
+    def training_signals(self) -> Dict:
+        return {
+            "applied": [training_signal(row) for row in self.database.feedback_jobs("applied", 50)],
+            "irrelevant": [training_signal(row) for row in self.database.feedback_jobs("irrelevant", 50)],
+            "cover_note_requested": [training_signal(row) for row in self.database.feedback_jobs("cover_note", 50)],
+            "snoozed": [training_signal(row) for row in self.database.feedback_jobs("snooze_1d", 50)],
+        }
+
 
 def row_to_job(row):
     from .models import Job
@@ -290,6 +299,20 @@ def row_to_job(row):
         description=row["description"] or "",
         posted_at=row["posted_at"],
     )
+
+
+def training_signal(row) -> Dict:
+    return {
+        "title": row["title"],
+        "company": row["company"],
+        "source_id": row["source_id"],
+        "description_excerpt": (row["description"] or "")[:500],
+        "fired_rules": _json_list(row["fired_rules_json"] if "fired_rules_json" in row.keys() else None),
+        "score": row["score"] if "score" in row.keys() else None,
+        "l2_verdict": row["l2_verdict"] if "l2_verdict" in row.keys() else None,
+        "l2_reason": row["l2_reason"] if "l2_reason" in row.keys() else None,
+        "feedback_details": row["details"] if "details" in row.keys() else None,
+    }
 
 
 def score_distribution(rows) -> Dict:
@@ -360,6 +383,7 @@ def serialize_source_for_agent(source: SourceConfig) -> Dict:
         "risk_level": source.risk_level,
         "query": source.query,
         "poll_frequency_minutes": source.poll_frequency_minutes,
+        "priority": source.priority,
     }
 
 

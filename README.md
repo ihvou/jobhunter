@@ -23,10 +23,10 @@ Everything is on-demand.
 
 | Telegram Keyboard Button | What Happens |
 |---|---|
-| `Get more jobs` | Collects enabled sources once, dedupes, scores, and sends only jobs not already shown |
-| `Update sources` | Writes a discovery request; the OpenClaw/Codex worker proposes sources; you approve them in Telegram |
-| `Tune scoring` | Writes a tuning request; the OpenClaw/Codex worker proposes rules; jobbot shadow-tests before you apply them |
-| `Usage` | Shows OpenAI API spend and local usage counters |
+| `Get more jobs` | Collects enabled sources once, dedupes, L1-scores, runs the bounded L2 relevance pass, and sends only jobs not already shown |
+| `Update sources` | Routes a canned `/agent` request to OpenClaw/Codex; proposed source edits require Telegram approval |
+| `Tune scoring` | Routes a canned `/agent` request; proposed rule edits require Telegram approval and are audit/revert tracked |
+| `Usage` | Routes a canned `/agent` data request for usage/quota analysis |
 
 There is no cron-driven collection. `serve` only polls Telegram and the shared workspace.
 
@@ -42,6 +42,20 @@ cp input/profile.example.md input/profile.local.md
 
 Edit `input/profile.local.md` with target roles, role goals, strengths, location constraints, exclusions, and salary floor. The parser extracts useful titles and keywords automatically.
 
+Use one file with two sections:
+
+```markdown
+# About me
+
+Describe your background, target roles, constraints, and preferences.
+
+# Directives
+
+[2026-05-02] Skip Product Marketing Manager, MLOps, DevOps, pure engineering, and jobs requiring languages other than English, Ukrainian, or Russian.
+```
+
+`# About me` is the stable profile. `# Directives` is the living instruction log used by `/agent`, source discovery, scoring tuning, and the L2 relevance pass.
+
 Optional CV context for cover notes:
 
 ```bash
@@ -50,13 +64,7 @@ cp input/cv.example.md input/cv.local.md
 
 The CV is only used for cover-note generation, and only a bounded excerpt is sent to the OpenAI API.
 
-Optional structured overrides:
-
-```bash
-cp config/profile.example.json config/profile.local.json
-```
-
-Leave `config/profile.local.json` out if the free-text profile is enough.
+Legacy `config/profile.local.json` is no longer the preferred source of truth. On init, jobbot folds it into `input/profile.local.md` and backs it up.
 
 ### 2. Configure Environment
 
@@ -70,13 +78,15 @@ Fill the values you approve:
 |---|---:|---|
 | `TELEGRAM_BOT_TOKEN` | yes | Telegram bot token from BotFather |
 | `TELEGRAM_ALLOWED_CHAT_ID` | yes | Restricts bot access to your chat |
-| `OPENAI_API_KEY` | optional | Cover notes only, protected by local budget caps |
+| `OPENAI_API_KEY` | optional | Cover notes and the optional L2 job relevance pass, protected by local budget caps |
 | `OPENAI_MODEL` | optional | Defaults to `gpt-4o-mini` |
 | `EMAIL_IMAP_*` | optional | Read-only job-alert mailbox/label |
 | `JOBBOT_CODEX_HANDOFF_MODE` | optional | `auto` uses the worker; `manual` sends paste-ready prompts to Telegram |
 | `OPENCLAW_CODEX_*` | optional | Codex worker model, poll interval, and timeout |
+| `OPENCLAW_AGENT_MAX_*` | optional | Per-agent-turn caps for Codex turns, SQL reads, file reads, HTTP fetches, and prompt size |
+| `JOBBOT_L2_MAX_JOBS` | optional | Max jobs per `Get more jobs` click sent to the L2 relevance pass; default `30` |
 
-Do not commit `.env`, `input/profile.local.md`, `input/cv.local.md`, `config/profile.local.json`, or `data/`.
+Do not commit `.env`, `input/profile.local.md`, `input/cv.local.md`, local profile backups, or `data/`.
 
 ### 3. Configure Sources
 
@@ -122,9 +132,23 @@ Use Telegram for the daily loop.
 | 4 | Click `Give me cover note` only for jobs worth attention |
 | 5 | Apply manually outside the bot |
 | 6 | Click `Applied` after submitting |
-| 7 | Use `Usage` to check API spend |
+| 7 | Use `Usage`, `/history`, and `/revert <id>` to audit agent work |
 
-Per-job scoring is deterministic and free. The LLM never scores every job.
+L1 scoring is deterministic and free. After L1, jobbot runs a bounded L2 relevance pass on at most `JOBBOT_L2_MAX_JOBS` candidates per click. With `gpt-4o-mini` this is intended to stay around a few tenths of a cent per click; if `OPENAI_API_KEY` is absent, a local fallback rejects only obvious bad role families such as Product Marketing, MLOps, DevOps, SRE, and unsupported-language requirements.
+
+Useful Telegram commands:
+
+| Command | Use |
+|---|---|
+| `/agent <text>` | Ask OpenClaw/Codex to investigate, answer, and propose bounded actions |
+| `/feedback <text>` | Add free-form strategy/filter/source feedback through the same agent path |
+| `/ask <text>` | Ask for a read-only data answer using allowed tools |
+| `/history` | Show recent agent-applied actions |
+| `/revert <id>` | Restore the archived file for a reversible agent action |
+| `/profile` | Show current `# About me` and directive count |
+| `/profile set <text>` | Replace `# About me`, preserving `# Directives` |
+| `/profile refine` | Ask the agent to propose a profile rewrite for approval |
+| `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status |
 
 ## OpenClaw And Codex Flows
 
@@ -134,6 +158,7 @@ Per-job scoring is deterministic and free. The LLM never scores every job.
 |---|---|---|
 | `./openclaw/workspace/discovery` | `/jobbot/workspace/discovery` | `/openclaw/workspace/discovery` |
 | `./openclaw/workspace/tuning` | `/jobbot/workspace/tuning` | `/openclaw/workspace/tuning` |
+| `./openclaw/workspace/agent` | `/jobbot/workspace/agent` | `/openclaw/workspace/agent` |
 
 The OpenClaw service is a small worker image with Codex CLI installed. It watches the shared workspace and invokes `codex exec` automatically when request files appear.
 
@@ -145,25 +170,48 @@ One-time Codex subscription login:
 
 That login stores Codex auth in `./openclaw/codex-home`, which is gitignored. The repo does not mount your host home directory or browser profile.
 
-`Update sources` writes:
+`/agent`, `Update sources`, `Tune scoring`, and `Usage` write:
 
 ```text
-/jobbot/workspace/discovery/request-<session>.json
-/jobbot/workspace/discovery/status-<session>.json
+/jobbot/workspace/agent/request-<session>.json
+/jobbot/workspace/agent/status-<session>.json
 ```
 
 The worker writes:
 
 ```text
-/openclaw/workspace/discovery/response-<session>.json
-/openclaw/workspace/discovery/status-<session>.json
+/openclaw/workspace/agent/response-<session>.json
+/openclaw/workspace/agent/status-<session>.json
 ```
 
-When status is `done`, `jobbot` posts an approval prompt. Approved sources land in `config/sources.json` as `status: "test"`.
+When status is `done`, `jobbot` always shows the agent answer. If the response includes write actions, jobbot renders per-action approval buttons plus `Apply all` / `Reject all`.
 
-`Tune scoring` follows the same pattern in `tuning/`. `jobbot` shadow-tests proposed scoring rules against recent jobs and feedback before offering `Apply`, `Reject`, or `Show diff`.
+The agent response contract is:
 
-Important boundary: OpenAI API spend in this repo is only for cover notes. Source discovery and scoring tuning use your Codex CLI login inside the OpenClaw worker. Keep `JOBBOT_CODEX_HANDOFF_MODE=manual` only if you want the older paste-into-ChatGPT fallback.
+```json
+{
+  "user_intent_summary": "...",
+  "answer": "...",
+  "evidence_table": [],
+  "proposed_actions": [
+    {"kind": "directive_edit", "summary": "...", "payload": {}}
+  ]
+}
+```
+
+Supported action kinds are `directive_edit`, `profile_edit`, `sources_proposal`, `scoring_rule_proposal`, `data_answer`, `human_followup`, `rescore_jobs`, `bulk_update_jobs`, and `backup_export`. Unknown kinds are dropped and logged; no action kind executes arbitrary code.
+
+Legacy `discover-sources` and `tune-scoring` CLI commands still write the older `discovery/` and `tuning/` contracts for debugging.
+
+Important boundary: source strategy, parser investigation, and scoring/filter strategy use your Codex CLI login inside the OpenClaw worker. Per-job L2 relevance and cover notes use the OpenAI API only when `OPENAI_API_KEY` is set and budget gates allow it.
+
+The worker exposes only read-only tools to Codex:
+
+| Tool | Guardrail |
+|---|---|
+| `query_sql` | `SELECT` only, capped rows, SQLite mounted read-only |
+| `read_file` / `list_dir` | Allowlisted paths only; `.env`, Codex auth, home, and system paths blocked |
+| `http_fetch` | HTTP(S) only, private hosts blocked, timeout and excerpt capped |
 
 ## Email Alerts
 
@@ -198,12 +246,13 @@ The IMAP collector uses per-source UID high-water marks, so old messages are not
 
 | Cost Area | Control |
 |---|---|
-| Per-job scoring | No LLM calls |
+| L1 per-job scoring | No LLM calls |
+| L2 job relevance | OpenAI API on top L1 candidates only, default max `30` per click, cached per job |
 | Cover notes | OpenAI API, `gpt-4o-mini` default, daily/monthly budget gate |
 | Cover-note overage | Telegram asks for explicit one-time override |
-| Source discovery | Codex subscription path through OpenClaw, not OpenAI API |
-| Scoring tuning | Codex subscription path through OpenClaw, not OpenAI API |
-| Abuse prevention | Collection 1/10 minutes, discovery 3/day, tuning 3/day, cover notes 10/day |
+| Source/filter strategy | Codex subscription path through OpenClaw, not OpenAI API |
+| Agent guardrails | 10s cooldown, 20/day default, capped Codex turns, SQL reads, file reads, HTTP fetches |
+| Abuse prevention | Collection 1/10 minutes, agent 20/day, cover notes 10/day, write actions require Telegram approval |
 
 Check local spend:
 
@@ -284,10 +333,10 @@ The compose file uses `/jobbot/...` paths, read-only root filesystem for `jobbot
 | Path | Contents |
 |---|---|
 | `data/jobs.sqlite` | Jobs, scores, feedback, drafts, digests, usage logs |
-| `config/` | Sources, scoring rules, budgets, local structured profile |
-| `input/profile.local.md` | Private search profile |
+| `config/` | Sources, scoring rules, and budgets |
+| `input/profile.local.md` | Private search profile with `# About me` and `# Directives` |
 | `input/cv.local.md` | Private CV context |
-| `openclaw/workspace/` | Transient source/tuning request/response JSON |
+| `openclaw/workspace/` | Transient discovery/tuning/agent request/response JSON |
 
 Back up SQLite safely:
 
@@ -303,9 +352,10 @@ sqlite3 data/jobs.sqlite ".backup 'data/backup/jobs-$(date +%Y%m%d-%H%M%S).sqlit
 | No Telegram messages | Verify bot token, allowed chat ID, and `docker compose logs jobbot` |
 | `Get more jobs` says wait | Collection rate limit is working; try again after the shown wait |
 | Digest is empty | Inspect logs, loosen scoring rules, or add/approve more sources |
+| Good jobs are hidden | Inspect L2 verdicts in logs/database; add a `/feedback` directive and use `/agent` to tune filters |
 | Same job repeats | Check `digest_log`; snoozed due jobs are allowed to reappear once |
 | Cover note denied | Use `Usage` and budget env vars; approve the one-time override only if intended |
-| OpenClaw proposal never appears | Run `docker compose --profile openclaw logs -f openclaw-gateway` and inspect `openclaw/workspace/*/status-*.json` |
+| Agent proposal never appears | Run `docker compose --profile openclaw logs -f openclaw-gateway` and inspect `openclaw/workspace/agent/status-*.json` |
 | Email alerts missing | Confirm IMAP folder, app password, source `status`, and source `query` |
 
 ## Safety Notes
@@ -316,3 +366,4 @@ sqlite3 data/jobs.sqlite ".backup 'data/backup/jobs-$(date +%Y%m%d-%H%M%S).sqlit
 - Keep OpenClaw bound to localhost unless you deliberately add auth and network controls.
 - Keep OpenAI keys scoped to a dedicated low-budget project.
 - Apply manually; then click `Applied`.
+- Treat `/agent` approvals like config changes: read the proposed action summary, apply only what you want, and use `/history` plus `/revert <id>` if a reversible file edit goes sideways.

@@ -115,6 +115,49 @@ Location: %s
             return generated.strip()
         return fallback_cover_note(profile, job_row)
 
+    def relevance(self, profile: UserProfile, job_row) -> Dict:
+        prompt = """Classify whether this job is relevant for the candidate.
+
+Return JSON only:
+{
+  "verdict": "relevant|borderline|not_relevant",
+  "priority": "high|medium|low",
+  "reason": "<=200 chars",
+  "evidence_phrases": ["<=80 chars", "<=80 chars", "<=80 chars"]
+}
+
+Candidate profile and directives:
+<<profile_untrusted>>
+%s
+<</profile_untrusted>>
+
+Job:
+Title: %s
+Company: %s
+Location: %s
+
+<<job_description_untrusted>>
+%s
+<</job_description_untrusted>>
+""" % (
+            profile.raw_text[:12000],
+            job_row["title"],
+            job_row["company"],
+            job_row["location"] or "",
+            (job_row["description"] or "")[:1500],
+        )
+        if not self.config.openai_api_key:
+            return fallback_relevance(profile, job_row)
+        generated = self.generate("job_l2_relevance", prompt, max_output_tokens=250)
+        if not generated:
+            return fallback_relevance(profile, job_row)
+        try:
+            parsed = json.loads(extract_json_object(generated))
+        except Exception as exc:
+            log_context(LOGGER, logging.WARNING, "l2_relevance_parse_failed", error=str(exc), text=generated[:500])
+            return fallback_relevance(profile, job_row)
+        return normalize_relevance(parsed)
+
 def extract_response_text(data: Dict) -> str:
     if "output_text" in data and data["output_text"]:
         return str(data["output_text"])
@@ -131,6 +174,96 @@ def extract_usage(data: Dict) -> Tuple[Optional[int], Optional[int]]:
     input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
     output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
     return input_tokens, output_tokens
+
+
+def extract_json_object(text: str) -> str:
+    text = str(text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
+
+
+def normalize_relevance(parsed: Dict) -> Dict:
+    verdict = str(parsed.get("verdict") or "borderline").strip().lower()
+    priority = str(parsed.get("priority") or "medium").strip().lower()
+    if verdict not in ("relevant", "borderline", "not_relevant"):
+        verdict = "borderline"
+    if priority not in ("high", "medium", "low"):
+        priority = "medium"
+    evidence = parsed.get("evidence_phrases") or []
+    if not isinstance(evidence, list):
+        evidence = []
+    return {
+        "verdict": verdict,
+        "priority": priority,
+        "reason": str(parsed.get("reason") or "L2 relevance checked")[:200],
+        "evidence_phrases": [str(item)[:80] for item in evidence[:3]],
+    }
+
+
+def fallback_relevance(profile: UserProfile, job_row) -> Dict:
+    text = " ".join(
+        [
+            str(job_row["title"] or ""),
+            str(job_row["company"] or ""),
+            str(job_row["location"] or ""),
+            str(job_row["description"] or "")[:1500],
+        ]
+    ).lower()
+    title = str(job_row["title"] or "").lower()
+    excluded_title = [
+        "product marketing",
+        "marketing manager",
+        "growth marketing",
+        "mlops",
+        "machine learning operations",
+        "devops",
+        "site reliability",
+        "sre",
+    ]
+    excluded_language = [
+        "german required",
+        "fluent german",
+        "french required",
+        "spanish required",
+        "polish required",
+        "dutch required",
+    ]
+    if any(term in title for term in excluded_title):
+        return {
+            "verdict": "not_relevant",
+            "priority": "low",
+            "reason": "Rejected by local L2 fallback: title matches excluded role family.",
+            "evidence_phrases": [],
+        }
+    if any(term in text for term in excluded_language):
+        return {
+            "verdict": "not_relevant",
+            "priority": "low",
+            "reason": "Rejected by local L2 fallback: unsupported language requirement.",
+            "evidence_phrases": [],
+        }
+    ai_terms = ["claude", "codex", "llm", "ai agent", "ai automation", "workflow automation", "prototype"]
+    product_terms = ["product manager", "product lead", "product owner", "product builder", "head of product"]
+    if any(term in text for term in ai_terms) and any(term in text for term in product_terms):
+        return {
+            "verdict": "relevant",
+            "priority": "high",
+            "reason": "Local L2 fallback: combines product role signal with AI/tooling signal.",
+            "evidence_phrases": [],
+        }
+    return {
+        "verdict": "borderline",
+        "priority": "medium",
+        "reason": "Local L2 fallback: no obvious exclusion; needs human review.",
+        "evidence_phrases": [],
+    }
 
 
 def safe_error_text(body: str) -> str:

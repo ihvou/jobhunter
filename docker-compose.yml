@@ -32,7 +32,7 @@ services:
     volumes:
       - ./data:/jobbot/data
       - ./config:/jobbot/config
-      - ./input:/jobbot/input:ro
+      - ./input:/jobbot/input
       - ./openclaw/workspace:/jobbot/workspace
     command: ["python", "-m", "jobbot", "serve"]
     read_only: true
@@ -60,10 +60,19 @@ services:
       OPENCLAW_CODEX_MODEL: ${OPENCLAW_CODEX_MODEL:-}
       OPENCLAW_POLL_SECONDS: ${OPENCLAW_POLL_SECONDS:-5}
       OPENCLAW_CODEX_TIMEOUT_SECONDS: ${OPENCLAW_CODEX_TIMEOUT_SECONDS:-900}
+      OPENCLAW_AGENT_MAX_CODEX_TURNS: ${OPENCLAW_AGENT_MAX_CODEX_TURNS:-5}
+      OPENCLAW_AGENT_MAX_SQL_QUERIES: ${OPENCLAW_AGENT_MAX_SQL_QUERIES:-20}
+      OPENCLAW_AGENT_MAX_FILE_READS: ${OPENCLAW_AGENT_MAX_FILE_READS:-10}
+      OPENCLAW_AGENT_MAX_HTTP_FETCHES: ${OPENCLAW_AGENT_MAX_HTTP_FETCHES:-5}
+      OPENCLAW_MAX_PROMPT_CHARS: ${OPENCLAW_MAX_PROMPT_CHARS:-60000}
+      OPENCLAW_JOBBOT_DB_PATH: /jobbot/data/jobs.sqlite
     volumes:
       - ./openclaw/codex-home:/openclaw/codex-home
       - ./openclaw/prompts:/openclaw/prompts:ro
       - ./openclaw/workspace:/openclaw/workspace
+      - ./config:/jobbot/config:ro
+      - ./input:/jobbot/input:ro
+      - ./data:/jobbot/data:ro
     read_only: true
     tmpfs:
       - /tmp

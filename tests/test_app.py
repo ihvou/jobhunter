@@ -32,6 +32,9 @@ class FakeTelegram:
     def send_long_message(self, text):
         self.messages.append((text, None))
 
+    def send_agent_response(self, session_id, response):
+        self.messages.append(("agent", session_id, response))
+
     def answer_callback(self, callback_id, text):
         self.answers.append(text)
 
@@ -114,18 +117,15 @@ class AppTests(unittest.TestCase):
             bot.handle_action(TelegramAction(scope="bot", action="menu"))
             self.assertEqual(bot.telegram.messages[-1], ("Jobbot ready", "Use the keyboard buttons below."))
 
-    def test_bot_header_callbacks_write_requests_and_usage(self):
+    def test_bot_header_callbacks_write_agent_requests(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = JobBot(config_for(tmp))
             bot.telegram = FakeTelegram()
             bot.handle_action(TelegramAction(scope="bot", action="discover_sources", callback_id="cb"))
             bot.handle_action(TelegramAction(scope="bot", action="tune_scoring", callback_id="cb"))
             bot.handle_action(TelegramAction(scope="bot", action="usage", callback_id="cb"))
-            self.assertTrue(list((bot.config.workspace_dir / "discovery").glob("request-*.json")))
-            self.assertTrue(list((bot.config.workspace_dir / "tuning").glob("request-*.json")))
-            self.assertTrue(list((bot.config.workspace_dir / "discovery").glob("handoff-*.md")))
-            self.assertTrue(any("queued for automated OpenClaw/Codex worker" in str(message[0]) for message in bot.telegram.messages))
-            self.assertTrue(any(str(message[0]).startswith("Usage") for message in bot.telegram.messages))
+            self.assertEqual(len(list((bot.config.workspace_dir / "agent").glob("request-*.json"))), 1)
+            self.assertTrue(any("Agent request queued" in str(message[0]) for message in bot.telegram.messages))
 
     def test_send_digest_filters_by_min_show_score(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,6 +152,31 @@ class AppTests(unittest.TestCase):
 
             self.assertEqual(bot.telegram.jobs, [])
             self.assertEqual(bot.telegram.messages[0][0], "No strong new matches right now")
+
+    def test_l2_relevance_filters_obvious_bad_role_family(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 50}}', encoding="utf-8")
+            bot = JobBot(config)
+            bot.telegram = FakeTelegram()
+            good_id = add_scored_job(bot, "good", score=80)
+            bad_id, _ = bot.database.upsert_job(
+                Job(
+                    source_id="s",
+                    source_name="S",
+                    external_id="bad",
+                    url="https://example.com/bad",
+                    title="Product Marketing Manager",
+                    company="C",
+                    description="Own launches and messaging.",
+                )
+            )
+            bot.database.save_score(bad_id, ScoreResult(score=80, hard_reject=False))
+
+            bot.send_digest()
+
+            self.assertIn(good_id, bot.telegram.jobs)
+            self.assertNotIn(bad_id, bot.telegram.jobs)
 
     def test_job_feedback_callbacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -386,7 +411,7 @@ class AppTests(unittest.TestCase):
             bot = JobBot(config)
             bot.telegram = FakeTelegram()
             bot.handle_action(TelegramAction(scope="bot", action="discover_sources", callback_id="cb"))
-            request_path = next((config.workspace_dir / "discovery").glob("request-*.json"))
+            request_path = next((config.workspace_dir / "agent").glob("request-*.json"))
             request = request_path.read_text(encoding="utf-8")
             self.assertNotIn("Authorization", request)
             self.assertNotIn("secret", request)

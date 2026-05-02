@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 class Database:
@@ -45,6 +45,9 @@ class Database:
             if current < 3:
                 migrate_v3(conn)
                 set_schema_version(conn, 3)
+            if current < 4:
+                migrate_v4(conn)
+                set_schema_version(conn, 4)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -59,8 +62,8 @@ class Database:
                     """
                     insert into sources (
                         id, name, type, url, risk_level, poll_frequency_minutes,
-                        enabled, status, score, created_by, imap_last_uid
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, 50, ?, ?)
+                        enabled, status, score, created_by, imap_last_uid, priority
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, 50, ?, ?, ?)
                     on conflict(id) do update set
                         name = excluded.name,
                         type = excluded.type,
@@ -69,7 +72,8 @@ class Database:
                         poll_frequency_minutes = excluded.poll_frequency_minutes,
                         enabled = excluded.enabled,
                         status = excluded.status,
-                        created_by = excluded.created_by
+                        created_by = excluded.created_by,
+                        priority = excluded.priority
                     """,
                     (
                         source.id,
@@ -82,6 +86,7 @@ class Database:
                         source.status,
                         source.created_by,
                         source.imap_last_uid,
+                        source.priority,
                     ),
                 )
 
@@ -247,18 +252,26 @@ class Database:
             if score.hard_reject:
                 conn.execute("update jobs set status = 'rejected' where id = ? and status = 'new'", (job_id,))
 
-    def jobs_for_digest(self, limit: int, min_score: int = 0) -> List[sqlite3.Row]:
+    def jobs_for_digest(self, limit: int, min_score: int = 0, include_l2_rejected: bool = False) -> List[sqlite3.Row]:
         now = utc_now_iso()
+        l2_filter = "" if include_l2_rejected else "and (l2.verdict is null or l2.verdict in ('relevant', 'borderline'))"
         with self.connection() as conn:
             rows = list(
                 conn.execute(
                     """
-                    select j.*, s.score, s.reasons_json, s.concerns_json, src.status as source_status
+                    select j.*, s.score, s.reasons_json, s.concerns_json, s.fired_rules_json,
+                           src.status as source_status,
+                           l2.verdict as l2_verdict,
+                           l2.priority as l2_priority,
+                           l2.reason as l2_reason,
+                           l2.evidence_json as l2_evidence_json
                     from jobs j
                     join job_scores s on s.job_id = j.id
                     left join sources src on src.id = j.source_id
+                    left join job_l2_verdicts l2 on l2.job_id = j.id
                     where s.hard_reject = 0
                       and s.score >= ?
+                      %s
                       and (
                         j.status = 'new'
                         or (j.status = 'snoozed' and j.snoozed_until <= ?)
@@ -268,9 +281,14 @@ class Database:
                         where dl.job_id = j.id
                           and j.status != 'snoozed'
                       )
-                    order by s.score desc, j.first_seen_at desc
+                    order by
+                      case when j.status = 'new' then 0 else 1 end,
+                      case l2.priority when 'high' then 3 when 'medium' then 2 when 'low' then 1 else 0 end desc,
+                      s.score desc,
+                      j.first_seen_at desc
                     limit ?
-                    """,
+                    """
+                    % l2_filter,
                     (min_score, now, limit),
                 )
             )
@@ -329,6 +347,50 @@ class Database:
                 (job_id, action, details, utc_now_iso()),
             )
             return True
+
+    def save_l2_verdict(
+        self,
+        job_id: str,
+        verdict: str,
+        priority: str,
+        reason: str,
+        evidence: List[str],
+        model: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into job_l2_verdicts (
+                    job_id, verdict, priority, reason, evidence_json, scored_at, model, input_tokens, output_tokens
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(job_id) do update set
+                    verdict = excluded.verdict,
+                    priority = excluded.priority,
+                    reason = excluded.reason,
+                    evidence_json = excluded.evidence_json,
+                    scored_at = excluded.scored_at,
+                    model = excluded.model,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens
+                """,
+                (
+                    job_id,
+                    verdict,
+                    priority,
+                    reason,
+                    json.dumps(evidence or []),
+                    utc_now_iso(),
+                    model,
+                    int(input_tokens or 0),
+                    int(output_tokens or 0),
+                ),
+            )
+
+    def latest_l2_verdict(self, job_id: str) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute("select * from job_l2_verdicts where job_id = ?", (job_id,)).fetchone()
 
     def save_draft(self, job_id: str, draft_type: str, content: str) -> None:
         with self.connection() as conn:
@@ -402,6 +464,120 @@ class Database:
             "last_discovery": last_discovery["requested_at"] if last_discovery else "",
             "last_scoring": last_scoring["activated_at"] if last_scoring else "",
         }
+
+    def create_agent_run(self, session_id: str, user_text: str, request_path: str, status_path: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into agent_runs (session_id, user_text, requested_at, status, request_path, status_path)
+                values (?, ?, ?, 'pending', ?, ?)
+                """,
+                (session_id, user_text, utc_now_iso(), request_path, status_path),
+            )
+
+    def update_agent_run(self, session_id: str, **fields) -> None:
+        if not fields:
+            return
+        with self.connection() as conn:
+            assignments = ", ".join("%s = ?" % key for key in fields)
+            conn.execute("update agent_runs set %s where session_id = ?" % assignments, tuple(fields.values()) + (session_id,))
+
+    def pending_agent_runs(self) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(conn.execute("select * from agent_runs where status in ('pending', 'running')"))
+
+    def get_agent_run(self, session_id: str) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute("select * from agent_runs where session_id = ?", (session_id,)).fetchone()
+
+    def record_agent_action(
+        self,
+        session_id: str,
+        kind: str,
+        user_intent: str,
+        summary: str,
+        payload: Dict,
+        status: str,
+        archive_path: str = "",
+        target_path: str = "",
+        result_message: str = "",
+        revert_target_id: Optional[int] = None,
+    ) -> int:
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                insert into agent_actions (
+                    session_id, kind, user_intent, summary, diff_blob, payload_json,
+                    applied_at, applied_by_user, status, archive_path, target_path,
+                    result_message, revert_target_id
+                ) values (?, ?, ?, ?, ?, ?, ?, 'telegram', ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    kind,
+                    user_intent,
+                    summary,
+                    json.dumps(payload, sort_keys=True),
+                    json.dumps(payload, sort_keys=True),
+                    utc_now_iso(),
+                    status,
+                    archive_path,
+                    target_path,
+                    result_message,
+                    revert_target_id,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def recent_agent_actions(self, limit: int = 10) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(conn.execute("select * from agent_actions order by id desc limit ?", (limit,)))
+
+    def get_agent_action(self, action_id: int) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute("select * from agent_actions where id = ?", (action_id,)).fetchone()
+
+    def update_agent_action_status(self, action_id: int, status: str) -> None:
+        with self.connection() as conn:
+            conn.execute("update agent_actions set status = ? where id = ?", (status, action_id))
+
+    def recent_jobs_by_status(self, status: str, limit: int = 10) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """
+                    select j.*, s.score, s.reasons_json, s.concerns_json, src.status as source_status,
+                           l2.verdict as l2_verdict, l2.priority as l2_priority, l2.reason as l2_reason
+                    from jobs j
+                    left join job_scores s on s.job_id = j.id
+                    left join sources src on src.id = j.source_id
+                    left join job_l2_verdicts l2 on l2.job_id = j.id
+                    where j.status = ?
+                    order by j.last_seen_at desc
+                    limit ?
+                    """,
+                    (status, limit),
+                )
+            )
+
+    def feedback_jobs(self, action: str, limit: int = 50) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """
+                    select j.*, f.action, f.details, f.created_at as feedback_at,
+                           s.score, s.fired_rules_json, l2.verdict as l2_verdict, l2.reason as l2_reason
+                    from job_feedback f
+                    join jobs j on j.id = f.job_id
+                    left join job_scores s on s.job_id = j.id
+                    left join job_l2_verdicts l2 on l2.job_id = j.id
+                    where f.action = ?
+                    order by f.created_at desc
+                    limit ?
+                    """,
+                    (action, limit),
+                )
+            )
 
     def source_feedback_metrics(self) -> List[sqlite3.Row]:
         with self.connection() as conn:
@@ -683,6 +859,58 @@ def migrate_v3(conn) -> None:
             (normalize_key(row["title"]), normalize_key(row["company"]), row["id"]),
         )
     conn.execute("create index if not exists idx_jobs_normalized_title_company on jobs(normalized_title, normalized_company)")
+
+
+def migrate_v4(conn) -> None:
+    try:
+        conn.execute("alter table sources add column priority text not null default 'medium'")
+    except sqlite3.OperationalError:
+        pass
+    conn.executescript(
+        """
+        create table if not exists job_l2_verdicts (
+            job_id text primary key,
+            verdict text not null,
+            priority text not null,
+            reason text not null,
+            evidence_json text not null default '[]',
+            scored_at text not null,
+            model text not null,
+            input_tokens integer not null default 0,
+            output_tokens integer not null default 0
+        );
+
+        create table if not exists agent_runs (
+            session_id text primary key,
+            user_text text not null,
+            requested_at text not null,
+            status text not null,
+            request_path text,
+            status_path text,
+            response_path text,
+            message text
+        );
+
+        create table if not exists agent_actions (
+            id integer primary key autoincrement,
+            session_id text not null,
+            kind text not null,
+            user_intent text,
+            summary text,
+            diff_blob text,
+            payload_json text,
+            applied_at text not null,
+            applied_by_user text,
+            status text not null,
+            archive_path text,
+            target_path text,
+            result_message text,
+            revert_target_id integer
+        );
+        create index if not exists idx_agent_actions_session on agent_actions(session_id);
+        create index if not exists idx_agent_actions_status on agent_actions(status);
+        """
+    )
 
 
 def set_schema_version(conn, version: int) -> None:
