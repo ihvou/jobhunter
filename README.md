@@ -134,7 +134,7 @@ Use Telegram for the daily loop.
 | 6 | Click `Applied` after submitting |
 | 7 | Use `Usage`, `/history`, and `/revert <id>` to audit agent work |
 
-L1 scoring is deterministic and free. After L1, jobbot runs a bounded L2 relevance pass on at most `JOBBOT_L2_MAX_JOBS` candidates per click. With `gpt-4o-mini` this is intended to stay around a few tenths of a cent per click; if `OPENAI_API_KEY` is absent, a local fallback rejects only obvious bad role families such as Product Marketing, MLOps, DevOps, SRE, and unsupported-language requirements.
+L1 scoring is deterministic and free. After L1, jobbot runs a bounded L2 relevance pass on at most `JOBBOT_L2_MAX_JOBS` candidates per click. With `gpt-4o-mini` this is intended to stay around a few tenths of a cent per click. If `OPENAI_API_KEY` is absent, a local fallback rejects only obvious bad role families (Product Marketing, MLOps, DevOps, SRE, unsupported-language requirements) — works without any LLM but is much coarser than the API-backed pass.
 
 Useful Telegram commands:
 
@@ -149,6 +149,29 @@ Useful Telegram commands:
 | `/profile set <text>` | Replace `# About me`, preserving `# Directives` |
 | `/profile refine` | Ask the agent to propose a profile rewrite for approval |
 | `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status |
+
+## Agent Examples
+
+What `/agent` requests actually look like. Each one routes through OpenClaw/Codex, returns an `answer`, and may include one or more `proposed_actions` you approve per-action in chat.
+
+| You type | Bot returns | Approve to apply |
+|---|---|---|
+| `/feedback skip jobs whose description is primarily in German` | "I'll add a directive to skip German-language jobs." | `directive_edit` writes a timestamped line under `# Directives`. |
+| `/feedback prioritize Product Builder/Vibe Coder roles that build with Claude or Codex; deprioritize generic PM` | "Got it — adding a priority directive that L2 will apply per-job." | `directive_edit`. Next `Get more jobs` reflects it via L2's `priority: high` tag. |
+| `/feedback please remove the directive about language` | "I'll drop that directive." | `directive_edit` with a removal patch. |
+| `/agent please add this and figure out how to fetch it: https://jobs.dou.ua/vacancies/?category=Product%20Manager` | "I fetched the page, found the RSS at /feeds/?category=Product+Manager, and validated it returns 30 entries." | `sources_proposal` (add the RSS source) + `directive_edit` (mark it priority). |
+| `/agent you missed https://weworkremotely.com/remote-jobs/webpt-principal-product-manager from 2 days ago. why?` | "WWR's RSS only returns ~50 most recent items. The job had already rotated off by your last collection. Two options: switch this source to `community` type to scrape the full board, or enable a daily safety-net poll." | `sources_proposal` (change type) **or** `human_followup` (file a task for the safety-net poll). |
+| `/ask which sources produced jobs I applied to in the last 30 days?` | "RemoteOK: 4, We Work Remotely: 2, Arbeitnow: 1." | No actions; `data_answer` + `evidence_table` shown inline. |
+| `/ask jobs I applied to yesterday` | "You applied to 2 jobs yesterday: Senior PM at Linear (8:14), Applied AI Engineer at Anthropic (15:02)." | No actions; just data. |
+| `/agent suggest 3 niche aggregators I'm missing` | "Based on your applied set (AI/LLM startups, product builder roles), I'd add Lovable Jobs, AI Tinkerers job board, and Hacker News Who's Hiring (current month)." | `sources_proposal` with 3 entries; HEAD-probed before approval prompt. |
+| `/profile refine` | "Tightened wording. Diff: ..." | `profile_edit` replaces `# About me`; `# Directives` untouched. |
+| `/agent stop suggesting individual company career pages — focus on aggregators` | "Captured. Future discovery runs will steer toward aggregators." | `directive_edit`. Next `Update sources` reflects it. |
+| `/agent backup my config and profile` | "Created backup at data/backup/jobhunter-2026-05-02.tar.gz (3.2 KB)." | `backup_export` already executed (read-only). |
+| `/agent show me what rule fires most often` | "Top firing rules: title_target_product_roles (47×), ai_focus (38×), profile_similarity (24×). 12 jobs hard-rejected by exclude_seniority_title." | No actions; just analysis. |
+
+Each write action is gated behind `[Apply 1] [Apply 2] [Apply all] [Reject all]` buttons. Applied actions are logged in `agent_actions` with the file diff archived; `/revert <id>` restores any reversible file change byte-for-byte.
+
+The bounded action kinds (`directive_edit`, `profile_edit`, `sources_proposal`, `scoring_rule_proposal`, `data_answer`, `human_followup`, `rescore_jobs`, `bulk_update_jobs`, `backup_export`) are the only mutations the agent can request. Anything outside that set is silently dropped — Codex cannot ask jobbot to execute arbitrary code or write outside the allowlisted paths.
 
 ## OpenClaw And Codex Flows
 
