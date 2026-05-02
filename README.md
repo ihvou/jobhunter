@@ -1,290 +1,143 @@
 # Jobhunter OpenClaw Jobbot
 
-Safe, low-cost job-search assistant for a human-in-the-loop workflow. It runs in Docker, searches only public / API / RSS / email-alert sources, ranks jobs with a deterministic L1 layer plus a bounded LLM L2 relevance pass, and talks to you through Telegram.
+A safe, low-cost Telegram-driven job-search assistant. Two Docker containers, one chat surface. Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor instructions in [`AGENTS.md`](AGENTS.md). Open work in [`tasks.md`](tasks.md).
 
-The bot never applies to jobs, sends recruiter messages, logs into LinkedIn, mounts browser cookies, or sends email. Every change the agent proposes — to your sources, scoring rules, or directives — goes through a Telegram approval tap and is undoable in one command.
+## What It Does
 
-Read the product spec in [`OPENCLAW_JOB_SEARCH_SPEC.md`](OPENCLAW_JOB_SEARCH_SPEC.md). Agent/contributor instructions live in [`AGENTS.md`](AGENTS.md).
+- Collects jobs on demand from public RSS, JSON APIs, ATS boards, and IMAP email alerts (LinkedIn / Wellfound / Djinni / company alerts) — no logged-in scraping.
+- Ranks jobs in two layers: free deterministic L1 rules, then a bounded LLM L2 pass that reads your free-form profile and skips obvious mismatches (wrong role family, wrong language, wrong seniority).
+- Sends a Telegram digest of new (not previously shown) jobs with per-job buttons: **Irrelevant**, **Remind me tomorrow**, **Give me cover note**, **Applied**.
+- Refines itself through chat: type `/feedback`, `/agent`, or `/ask` and Codex (via your subscription) proposes bounded changes you approve per-action — sources, scoring rules, profile directives, ad-hoc data answers.
+- Generates tailored cover notes via OpenAI (paid, budget-gated).
+- **Never** applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
+- Every change the agent proposes is approval-gated, auto-archived, and one-tap reversible via `/revert <id>`.
 
-## What Runs
+## Quick Start
 
-| Component | Purpose |
-|---|---|
-| `jobbot` | Python stdlib-only collector, L1 rule scorer, L2 OpenAI relevance pass, cover-note client, Telegram bot, and agent-action handler |
-| `openclaw-gateway` | Isolated Codex CLI worker that handles every `/agent` request (free-form, source discovery, scoring tuning, profile refinement, ad-hoc data queries) with read-only sandboxed tools |
-| SQLite | Local jobs, L1 scores, L2 verdicts, feedback, digests, drafts, OpenAI usage, agent audit + revert trail |
-| Telegram | Persistent reply keyboard, inline buttons per job, free-form slash commands |
-
-The normal app has no web UI. Telegram is the control surface.
-
-## Mental Model
-
-Everything is on-demand. There is no cron-driven collection — `serve` only polls Telegram and the shared workspace.
-
-You interact through three surfaces:
-
-| Surface | Used for |
-|---|---|
-| **Per-job inline buttons** | `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied` on each job card. Tapping deletes the card from chat. |
-| **Reply-keyboard buttons** | `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` — always at the bottom of the chat. |
-| **Free-form commands** | `/agent <text>` for anything else. `/feedback`, `/ask`, `/profile`, `/history`, `/revert`, `/applied`, `/snoozed`, `/irrelevant` are sugar over the same agent surface. |
-
-What each reply-keyboard button does:
-
-| Button | Behavior |
-|---|---|
-| `Get more jobs` | Collects enabled sources (high-priority first), dedupes, L1-scores, runs the bounded L2 relevance pass on top candidates, and sends only jobs not already shown |
-| `Update sources` | Routes a canned `/agent` request: OpenClaw + Codex propose new sources for per-candidate Telegram approval |
-| `Tune scoring` | Routes a canned `/agent` request: OpenClaw + Codex propose ranking-rule changes; jobbot shadow-tests before you can apply |
-| `Usage` | Routes a canned `/agent` data request for today's spend, agent quota, and recent activity |
-
-## First-Time Setup
-
-### 1. Prepare Your Profile
-
-Your profile is the primary input for search and scoring. It's plain language, not a CV dump. One file, two sections — `# About me` is the stable description, `# Directives` is the living instruction log.
+You need: a Telegram bot token, your Telegram chat ID, and a Codex CLI subscription (ChatGPT Pro or equivalent). Optionally, an OpenAI API key for cover notes and the L2 relevance pass.
 
 ```bash
-cp input/profile.example.md input/profile.local.md
-```
-
-```markdown
-# About me
-
-Product manager. Product lead. Product owner. Head of product. Product builder.
-Goal: build product prototypes / MVPs / new features with Claude Code, Codex,
-or related AI tooling. Strengths: product discovery, product analytics,
-multi-stakeholder environments, fast prototyping.
-
-Avoid: internships, junior-only roles.
-
-# Directives
-
-[2026-05-02] Skip Product Marketing Manager and Marketing Manager titles.
-[2026-05-02] Source priority: aggregators first; individual company pages only for AI-tooling vendors like Lovable.
-```
-
-You can edit this file directly, or manage it from Telegram:
-
-| Telegram | Effect |
-|---|---|
-| `/profile` | Show current `# About me` content + directive count |
-| `/profile set <text>` | Replace `# About me` (preserves `# Directives`) — two-tap diff confirmation |
-| `/profile refine` | Codex cleans up wording without changing intent; you approve the diff |
-| `/feedback <text>` | Codex appends/modifies/removes a directive; you approve the diff |
-
-Both the L2 relevance pass and the OpenClaw/Codex agent read the **whole file** — both sections — every time. Adding a directive takes effect on the next `Get more jobs` click; no scoring rule update needed.
-
-Optional CV context for cover notes:
-
-```bash
-cp input/cv.example.md input/cv.local.md
-```
-
-The CV is only used for cover-note generation, and only a bounded excerpt is sent to the OpenAI API. If you don't have a CV file, the bot still scores and digests jobs — only cover-note quality degrades to a generic template.
-
-Legacy `config/profile.local.json` is no longer the preferred source of truth. On `init`, jobbot folds its contents into `# About me` and backs the JSON file up.
-
-### 2. Configure Environment
-
-```bash
+# 1. Configure secrets
 cp .env.example .env
-```
+# edit .env and set TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_CHAT_ID
+# (optional) set OPENAI_API_KEY for cover notes + better L2 relevance
 
-Fill the values you approve:
-
-| Variable | Required | Purpose |
-|---|---:|---|
-| `TELEGRAM_BOT_TOKEN` | yes | Telegram bot token from BotFather |
-| `TELEGRAM_ALLOWED_CHAT_ID` | yes | Restricts bot access to your chat |
-| `OPENAI_API_KEY` | optional | Cover notes and the optional L2 job relevance pass, protected by local budget caps |
-| `OPENAI_MODEL` | optional | Defaults to `gpt-4o-mini` |
-| `EMAIL_IMAP_*` | optional | Read-only job-alert mailbox/label |
-| `JOBBOT_CODEX_HANDOFF_MODE` | optional | `auto` uses the worker; `manual` sends paste-ready prompts to Telegram |
-| `OPENCLAW_CODEX_*` | optional | Codex worker model, poll interval, and timeout |
-| `OPENCLAW_AGENT_MAX_*` | optional | Per-agent-turn caps for Codex turns, SQL reads, file reads, HTTP fetches, and prompt size |
-| `JOBBOT_L2_MAX_JOBS` | optional | Max jobs per `Get more jobs` click sent to the L2 relevance pass; default `30` |
-
-Do not commit `.env`, `input/profile.local.md`, `input/cv.local.md`, local profile backups, or `data/`.
-
-### 3. Configure Sources
-
-`config/sources.json` contains seed sources. You can edit it manually, or ask `Update sources` (or `/agent please add ...`) to propose new ones for approval.
-
-Each row has a **lifecycle status** and a **priority**:
-
-| Status | Meaning |
-|---|---|
-| `active` | Included in `Get more jobs` |
-| `test` | Newly agent-discovered; included AND flagged as a new source on each card until you mark a job from it as Applied or request a cover note (auto-promotes to `active`) |
-| `disabled` | Preserved in the file for history but skipped at collection |
-
-| Priority | Meaning |
-|---|---|
-| `high` | Fetched first per `Get more jobs` click |
-| `medium` (default) | Fetched after high-priority sources |
-| `low` | Fetched last; useful for noisy fallback sources |
-
-Agent-discovered sources are appended with `created_by: "agent"` only after you tap approval in Telegram. Manual rows have `created_by: "user"` and the agent never silently mutates them.
-
-### 4. Initialize
-
-Authorize Codex once (uses your ChatGPT subscription, no per-call OpenAI cost):
-
-```bash
+# 2. Authorize Codex (one-time device login)
 ./jobhunter login
-```
 
-The token is stored in `./openclaw/codex-home/` (gitignored). The repo never mounts your host home directory or browser profile.
-
-Start both containers:
-
-```bash
+# 3. Start both containers
 ./jobhunter start
 ```
 
-The bot will send a ready message with a persistent Telegram keyboard. Tap `Get more jobs` to run the first real collection. Slash-command fallbacks also work: `/jobs`, `/sources`, `/tune`, and `/usage`.
+The bot will DM you a ready message with a persistent reply keyboard.
 
-Local smoke test (no Docker, useful while developing):
+### Required environment variables
+
+| Variable | Required | Notes |
+|---|---:|---|
+| `TELEGRAM_BOT_TOKEN` | yes | From [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_ALLOWED_CHAT_ID` | yes | Your numeric chat ID; restricts the bot to your chat only |
+| `OPENAI_API_KEY` | optional | Enables cover-note generation and the OpenAI-backed L2 relevance pass. Without it, L2 falls back to a coarser local heuristic and cover notes use a generic template. |
+
+All other env vars (model, budget caps, agent quotas, IMAP credentials) have sensible defaults; see `.env.example` if you want to tune them.
+
+## How To Use It
+
+### From Telegram (everything you need day-to-day)
+
+After `./jobhunter start`:
+
+1. **Set your profile** — type `/profile set <paste your free-text description>`. Example:
+    ```
+    /profile set Product manager / product builder. Goal: build product prototypes
+    or implement features in existing products with Claude Code, Codex, or related
+    AI tooling. Strengths: discovery, product analytics, fast prototyping. Avoid:
+    internships, junior-only roles.
+    ```
+2. **Get your first digest** — tap `Get more jobs`. The bot collects, scores, and sends you the top matches.
+3. **React to each card** — tap `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied`. The card disappears from chat after the action.
+4. **Teach the system in plain English** — `/feedback skip jobs that mention German required` or `/feedback prioritize Product Builder roles building with Claude or Codex`. The agent proposes a directive change; you approve; the next `Get more jobs` reflects it.
+5. **Refine sources and scoring when needed** — tap `Update sources` or `Tune scoring`. The agent proposes changes; you approve per-candidate or per-rule.
+
+### Operator commands
 
 ```bash
-python3 -m jobbot init
-python3 -m jobbot collect
-python3 -m jobbot digest
+./jobhunter start         # start both containers (idempotent — re-runs are safe)
+./jobhunter stop          # stop both containers
+./jobhunter restart       # rebuild and recreate
+./jobhunter status        # one-line health summary
+./jobhunter logs          # tail both services
+./jobhunter logs worker   # tail only the OpenClaw worker
+./jobhunter login         # re-authorize Codex (when token expires)
+./jobhunter reset         # nuke local SQLite + workspace files (asks for confirmation)
+./jobhunter shell jobbot  # open a shell in a running container
+./jobhunter help          # see all subcommands
 ```
 
-Without Telegram credentials in `.env`, the digest prints to stdout instead of being sent.
+`./jobhunter start` and `./jobhunter restart` refuse to run if `.env` is missing required vars and tell you which ones.
 
-## Daily Usage
-
-Use Telegram for the daily loop.
-
-| Step | Action |
-|---:|---|
-| 1 | Tap `Get more jobs` when you want a fresh search |
-| 2 | For each card, tap one of `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied` (the card disappears from chat after the action) |
-| 3 | Apply manually outside the bot, then tap `Applied` |
-| 4 | When you keep marking similar jobs Irrelevant, type `/feedback <reason>` to teach the system without editing rules — see Agent Examples below |
-| 5 | When the digest feels stale or biased, tap `Update sources` or `Tune scoring`; review and approve the proposed changes |
-| 6 | Use `Usage`, `/history`, and `/revert <id>` to audit agent work |
-| 7 | `/applied`, `/snoozed`, `/irrelevant` retrieve recent jobs by status — handy because cards leave the chat after each action |
-
-L1 scoring is deterministic and free. After L1, jobbot runs a bounded L2 relevance pass on at most `JOBBOT_L2_MAX_JOBS` candidates per click. With `gpt-4o-mini` this is intended to stay around a few tenths of a cent per click. If `OPENAI_API_KEY` is absent, a local fallback rejects only obvious bad role families (Product Marketing, MLOps, DevOps, SRE, unsupported-language requirements) — works without any LLM but is much coarser than the API-backed pass.
-
-Useful Telegram commands:
+### Telegram commands cheatsheet
 
 | Command | Use |
 |---|---|
-| `/agent <text>` | Ask OpenClaw/Codex to investigate, answer, and propose bounded actions |
-| `/feedback <text>` | Add free-form strategy/filter/source feedback through the same agent path |
-| `/ask <text>` | Ask for a read-only data answer using allowed tools |
-| `/history` | Show recent agent-applied actions |
+| `/agent <text>` | Ask the agent to investigate and propose bounded actions |
+| `/feedback <text>` | Same path, hinted toward editing your `# Directives` |
+| `/ask <text>` | Same path, hinted toward read-only data answers |
+| `/profile` | Show your current `# About me` content + directive count |
+| `/profile set <text>` | Replace `# About me` (preserves directives, two-tap diff confirmation) |
+| `/profile refine` | Codex cleans up wording without changing intent; you approve the diff |
+| `/history` | Last 10 agent-applied actions |
 | `/revert <id>` | Restore the archived file for a reversible agent action |
-| `/profile` | Show current `# About me` and directive count |
-| `/profile set <text>` | Replace `# About me`, preserving `# Directives` |
-| `/profile refine` | Ask the agent to propose a profile rewrite for approval |
-| `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status |
+| `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status (since cards leave the chat after each action) |
+| `/jobs`, `/sources`, `/tune`, `/usage` | Slash equivalents of the four reply-keyboard buttons |
 
 ## Agent Examples
 
-What `/agent` requests actually look like. Each one routes through OpenClaw/Codex, returns an `answer`, and may include one or more `proposed_actions` you approve per-action in chat.
+What `/agent` requests actually look like. Each one routes through OpenClaw + Codex, returns an `answer`, and may include one or more `proposed_actions` you approve per-action in chat.
 
 | You type | Bot returns | Approve to apply |
 |---|---|---|
-| `/feedback skip jobs whose description is primarily in German` | "I'll add a directive to skip German-language jobs." | `directive_edit` writes a timestamped line under `# Directives`. |
-| `/feedback prioritize Product Builder/Vibe Coder roles that build with Claude or Codex; deprioritize generic PM` | "Got it — adding a priority directive that L2 will apply per-job." | `directive_edit`. Next `Get more jobs` reflects it via L2's `priority: high` tag. |
-| `/feedback please remove the directive about language` | "I'll drop that directive." | `directive_edit` with a removal patch. |
-| `/agent please add this and figure out how to fetch it: https://jobs.dou.ua/vacancies/?category=Product%20Manager` | "I fetched the page, found the RSS at /feeds/?category=Product+Manager, and validated it returns 30 entries." | `sources_proposal` (add the RSS source) + `directive_edit` (mark it priority). |
-| `/agent you missed https://weworkremotely.com/remote-jobs/webpt-principal-product-manager from 2 days ago. why?` | "WWR's RSS only returns ~50 most recent items. The job had already rotated off by your last collection. Two options: switch this source to `community` type to scrape the full board, or enable a daily safety-net poll." | `sources_proposal` (change type) **or** `human_followup` (file a task for the safety-net poll). |
-| `/ask which sources produced jobs I applied to in the last 30 days?` | "RemoteOK: 4, We Work Remotely: 2, Arbeitnow: 1." | No actions; `data_answer` + `evidence_table` shown inline. |
-| `/ask jobs I applied to yesterday` | "You applied to 2 jobs yesterday: Senior PM at Linear (8:14), Applied AI Engineer at Anthropic (15:02)." | No actions; just data. |
-| `/agent suggest 3 niche aggregators I'm missing` | "Based on your applied set (AI/LLM startups, product builder roles), I'd add Lovable Jobs, AI Tinkerers job board, and Hacker News Who's Hiring (current month)." | `sources_proposal` with 3 entries; HEAD-probed before approval prompt. |
-| `/profile refine` | "Tightened wording. Diff: ..." | `profile_edit` replaces `# About me`; `# Directives` untouched. |
-| `/agent stop suggesting individual company career pages — focus on aggregators` | "Captured. Future discovery runs will steer toward aggregators." | `directive_edit`. Next `Update sources` reflects it. |
-| `/agent backup my config and profile` | "Created backup at data/backup/jobhunter-2026-05-02.tar.gz (3.2 KB)." | `backup_export` already executed (read-only). |
-| `/agent show me what rule fires most often` | "Top firing rules: title_target_product_roles (47×), ai_focus (38×), profile_similarity (24×). 12 jobs hard-rejected by exclude_seniority_title." | No actions; just analysis. |
+| `/feedback skip jobs whose description is primarily in German` | "I'll add a directive to skip German-language jobs." | `directive_edit` writes a timestamped line under `# Directives` |
+| `/feedback prioritize Product Builder roles that build with Claude or Codex; deprioritize generic PM` | "Got it — adding a priority directive that L2 will apply per-job." | `directive_edit`. Next `Get more jobs` reflects it via L2's `priority: high` tag |
+| `/feedback please remove the directive about language` | "I'll drop that directive." | `directive_edit` with a removal patch |
+| `/agent please add this and figure out how to fetch it: https://jobs.dou.ua/vacancies/?category=Product%20Manager` | "I fetched the page, found the RSS at /feeds/?category=Product+Manager, and validated it returns 30 entries." | `sources_proposal` (add the RSS) + `directive_edit` (mark it priority) |
+| `/agent you missed https://weworkremotely.com/remote-jobs/webpt-principal-product-manager from 2 days ago. why?` | Root-cause analysis with two repair options | `sources_proposal` (change source type) **or** `human_followup` (file a task) |
+| `/ask which sources produced jobs I applied to in the last 30 days?` | "RemoteOK: 4, We Work Remotely: 2, Arbeitnow: 1." | None; `data_answer` shown inline |
+| `/ask jobs I applied to yesterday` | List with timestamps | None; just data |
+| `/agent suggest 3 niche aggregators I'm missing` | Three candidates with rationale | `sources_proposal` with 3 entries; HEAD-probed before approval prompt |
+| `/profile refine` | "Tightened wording. Diff: ..." | `profile_edit` replaces `# About me`; `# Directives` untouched |
+| `/agent stop suggesting individual company career pages — focus on aggregators` | "Captured. Future discovery runs will steer toward aggregators." | `directive_edit` |
+| `/agent backup my config and profile` | Path to the new tar.gz | `backup_export` already executed |
+| `/agent show me what rule fires most often` | Top-firing rules with counts | None; just analysis |
 
-Each write action is gated behind `[Apply 1] [Apply 2] [Apply all] [Reject all]` buttons. Applied actions are logged in `agent_actions` with the file diff archived; `/revert <id>` restores any reversible file change byte-for-byte.
+Every write action is gated behind `[Apply 1] [Apply 2] [Apply all] [Reject all]` buttons. Applied actions are logged with the file diff archived; `/revert <id>` restores any reversible file change byte-for-byte.
 
-The bounded action kinds (`directive_edit`, `profile_edit`, `sources_proposal`, `scoring_rule_proposal`, `data_answer`, `human_followup`, `rescore_jobs`, `bulk_update_jobs`, `backup_export`) are the only mutations the agent can request. Anything outside that set is silently dropped — Codex cannot ask jobbot to execute arbitrary code or write outside the allowlisted paths.
+## Cost Controls
 
-## OpenClaw And Codex Flows
-
-`jobbot` and `openclaw-gateway` share `./openclaw/workspace`:
-
-| Host Path | jobbot Path | OpenClaw Path |
-|---|---|---|
-| `./openclaw/workspace/discovery` | `/jobbot/workspace/discovery` | `/openclaw/workspace/discovery` |
-| `./openclaw/workspace/tuning` | `/jobbot/workspace/tuning` | `/openclaw/workspace/tuning` |
-| `./openclaw/workspace/agent` | `/jobbot/workspace/agent` | `/openclaw/workspace/agent` |
-
-The OpenClaw service is a small worker image with Codex CLI installed. It watches the shared workspace and invokes `codex exec` automatically when request files appear.
-
-One-time Codex subscription login:
-
-```bash
-./jobhunter login
-```
-
-That login stores Codex auth in `./openclaw/codex-home`, which is gitignored. The repo does not mount your host home directory or browser profile.
-
-`/agent`, `Update sources`, `Tune scoring`, and `Usage` write:
-
-```text
-/jobbot/workspace/agent/request-<session>.json
-/jobbot/workspace/agent/status-<session>.json
-```
-
-The worker writes:
-
-```text
-/openclaw/workspace/agent/response-<session>.json
-/openclaw/workspace/agent/status-<session>.json
-```
-
-When status is `done`, `jobbot` always shows the agent answer. If the response includes write actions, jobbot renders per-action approval buttons plus `Apply all` / `Reject all`.
-
-The agent response contract is:
-
-```json
-{
-  "user_intent_summary": "...",
-  "answer": "...",
-  "evidence_table": [],
-  "proposed_actions": [
-    {"kind": "directive_edit", "summary": "...", "payload": {}}
-  ]
-}
-```
-
-Supported action kinds are `directive_edit`, `profile_edit`, `sources_proposal`, `scoring_rule_proposal`, `data_answer`, `human_followup`, `rescore_jobs`, `bulk_update_jobs`, and `backup_export`. Unknown kinds are dropped and logged; no action kind executes arbitrary code.
-
-Legacy `discover-sources` and `tune-scoring` CLI commands still write the older `discovery/` and `tuning/` contracts for debugging.
-
-Important boundary: source strategy, parser investigation, and scoring/filter strategy use your Codex CLI login inside the OpenClaw worker. Per-job L2 relevance and cover notes use the OpenAI API only when `OPENAI_API_KEY` is set and budget gates allow it.
-
-The worker exposes only read-only tools to Codex:
-
-| Tool | Guardrail |
+| Item | Default cap |
 |---|---|
-| `query_sql` | `SELECT` only, capped rows, SQLite mounted read-only |
-| `read_file` / `list_dir` | Allowlisted paths only; `.env`, Codex auth, home, and system paths blocked |
-| `http_fetch` | HTTP(S) only, private hosts blocked, timeout and excerpt capped |
+| L1 per-job scoring | Free (no LLM) |
+| L2 relevance pass | OpenAI on top L1 candidates only, ≤ `JOBBOT_L2_MAX_JOBS=30` per click, cached per job (~$0.003/click typical) |
+| Cover notes | OpenAI, `gpt-4o-mini`, daily/monthly budget gate, 10/day, one-tap override on overage |
+| Agent requests | Codex subscription (no per-call cost), 20/day, 10s cooldown, capped per-request (5 turns / 20 SQL / 10 file reads / 5 fetches / 180s) |
+| Bulk write actions | Approval tap PLUS typed `CONFIRM <id>` reply within 60s |
+| Collection | 1 / 10 minutes per `Get more jobs` |
 
-## Email Alerts
+Check current spend any time via the `Usage` button, `/usage` command, or `./jobhunter status`.
 
-Use email alerts for LinkedIn, Wellfound, Djinni, company alerts, or Google Alerts. The bot reads only the configured IMAP folder/label and never sends email.
+## Email Alerts (Optional)
 
-`.env`:
+Use email alerts for sites that don't expose a public RSS / API but do offer email notifications (LinkedIn, Wellfound, Djinni, company alerts, Google Alerts). The bot reads only the configured IMAP folder and **never sends email**.
 
 ```text
+# .env
 EMAIL_IMAP_HOST=imap.gmail.com
 EMAIL_IMAP_USERNAME=you@example.com
-EMAIL_IMAP_PASSWORD=<app password>
+EMAIL_IMAP_PASSWORD=<Gmail app password>
 EMAIL_IMAP_FOLDER=job-alerts
 ```
 
-Example source rows can share the same folder while filtering by sender. Each row supports the same `priority` field as any other source:
+Then add a source row per sender (you can do this from Telegram via `/agent please add a source for djinni.co alerts at FROM no-reply@djinni.co`):
 
 ```json
 {
@@ -299,88 +152,87 @@ Example source rows can share the same folder while filtering by sender. Each ro
 }
 ```
 
-The IMAP collector uses per-source UID high-water marks, so old messages are not reprocessed forever.
+The IMAP collector tracks per-source UID high-water marks, so old messages are not reprocessed forever.
 
-## Cost Controls
+## Troubleshooting
 
-| Cost Area | Control |
+| Symptom | Check |
 |---|---|
-| L1 per-job scoring | No LLM calls |
-| L2 job relevance | OpenAI API on top L1 candidates only, default max `30` per click, cached per job |
-| Cover notes | OpenAI API, `gpt-4o-mini` default, daily/monthly budget gate |
-| Cover-note overage | Telegram asks for explicit one-time override |
-| Source/filter strategy | Codex subscription path through OpenClaw, not OpenAI API |
-| Agent guardrails | 10s cooldown, 20/day default, capped Codex turns, SQL reads, file reads, HTTP fetches |
-| Abuse prevention | Collection 1/10 minutes, agent 20/day, cover notes 10/day, write actions require Telegram approval |
+| No Telegram messages | Verify bot token + chat ID; `./jobhunter logs jobbot` |
+| `Get more jobs` says wait | Collection rate limit kicked in; try after the shown wait |
+| Digest is empty | `/agent please tune scoring to be more permissive`, or add sources |
+| Bad jobs reach the digest | `/feedback <pattern to skip>`; approve the resulting `directive_edit` |
+| Good jobs are hidden | `/ask why was [URL] not in my last digest?`, then `/feedback` to teach |
+| Same job repeats | Snoozed-due jobs are allowed to reappear once; otherwise check `digest_log` |
+| Cover note denied | Use `Usage` to see budget; approve the one-time override only if intended |
+| Agent proposal never appears | `./jobhunter logs worker` and inspect `openclaw/workspace/agent/status-*.json` for `state=failed` |
+| `Daily agent quota reached` | Default 20/day; raise `JOBBOT_RATE_LIMIT_AGENT_PER_DAY` in `.env` |
+| Codex login expired | `./jobhunter login` re-runs device auth |
+| `/revert` says "no reversible archive" | Some action kinds (data_answer, human_followup, bulk_update_jobs, rescore_jobs) don't archive a file; not reversible by `/revert` today |
 
-Check local spend:
+## Safety Notes
+
+- Do not mount browser profiles, cookies, your home directory, SSH keys, or `/var/run/docker.sock`.
+- Do not enable email sending.
+- Do not give the bot recruiter messaging credentials.
+- Keep OpenAI keys scoped to a dedicated low-budget project.
+- Apply manually outside the bot; then tap `Applied`.
+- Treat `/agent` approvals like config changes: read each proposed action's summary, apply only what you want, and use `/history` + `/revert <id>` if a reversible file edit goes sideways.
+
+---
+
+# Reference
+
+The rest of this file is reference material. You won't need any of it for normal use — Telegram and `./jobhunter` cover the daily workflow.
+
+## Configuration Files
+
+You usually don't need to touch these. Telegram covers everything once the bot is running. The files exist mostly to bootstrap the very first run and to store the agent's audit trail.
+
+| File | What it is | Day-to-day editing |
+|---|---|---|
+| `input/profile.local.md` | Your profile (`# About me` + `# Directives`). Required to bootstrap before you can talk to Telegram. | Use `/profile set` and `/feedback` from chat after bootstrap. Direct file edits also work. |
+| `input/cv.local.md` | Optional CV text, used only for cover notes. | Edit the file; no Telegram command for CV today. |
+| `config/sources.json` | Source registry. Ships with sensible defaults (Remotive, RemoteOK, Arbeitnow, WeWorkRemotely, optional IMAP). | Tap `Update sources` in Telegram or `/agent please add ...`. Direct edits also work. |
+| `config/scoring.json` | Active scoring ruleset. Ships with a baseline. | Tap `Tune scoring` in Telegram. Direct edits work but the agent's shadow-test path is safer. |
+| `config/jobbot.json` | Budgets and runtime config. | Edit only if the defaults don't fit. |
+| `.env` | Secrets and runtime paths. | Edit before first start; rare changes after. |
+
+For the very first run, copy the example files:
 
 ```bash
-./jobhunter status
+cp .env.example .env
+cp input/profile.example.md input/profile.local.md   # or use /profile set after bootstrap
+cp input/cv.example.md input/cv.local.md             # optional, only for cover notes
 ```
 
-## Operator Launcher
+The bot auto-creates an empty `input/profile.local.md` if you skip the copy, and you can fill it via `/profile set` immediately. If you have a legacy `config/profile.local.json`, the bot folds it into `# About me` on first init and backs the JSON up.
 
-Use `./jobhunter` for day-to-day operation. It wraps the Docker Compose commands and keeps destructive actions behind confirmation prompts.
+## Source Lifecycle and Priority
+
+Each source row has a status (`active` / `test` / `disabled`) and a priority (`high` / `medium` / `low`). High-priority sources fetch first per `Get more jobs` click. Agent-discovered sources land as `status: test, created_by: agent` and auto-promote to `active` when you mark a job from them as Applied or request a cover note.
+
+## Python Commands (Development / Debugging)
+
+For day-to-day use, prefer Telegram + `./jobhunter`. The Python CLI is for development and smoke testing.
 
 ```bash
-./jobhunter help
-./jobhunter start
-./jobhunter status
-./jobhunter logs
-./jobhunter logs worker
-./jobhunter restart
-./jobhunter stop
+python3 -m jobbot init           # init schema, sources, workspace dirs; migrate legacy profile
+python3 -m jobbot collect        # fetch from enabled sources (no L2, no Telegram send)
+python3 -m jobbot digest         # run L2 on top L1 survivors and send/print top matches
+python3 -m jobbot run-once       # init + collect + digest
+python3 -m jobbot telegram-poll  # one tick of serve's poll loop
+python3 -m jobbot discover-sources  # legacy discovery request file (kept for debugging)
+python3 -m jobbot tune-scoring      # legacy tuning request file (kept for debugging)
+python3 -m jobbot usage          # local OpenAI usage summary
+python3 -m jobbot serve          # Telegram + workspace polling loop; no scheduled collection
 ```
 
-| Command | Use |
-|---|---|
-| `./jobhunter start` | Build if needed, then start `jobbot` and `openclaw-gateway` |
-| `./jobhunter stop` | Stop both containers |
-| `./jobhunter restart` | Rebuild and recreate both containers |
-| `./jobhunter logs [jobbot\|worker\|both]` | Follow recent logs; defaults to both |
-| `./jobhunter status` | One-line health summary with container state, heartbeat, source count, and last digest |
-| `./jobhunter login` | Run Codex device login inside the OpenClaw container |
-| `./jobhunter shell [jobbot\|worker]` | Open a shell in a running container |
-| `./jobhunter reset` | Stop services and clear local SQLite/workspace files after typing `reset` |
+There's no CLI for `/agent` itself — the agent surface is Telegram-only by design (every action is approval-gated and the chat is the audit log).
 
-The root path `./jobbot` is already the Python package directory, so the launcher is named `./jobhunter`.
+## Raw Docker Commands
 
-`./jobhunter start` and `./jobhunter restart` validate that `.env` contains `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` before touching Docker.
-
-## Python Commands
-
-For day-to-day use, prefer Telegram + `./jobhunter`. The Python CLI is for development, smoke-testing, and debugging.
-
-```bash
-python3 -m jobbot init
-python3 -m jobbot collect
-python3 -m jobbot digest
-python3 -m jobbot run-once
-python3 -m jobbot telegram-poll
-python3 -m jobbot discover-sources
-python3 -m jobbot tune-scoring
-python3 -m jobbot usage
-python3 -m jobbot serve
-```
-
-| Command | Use |
-|---|---|
-| `init` | Create/update SQLite schema, source registry, workspace directories, and migrate legacy profile files |
-| `collect` | Developer/manual fetch from enabled sources (no L2 pass, no Telegram send) |
-| `digest` | Run L2 on top L1 survivors and send/print current top matches |
-| `run-once` | Init + collect + digest once |
-| `telegram-poll` | Poll Telegram callbacks once (one tick of `serve`'s loop) |
-| `discover-sources` | Write a legacy `discovery/request-*.json` (the older non-`/agent` flow); kept for debugging |
-| `tune-scoring` | Write a legacy `tuning/request-*.json`; kept for debugging |
-| `usage` | Print local OpenAI usage summary (also available as the `Usage` button in Telegram) |
-| `serve` | Telegram + workspace polling loop; no scheduled collection |
-
-There is no CLI for `/agent` itself — the agent surface is Telegram-only by design (every action is approval-gated, and the chat is the audit log).
-
-## Docker
-
-The launcher above is recommended. Raw Compose commands are still useful for debugging:
+The launcher above is recommended. Raw Compose is useful for debugging:
 
 ```bash
 docker compose --profile openclaw up -d jobbot openclaw-gateway
@@ -389,55 +241,28 @@ docker compose --profile openclaw logs -f openclaw-gateway
 docker compose --profile openclaw config --quiet
 ```
 
-The compose file uses `/jobbot/...` paths, read-only root filesystem for `jobbot`, CPU/memory limits, dropped capabilities, a tmpfs `/tmp`, and a heartbeat-based healthcheck.
-
-## Data And Backups
+## Data and Backups
 
 | Path | Contents | Gitignored? |
 |---|---|---|
 | `data/jobs.sqlite` | Jobs, L1 scores, L2 verdicts, feedback, digests, drafts, usage, agent_actions audit | yes |
-| `data/backup/` | tar.gz archives produced by `/agent backup ...` plus your manual SQLite snapshots | yes |
-| `config/sources.json` | Source registry (manual + agent-discovered) | committed |
-| `config/scoring.json` | Active scoring ruleset | committed |
-| `config/scoring.v<n>.json` | Auto-archived previous scoring versions | committed |
-| `config/jobbot.json` | Budgets and runtime config | committed |
-| `input/profile.local.md` | Private search profile (`# About me` + `# Directives`) | yes |
-| `input/cv.local.md` | Private CV context for cover notes | yes |
-| `input/profile.<ts>.md.bak` | Auto-archived previous profiles (kept for `/revert`) | yes |
-| `openclaw/workspace/` | Transient `discovery/`, `tuning/`, `agent/` request/response JSON | yes |
-| `openclaw/codex-home/` | Your Codex CLI auth token after `./jobhunter login` | yes |
+| `data/backup/` | Archives produced by `/agent backup ...` and your manual SQLite snapshots | yes |
+| `config/sources.json`, `config/scoring.json`, `config/jobbot.json` | Source registry, scoring rules, runtime config | committed |
+| `config/scoring.v<n>.json` | Auto-archived previous scoring versions (used by `/revert`) | committed |
+| `input/profile.local.md`, `input/cv.local.md` | Your private profile + optional CV | yes |
+| `input/profile.<ts>.md.bak` | Auto-archived previous profile versions | yes |
+| `openclaw/workspace/` | Transient `discovery/`, `tuning/`, `agent/` JSON | yes |
+| `openclaw/codex-home/` | Codex CLI auth token after `./jobhunter login` | yes |
 
-Back up SQLite safely:
+Manual SQLite backup:
 
 ```bash
 mkdir -p data/backup
 sqlite3 data/jobs.sqlite ".backup 'data/backup/jobs-$(date +%Y%m%d-%H%M%S).sqlite'"
 ```
 
-## Troubleshooting
+Or via the agent: `/agent backup my config and profile`.
 
-| Symptom | Check |
-|---|---|
-| No Telegram messages | Verify bot token, allowed chat ID, and `./jobhunter logs jobbot` |
-| `Get more jobs` says wait | Collection rate limit is working; try again after the shown wait |
-| Digest is empty | Inspect logs, loosen scoring rules with `/agent tune scoring`, or add/approve more sources |
-| Good jobs are hidden | Inspect L2 verdicts: `/ask why was [URL] not in my last digest?` Then add a `/feedback` directive — L2 will pick it up on the next click |
-| Bad jobs reach the digest | `/feedback <pattern>` describing what to skip; approve the resulting `directive_edit` |
-| Same job repeats | Check `digest_log`; snoozed-due jobs are allowed to reappear once |
-| Cover note denied | Use `Usage` and budget env vars; approve the one-time override only if intended |
-| Agent proposal never appears | `./jobhunter logs worker` and inspect `openclaw/workspace/agent/status-*.json` for `state=failed` |
-| `Daily agent quota reached` | Default cap is 20 `/agent` calls/day; set `JOBBOT_RATE_LIMIT_AGENT_PER_DAY` higher in `.env` if needed |
-| L2 not running | If `OPENAI_API_KEY` is unset, only the local heuristic fallback runs (much coarser); set the key for the full L2 pass |
-| Codex login expired | `./jobhunter login` re-runs the device-auth flow; the new token replaces the old in `openclaw/codex-home/` |
-| Email alerts missing | Confirm IMAP folder, app password, source `status`, and source `query` |
-| `/revert <id>` says "no reversible archive" | Some action kinds (`data_answer`, `human_followup`, `bulk_update_jobs`, `rescore_jobs`) don't archive a file; they're not reversible by `/revert` today |
+## Mental Model and Architecture
 
-## Safety Notes
-
-- Do not mount browser profiles, cookies, home directories, SSH keys, or `/var/run/docker.sock`.
-- Do not enable email sending.
-- Do not give the bot recruiter messaging credentials.
-- Keep OpenClaw bound to localhost unless you deliberately add auth and network controls.
-- Keep OpenAI keys scoped to a dedicated low-budget project.
-- Apply manually; then click `Applied`.
-- Treat `/agent` approvals like config changes: read the proposed action summary, apply only what you want, and use `/history` plus `/revert <id>` if a reversible file edit goes sideways.
+For how the two containers talk to each other, the bounded action set, the L1/L2 split, the worker tool surface, and the audit-and-revert chain, see [`ARCHITECTURE.md`](ARCHITECTURE.md). The README intentionally does not duplicate that material.
