@@ -105,9 +105,7 @@ python3 -m jobbot digest
 Docker:
 
 ```bash
-docker compose build jobbot
-docker compose run --rm jobbot python -m jobbot init
-docker compose up -d jobbot
+./jobhunter start
 ```
 
 The bot will send a ready message with a persistent Telegram keyboard. Tap `Get more jobs` to run the first real collection. Slash-command fallbacks also work: `/jobs`, `/sources`, `/tune`, and `/usage`.
@@ -142,10 +140,7 @@ The OpenClaw service is a small worker image with Codex CLI installed. It watche
 One-time Codex subscription login:
 
 ```bash
-docker compose --profile openclaw build openclaw-gateway
-docker compose --profile openclaw run --rm -it openclaw-gateway codex login --device-auth
-docker compose --profile openclaw run --rm openclaw-gateway codex login status
-docker compose --profile openclaw up -d openclaw-gateway
+./jobhunter login
 ```
 
 That login stores Codex auth in `./openclaw/codex-home`, which is gitignored. The repo does not mount your host home directory or browser profile.
@@ -213,10 +208,39 @@ The IMAP collector uses per-source UID high-water marks, so old messages are not
 Check local spend:
 
 ```bash
-docker compose exec jobbot python -m jobbot usage
+./jobhunter status
 ```
 
-## Commands
+## Operator Launcher
+
+Use `./jobhunter` for day-to-day operation. It wraps the Docker Compose commands and keeps destructive actions behind confirmation prompts.
+
+```bash
+./jobhunter help
+./jobhunter start
+./jobhunter status
+./jobhunter logs
+./jobhunter logs worker
+./jobhunter restart
+./jobhunter stop
+```
+
+| Command | Use |
+|---|---|
+| `./jobhunter start` | Build if needed, then start `jobbot` and `openclaw-gateway` |
+| `./jobhunter stop` | Stop both containers |
+| `./jobhunter restart` | Rebuild and recreate both containers |
+| `./jobhunter logs [jobbot\|worker\|both]` | Follow recent logs; defaults to both |
+| `./jobhunter status` | One-line health summary with container state, heartbeat, source count, and last digest |
+| `./jobhunter login` | Run Codex device login inside the OpenClaw container |
+| `./jobhunter shell [jobbot\|worker]` | Open a shell in a running container |
+| `./jobhunter reset` | Stop services and clear local SQLite/workspace files after typing `reset` |
+
+The root path `./jobbot` is already the Python package directory, so the launcher is named `./jobhunter`.
+
+`./jobhunter start` and `./jobhunter restart` validate that `.env` contains `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` before touching Docker.
+
+## Python Commands
 
 ```bash
 python3 -m jobbot init
@@ -244,9 +268,10 @@ python3 -m jobbot serve
 
 ## Docker
 
+The launcher above is recommended. Raw Compose commands are still useful for debugging:
+
 ```bash
-docker compose up -d jobbot
-docker compose --profile openclaw up -d openclaw-gateway
+docker compose --profile openclaw up -d jobbot openclaw-gateway
 docker compose logs -f jobbot
 docker compose --profile openclaw logs -f openclaw-gateway
 docker compose --profile openclaw config --quiet

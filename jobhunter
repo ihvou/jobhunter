@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${JOBHUNTER_ENV_FILE:-$ROOT/.env}"
+COMPOSE=(docker compose --profile openclaw)
+
+if [[ -t 1 ]]; then
+  GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'
+  RED=$'\033[31m'
+  BOLD=$'\033[1m'
+  RESET=$'\033[0m'
+else
+  GREEN=""
+  YELLOW=""
+  RED=""
+  BOLD=""
+  RESET=""
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: ./jobhunter <command> [args]
+
+Commands:
+  start                 Build if needed, then start jobbot + OpenClaw
+  stop                  Stop and remove the Compose services
+  restart               Rebuild and recreate both services
+  logs [jobbot|worker|both]
+                        Follow logs, default: both
+  status                Print one-line service/data status
+  reset                 Stop services and clear local DB/workspace after prompt
+  shell [jobbot|worker] Open a shell in a running service
+  login                 Run one-time Codex device login in OpenClaw
+  help                  Show this help
+EOF
+}
+
+die() {
+  printf "%sError:%s %s\n" "$RED" "$RESET" "$*" >&2
+  exit 1
+}
+
+env_value() {
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] || return 1
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      gsub(/^"|"$/, "")
+      gsub(/^'\''|'\''$/, "")
+      print
+      found=1
+      exit
+    }
+    END { if (!found) exit 1 }
+  ' "$ENV_FILE"
+}
+
+require_env() {
+  local missing=0
+  for key in TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_CHAT_ID; do
+    local value=""
+    value="$(env_value "$key" || true)"
+    if [[ -z "$value" ]]; then
+      printf "Missing %s in .env\n" "$key" >&2
+      missing=1
+    fi
+  done
+  [[ "$missing" -eq 0 ]] || exit 1
+}
+
+service_name() {
+  case "${1:-both}" in
+    jobbot) printf "jobbot" ;;
+    worker|openclaw|openclaw-gateway) printf "openclaw-gateway" ;;
+    both) printf "both" ;;
+    *) die "unknown service '$1' (use jobbot, worker, or both)" ;;
+  esac
+}
+
+ensure_dirs() {
+  mkdir -p "$ROOT/data" "$ROOT/openclaw/workspace/discovery" "$ROOT/openclaw/workspace/tuning" "$ROOT/openclaw/codex-home"
+}
+
+container_state() {
+  local state
+  state="$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || true)"
+  state="${state//$'\n'/}"
+  [[ -n "$state" ]] || state="missing"
+  printf "%s" "$state"
+}
+
+status_details() {
+  ROOT="$ROOT" python3 - <<'PY'
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(os.environ["ROOT"])
+
+def parse_dt(text):
+    if not text:
+        return None
+    text = str(text).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+def human_age(dt):
+    if not dt:
+        return "never"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+    if seconds < 90:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 90:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+heartbeat = parse_dt((root / "data" / "heartbeat").read_text() if (root / "data" / "heartbeat").exists() else "")
+sources_path = root / "config" / "sources.json"
+try:
+    sources_count = len(json.loads(sources_path.read_text()))
+except Exception:
+    sources_count = 0
+
+last_digest = None
+db_path = root / "data" / "jobs.sqlite"
+if db_path.exists():
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("select max(sent_at) from digest_log").fetchone()
+            last_digest = parse_dt(row[0] if row else None)
+    except sqlite3.Error:
+        pass
+
+print(f"{human_age(heartbeat)}|{sources_count}|{human_age(last_digest)}")
+PY
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  help|-h|--help)
+    usage
+    ;;
+  start)
+    require_env
+    ensure_dirs
+    "${COMPOSE[@]}" build jobbot openclaw-gateway
+    "${COMPOSE[@]}" up -d jobbot openclaw-gateway
+    ;;
+  stop)
+    "${COMPOSE[@]}" down
+    ;;
+  restart)
+    require_env
+    ensure_dirs
+    "${COMPOSE[@]}" build jobbot openclaw-gateway
+    "${COMPOSE[@]}" up -d --force-recreate jobbot openclaw-gateway
+    ;;
+  logs)
+    svc="$(service_name "${2:-both}")"
+    tail_count="${TAIL:-100}"
+    if [[ "$svc" == "both" ]]; then
+      "${COMPOSE[@]}" logs -f --tail="$tail_count" jobbot openclaw-gateway
+    else
+      "${COMPOSE[@]}" logs -f --tail="$tail_count" "$svc"
+    fi
+    ;;
+  status)
+    jobbot_state="$(container_state jobhunter-jobbot)"
+    worker_state="$(container_state jobhunter-openclaw-gateway)"
+    IFS='|' read -r heartbeat_age sources_count last_digest_age < <(status_details)
+    if [[ "$jobbot_state" == "running" && "$worker_state" == "running" ]]; then
+      label="${GREEN}OK${RESET}"
+    elif [[ "$jobbot_state" == "running" || "$worker_state" == "running" ]]; then
+      label="${YELLOW}WARN${RESET}"
+    else
+      label="${RED}STOPPED${RESET}"
+    fi
+    printf "%s · jobbot:%s (heartbeat %s) · worker:%s · %s sources · last digest %s\n" \
+      "$label" "$jobbot_state" "$heartbeat_age" "$worker_state" "$sources_count" "$last_digest_age"
+    ;;
+  reset)
+    printf "%sThis will stop services and delete data/jobs.sqlite plus OpenClaw workspace files.%s\n" "$YELLOW" "$RESET"
+    printf "Type reset to continue: "
+    read -r answer
+    [[ "$answer" == "reset" ]] || die "reset cancelled"
+    "${COMPOSE[@]}" down -v
+    rm -f "$ROOT/data/jobs.sqlite" "$ROOT/data/heartbeat"
+    find "$ROOT/openclaw/workspace/discovery" "$ROOT/openclaw/workspace/tuning" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    printf "%sReset complete.%s\n" "$GREEN" "$RESET"
+    ;;
+  shell)
+    svc="$(service_name "${2:-jobbot}")"
+    [[ "$svc" != "both" ]] || die "shell needs jobbot or worker"
+    "${COMPOSE[@]}" exec "$svc" sh
+    ;;
+  login)
+    ensure_dirs
+    "${COMPOSE[@]}" build openclaw-gateway
+    "${COMPOSE[@]}" run --rm -it openclaw-gateway codex login --device-auth
+    "${COMPOSE[@]}" run --rm openclaw-gateway codex login status
+    ;;
+  *)
+    usage >&2
+    die "unknown command '$cmd'"
+    ;;
+esac
