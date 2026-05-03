@@ -20,7 +20,7 @@ Everything is on-demand. There is no cron-driven collection.
 | `Get more jobs` | Rate-limited collection across enabled sources, cross-source dedupe, deterministic L1 scoring, capped L2 relevance, fresh digest of jobs not previously shown |
 | `Update sources` | Routes a canned `/agent` request; OpenClaw/Codex proposes `sources_proposal` actions; user approves in Telegram |
 | `Tune scoring` | Routes a canned `/agent` request; OpenClaw/Codex proposes `scoring_rule_proposal` actions; user approves in Telegram |
-| `Usage` | Routes a canned `/agent` read-only data request |
+| `Usage` | Replies with local spend/quota/recent-activity counters; does not queue Codex |
 | `/agent <text>` | Writes an agent request into `/jobhunter/workspace/agent`; response may include `data_answer` plus bounded proposed actions |
 
 Two LLM tiers stay separate:

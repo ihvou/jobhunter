@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
@@ -29,7 +30,7 @@ from .config import (
 from .coordinators import DiscoveryCoordinator, ScoringCoordinator, read_json
 from .database import Database, tomorrow_iso
 from .llm import BudgetExceeded, LLMClient, LLMError
-from .logging_setup import configure_logging, log_context
+from .logging_setup import configure_logging, log_context, safe_log_text
 from .models import SourceConfig, utc_now_iso
 from .scoring import load_scoring_rules, score_job
 from . import sources as source_module
@@ -59,6 +60,7 @@ class JobHunter:
         self.agent = AgentCoordinator(config, self.database, self.profile)
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.futures = set()
+        self.agent_apply_in_flight = set()
         self.shutdown_requested = False
         atexit.register(self.shutdown_executor)
         try:
@@ -196,7 +198,16 @@ class JobHunter:
                 )
 
     def handle_action(self, action) -> None:
-        log_context(LOGGER, logging.INFO, "telegram_action_received", scope=action.scope, action=action.action, target_id=action.target_id)
+        log_fields = {"scope": action.scope, "action": action.action, "target_id": action.target_id}
+        text = action_log_text(action)
+        if text:
+            log_fields["text"] = text
+        log_context(
+            LOGGER,
+            logging.INFO,
+            "telegram_action_received",
+            **log_fields,
+        )
         if action.scope == "bot":
             self.handle_bot_action(action)
             return
@@ -244,7 +255,8 @@ class JobHunter:
             self.start_agent_request("Please propose scoring/filtering improvements based on recent feedback and job quality.", action)
             return
         if action.action == "usage":
-            self.start_agent_request("Please show me a usage and quota report for today.", action)
+            self.answer_action(action, "Usage sent", send_message_if_no_callback=False)
+            self.telegram.send_message(format_usage(self.database.usage_summary()))
             return
         if action.action == "agent":
             self.start_agent_request(action.text, action)
@@ -277,6 +289,11 @@ class JobHunter:
         self.answer_action(action, "Unknown bot action")
 
     def start_agent_request(self, text: str, action) -> None:
+        active = self.database.active_agent_run()
+        if active:
+            self.answer_action(action, "Agent already processing", send_message_if_no_callback=False)
+            self.telegram.send_message(format_pending_agent_message(active))
+            return
         allowed, wait = self.database.rate_limit_check("bot:agent", self.config.rate_limit_agent_seconds)
         if not allowed:
             self.answer_action(action, "Please wait %ss before another /agent request" % wait)
@@ -288,16 +305,34 @@ class JobHunter:
         self.refresh_profile()
         session_id = self.agent.create_request(text)
         self.database.add_feedback("__system__", "bot:agent", session_id)
-        self.answer_action(action, "Agent request queued", send_message_if_no_callback=False)
-        self.telegram.send_message(
-            "Agent request queued for OpenClaw/Codex.\nSession: %s\nAudit: daily quota %s/%s"
-            % (session_id, count + 1, self.config.rate_limit_agent_per_day)
+        self.answer_action(action, "Processing request", send_message_if_no_callback=False)
+        sent = self.telegram.send_message(
+            "Processing your request: '%s'...\nSession: %s\nAudit: daily quota %s/%s"
+            % (safe_log_text(text, 80), session_id, count + 1, self.config.rate_limit_agent_per_day)
         )
+        message_id = sent.get("message_id") if isinstance(sent, dict) else None
+        if message_id:
+            self.database.update_agent_run(session_id, placeholder_message_id=message_id)
 
     def answer_action(self, action, text: str, send_message_if_no_callback: bool = True) -> None:
         if action.callback_id:
             self.telegram.answer_callback(action.callback_id, text)
         elif send_message_if_no_callback:
+            self.telegram.send_message(text)
+
+    def edit_or_send_status(self, message_id, text: str) -> None:
+        if message_id and hasattr(self.telegram, "edit_message_text"):
+            try:
+                if len(text) <= 4000:
+                    self.telegram.edit_message_text(message_id, text)
+                    return
+            except TelegramError as exc:
+                log_context(LOGGER, logging.WARNING, "telegram_status_edit_failed", message_id=message_id, error=str(exc))
+                if hasattr(self.telegram, "delete_message"):
+                    self.telegram.delete_message(message_id)
+        if hasattr(self.telegram, "send_long_message"):
+            self.telegram.send_long_message(text)
+        else:
             self.telegram.send_message(text)
 
     def collect_and_digest(self) -> None:
@@ -433,12 +468,14 @@ class JobHunter:
             log_context(LOGGER, logging.INFO, "sending_tuning_approval", session_id=item["session_id"])
             self.telegram.send_tuning_approval(item["session_id"], json.dumps(item["report"], indent=2, sort_keys=True))
         for item in self.agent.poll_done():
+            run = self.database.get_agent_run(item["session_id"])
+            placeholder_message_id = run["placeholder_message_id"] if run and "placeholder_message_id" in run.keys() else None
             if item.get("error"):
                 log_context(LOGGER, logging.WARNING, "sending_agent_failure", session_id=item["session_id"], error=item["error"])
-                self.telegram.send_message(friendly_agent_error(item["error"]))
+                self.edit_or_send_status(placeholder_message_id, friendly_agent_error(item["error"]))
                 continue
             log_context(LOGGER, logging.INFO, "sending_agent_response", session_id=item["session_id"])
-            self.telegram.send_agent_response(item["session_id"], item["response"])
+            self.telegram.send_agent_response(item["session_id"], item["response"], message_id=placeholder_message_id)
 
     def handle_agent_action(self, action) -> None:
         if action.action == "reject":
@@ -456,6 +493,42 @@ class JobHunter:
         if not selected:
             self.telegram.answer_callback(action.callback_id, "No action selected")
             return
+        existing_messages = []
+        pending_selected = []
+        for proposed in selected:
+            existing = self.database.find_applied_agent_action(
+                action.target_id,
+                proposed.get("kind", ""),
+                proposed.get("payload", {}),
+            )
+            if existing:
+                if existing["status"] == "pending_confirm":
+                    existing_messages.append(
+                        "#%s %s: already pending confirmation. Reply `CONFIRM %s` to apply."
+                        % (existing["id"], existing["kind"], existing["id"])
+                    )
+                else:
+                    existing_messages.append("#%s %s: already applied, skipped duplicate click" % (existing["id"], existing["kind"]))
+            else:
+                pending_selected.append(proposed)
+        if not pending_selected:
+            ack = "Already applied" if existing_messages else "No action selected"
+            self.telegram.answer_callback(action.callback_id, ack)
+            self.edit_or_send_status(
+                action.message_id,
+                "Agent action results:\n%s\n\nAudit: session %s" % ("\n".join(existing_messages), action.target_id),
+            )
+            return
+        if action.target_id in self.agent_apply_in_flight:
+            self.telegram.answer_callback(action.callback_id, "Still applying - please wait.")
+            return
+        self.agent_apply_in_flight.add(action.target_id)
+        if action.callback_id:
+            self.telegram.answer_callback(action.callback_id, "Applying agent action(s)...")
+        self.edit_or_send_status(
+            action.message_id,
+            "Applying - %s...\nAudit: session %s" % (safe_log_text(agent_apply_summary(pending_selected), 120), action.target_id),
+        )
         context = AgentActionContext(
             config=self.config,
             database=self.database,
@@ -465,42 +538,45 @@ class JobHunter:
             run_l2=self.run_l2_relevance,
         )
         applied = 0
-        messages = []
+        messages = list(existing_messages)
         run = self.database.get_agent_run(action.target_id)
         user_intent = run["user_text"] if run else response.get("user_intent_summary", "")
-        for proposed in selected:
-            result = apply_agent_action(proposed, context)
-            status = "pending_confirm" if result.requires_confirm else "applied" if result.applied else "failed"
-            row_id = self.database.record_agent_action(
-                action.target_id,
-                proposed.get("kind", ""),
-                user_intent,
-                proposed.get("summary", ""),
-                proposed.get("payload", {}),
-                status,
-                archive_path=result.archive_path,
-                target_path=result.target_path,
-                result_message=result.message,
-            )
-            if result.applied:
-                applied += 1
-            if result.requires_confirm:
-                messages.append("#%s %s: %s. Reply `CONFIRM %s` to apply." % (row_id, proposed.get("kind", ""), result.message, row_id))
-            else:
-                messages.append("#%s %s: %s" % (row_id, proposed.get("kind", ""), result.message))
-            log_context(
-                LOGGER,
-                logging.INFO if result.applied or result.requires_confirm else logging.WARNING,
-                "agent_action_pending_confirm" if result.requires_confirm else "agent_action_applied" if result.applied else "agent_action_failed",
-                action_id=row_id,
-                kind=proposed.get("kind"),
-                result_message=result.message,
-            )
+        try:
+            for proposed in pending_selected:
+                result = apply_agent_action(proposed, context)
+                status = "pending_confirm" if result.requires_confirm else "applied" if result.applied else "failed"
+                row_id = self.database.record_agent_action(
+                    action.target_id,
+                    proposed.get("kind", ""),
+                    user_intent,
+                    proposed.get("summary", ""),
+                    proposed.get("payload", {}),
+                    status,
+                    archive_path=result.archive_path,
+                    target_path=result.target_path,
+                    result_message=result.message,
+                )
+                if result.applied:
+                    applied += 1
+                if result.requires_confirm:
+                    messages.append("#%s %s: %s. Reply `CONFIRM %s` to apply." % (row_id, proposed.get("kind", ""), result.message, row_id))
+                else:
+                    messages.append("#%s %s: %s" % (row_id, proposed.get("kind", ""), result.message))
+                log_context(
+                    LOGGER,
+                    logging.INFO if result.applied or result.requires_confirm else logging.WARNING,
+                    "agent_action_pending_confirm" if result.requires_confirm else "agent_action_applied" if result.applied else "agent_action_failed",
+                    action_id=row_id,
+                    kind=proposed.get("kind"),
+                    result_message=result.message,
+                )
+        finally:
+            self.agent_apply_in_flight.discard(action.target_id)
         pending = len([line for line in messages if "Reply `CONFIRM " in line])
-        self.telegram.answer_callback(action.callback_id, "Applied %s/%s action(s); pending confirm %s" % (applied, len(selected), pending))
-        self.telegram.send_message("Agent action results:\n%s\n\nAudit: session %s" % ("\n".join(messages), action.target_id))
-        if hasattr(self.telegram, "delete_message"):
-            self.telegram.delete_message(action.message_id)
+        heading = "Applied" if applied else "Agent action results"
+        if pending:
+            heading = "Confirmation needed"
+        self.edit_or_send_status(action.message_id, "%s - %s\n\nAudit: session %s" % (heading, "\n".join(messages), action.target_id))
 
     def handle_confirm_action(self, action) -> None:
         try:
@@ -928,6 +1004,60 @@ def format_usage(usage) -> str:
         "Last discovery: %(last_discovery)s\n"
         "Last scoring update: %(last_scoring)s"
     ) % usage
+
+
+def format_pending_agent_message(row) -> str:
+    user_text = safe_log_text(row["user_text"], 80)
+    age = pending_age_seconds(row["requested_at"])
+    return (
+        "Still processing your previous request: '%s' (started %ss ago).\n"
+        "You can still use Get more jobs, Apply on existing proposals, Usage, or per-job buttons. "
+        "Please wait before sending another /agent request."
+    ) % (user_text, age)
+
+
+def pending_age_seconds(requested_at: str) -> int:
+    try:
+        started = datetime.fromisoformat(str(requested_at).replace("Z", "+00:00"))
+        now = datetime.utcnow().replace(tzinfo=started.tzinfo)
+        return max(0, int((now - started).total_seconds()))
+    except ValueError:
+        return 0
+
+
+def action_log_text(action) -> str:
+    if getattr(action, "text", ""):
+        return safe_log_text(action.text, 80)
+    if action.scope == "bot":
+        return {
+            "collect": "Get more jobs",
+            "discover_sources": "Update sources",
+            "tune_scoring": "Tune scoring",
+            "usage": "Usage",
+            "menu": "Menu",
+            "history": "/history",
+            "revert": "/revert",
+        }.get(action.action, "")
+    if action.scope == "agent":
+        if action.action == "apply":
+            return "Apply all" if action.index is None else "Apply %s" % (action.index + 1)
+        if action.action == "reject":
+            return "Reject all"
+    if action.scope == "job":
+        return {
+            "irrelevant": "Irrelevant",
+            "snooze_1d": "Remind me tomorrow",
+            "cover_note": "Give me cover note",
+            "applied": "Applied",
+        }.get(action.action, "")
+    return ""
+
+
+def agent_apply_summary(actions) -> str:
+    summaries = [str(action.get("summary") or action.get("kind") or "action") for action in actions]
+    if len(summaries) == 1:
+        return summaries[0]
+    return "%s actions" % len(summaries)
 
 
 def slugify(value: str) -> str:

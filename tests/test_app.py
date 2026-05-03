@@ -6,10 +6,11 @@ from pathlib import Path
 from unittest import mock
 
 from jobhunter.app import JobHunter
+from jobhunter.agent_actions import ActionResult
 from jobhunter.config import AppConfig, CostConfig
 from jobhunter.database import Database
 from jobhunter.models import Job, ScoreResult, SourceConfig, TelegramAction
-from jobhunter.telegram import TelegramError
+from jobhunter.telegram import TelegramError, format_agent_response
 
 
 class FakeTelegram:
@@ -20,6 +21,8 @@ class FakeTelegram:
         self.answers = []
         self.jobs = []
         self.deleted = []
+        self.edits = []
+        self.fail_next_edit = False
 
     def send_digest_header(self, title, body=""):
         self.messages.append((title, body))
@@ -29,12 +32,28 @@ class FakeTelegram:
 
     def send_message(self, text, reply_markup=None):
         self.messages.append((text, reply_markup))
+        return {"message_id": len(self.messages)}
 
-    def send_long_message(self, text):
-        self.messages.append((text, None))
+    def send_long_message(self, text, reply_markup=None):
+        self.messages.append((text, reply_markup))
+        return {"message_id": len(self.messages)}
 
-    def send_agent_response(self, session_id, response):
-        self.messages.append(("agent", session_id, response))
+    def send_agent_response(self, session_id, response, message_id=None):
+        text, keyboard = format_agent_response(session_id, response)
+        if message_id:
+            try:
+                self.edit_message_text(message_id, text, keyboard)
+                return
+            except TelegramError:
+                self.delete_message(message_id)
+        self.send_long_message(text, keyboard)
+
+    def edit_message_text(self, message_id, text, reply_markup=None):
+        if self.fail_next_edit:
+            self.fail_next_edit = False
+            raise TelegramError("edit failed")
+        self.edits.append((message_id, text, reply_markup))
+        return {"message_id": message_id}
 
     def answer_callback(self, callback_id, text):
         self.answers.append(text)
@@ -130,7 +149,70 @@ class AppTests(unittest.TestCase):
             bot.handle_action(TelegramAction(scope="bot", action="tune_scoring", callback_id="cb"))
             bot.handle_action(TelegramAction(scope="bot", action="usage", callback_id="cb"))
             self.assertEqual(len(list((bot.config.workspace_dir / "agent").glob("request-*.json"))), 1)
-            self.assertTrue(any("Agent request queued" in str(message[0]) for message in bot.telegram.messages))
+            self.assertTrue(any("Processing your request" in str(message[0]) for message in bot.telegram.messages))
+
+    def test_agent_request_log_includes_sanitized_user_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            with self.assertLogs("jobhunter.agent", level="INFO") as captured:
+                bot.handle_action(TelegramAction(scope="bot", action="agent", text="test question\nwith newline\x00"))
+            contexts = [getattr(record, "_context", {}) for record in captured.records]
+            self.assertTrue(any(context.get("user_text") == "test question with newline" for context in contexts))
+
+    def test_agent_request_placeholder_edits_to_final_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            bot.handle_action(TelegramAction(scope="bot", action="agent", text="show usage"))
+            run = bot.database.active_agent_run()
+            placeholder_id = run["placeholder_message_id"]
+            self.assertEqual(bot.telegram.messages[-1][0].splitlines()[0], "Processing your request: 'show usage'...")
+
+            status_path = Path(run["status_path"])
+            response_path = bot.config.workspace_dir / "agent" / ("response-%s.json" % run["session_id"])
+            status_path.write_text(json.dumps({"state": "done"}), encoding="utf-8")
+            response_path.write_text(json.dumps({"answer": "Final answer", "proposed_actions": []}), encoding="utf-8")
+
+            bot.poll_workspace()
+
+            self.assertEqual(bot.telegram.edits[-1][0], placeholder_id)
+            self.assertIn("Final answer", bot.telegram.edits[-1][1])
+
+    def test_agent_response_edit_falls_back_to_delete_and_send(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            bot.handle_action(TelegramAction(scope="bot", action="agent", text="show sources"))
+            run = bot.database.active_agent_run()
+            placeholder_id = run["placeholder_message_id"]
+            bot.telegram.fail_next_edit = True
+            Path(run["status_path"]).write_text(json.dumps({"state": "done"}), encoding="utf-8")
+            response_path = bot.config.workspace_dir / "agent" / ("response-%s.json" % run["session_id"])
+            response_path.write_text(json.dumps({"answer": "Fallback answer", "proposed_actions": []}), encoding="utf-8")
+
+            bot.poll_workspace()
+
+            self.assertIn(placeholder_id, bot.telegram.deleted)
+            self.assertIn("Fallback answer", bot.telegram.messages[-1][0])
+
+    def test_duplicate_agent_request_is_blocked_but_safe_flows_continue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            called = []
+            bot.submit_background = lambda fn, *args: called.append(fn.__name__)
+
+            bot.handle_action(TelegramAction(scope="bot", action="agent", text="first request"))
+            bot.handle_action(TelegramAction(scope="bot", action="agent", text="second request"))
+            bot.handle_action(TelegramAction(scope="bot", action="collect"))
+            bot.handle_action(TelegramAction(scope="bot", action="usage"))
+
+            requests = list((bot.config.workspace_dir / "agent").glob("request-*.json"))
+            self.assertEqual(len(requests), 1)
+            self.assertTrue(any("Still processing your previous request" in str(message[0]) for message in bot.telegram.messages))
+            self.assertIn("collect_and_digest", called)
+            self.assertIn("Usage", bot.telegram.messages[-1][0])
 
     def test_send_digest_filters_by_min_show_score(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -301,6 +383,98 @@ class AppTests(unittest.TestCase):
             templates = bot.database.email_templates_for_source("email-job-alerts")
             self.assertEqual(templates[0]["id"], "linkedin-alerts")
             self.assertEqual(templates[0]["parser_config"]["max_jobs"], 5)
+
+    def test_agent_apply_acknowledges_callback_before_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            session_id = "ack1"
+            agent_dir = bot.config.workspace_dir / "agent"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "response-ack1.json").write_text(
+                json.dumps(
+                    {
+                        "answer": "Apply slow action",
+                        "proposed_actions": [
+                            {"kind": "directive_edit", "summary": "Slow", "payload": {"directive": "Skip duplicates"}}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bot.database.create_agent_run(session_id, "slow", str(agent_dir / "request-ack1.json"), str(agent_dir / "status-ack1.json"))
+
+            def fake_apply(_proposed, _context):
+                self.assertEqual(bot.telegram.answers, ["Applying agent action(s)..."])
+                return ActionResult(True, "slow action done")
+
+            with mock.patch("jobhunter.app.apply_agent_action", side_effect=fake_apply):
+                bot.handle_action(TelegramAction(scope="agent", action="apply", target_id=session_id, callback_id="cb"))
+
+            self.assertEqual(bot.telegram.answers, ["Applying agent action(s)..."])
+
+    def test_agent_apply_duplicate_click_is_blocked_while_in_flight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            session_id = "busy1"
+            agent_dir = bot.config.workspace_dir / "agent"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "response-busy1.json").write_text(
+                json.dumps(
+                    {
+                        "answer": "Apply slow action",
+                        "proposed_actions": [
+                            {"kind": "directive_edit", "summary": "Slow", "payload": {"directive": "Skip duplicates"}}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bot.database.create_agent_run(session_id, "slow", str(agent_dir / "request-busy1.json"), str(agent_dir / "status-busy1.json"))
+            first = TelegramAction(scope="agent", action="apply", target_id=session_id, callback_id="cb1", message_id=10)
+            second = TelegramAction(scope="agent", action="apply", target_id=session_id, callback_id="cb2", message_id=10)
+            clicked_again = []
+
+            def fake_apply(_proposed, _context):
+                if not clicked_again:
+                    clicked_again.append(True)
+                    bot.handle_action(second)
+                return ActionResult(True, "slow action done")
+
+            with mock.patch("jobhunter.app.apply_agent_action", side_effect=fake_apply):
+                bot.handle_action(first)
+
+            self.assertIn("Still applying - please wait.", bot.telegram.answers)
+            self.assertEqual(len(bot.database.recent_agent_actions(10)), 1)
+
+    def test_agent_apply_is_idempotent_for_duplicate_clicks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            session_id = "dupe1"
+            agent_dir = bot.config.workspace_dir / "agent"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "response-dupe1.json").write_text(
+                json.dumps(
+                    {
+                        "answer": "Apply directive",
+                        "proposed_actions": [
+                            {"kind": "directive_edit", "summary": "Add directive", "payload": {"directive": "Skip chess jobs"}}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bot.database.create_agent_run(session_id, "directive", str(agent_dir / "request-dupe1.json"), str(agent_dir / "status-dupe1.json"))
+
+            action = TelegramAction(scope="agent", action="apply", target_id=session_id, callback_id="cb")
+            bot.handle_action(action)
+            bot.handle_action(action)
+
+            rows = bot.database.recent_agent_actions(10)
+            self.assertEqual(len(rows), 1)
+            self.assertIn("already applied", bot.telegram.messages[-1][0])
 
     def test_discovery_approval_appends_test_source(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -87,41 +87,17 @@ class TelegramClient:
     def send_tuning_approval(self, session_id: str, report: str) -> None:
         self.send_message("Scoring tuning proposal:\n\n%s" % report, reply_markup=tuning_keyboard(session_id))
 
-    def send_agent_response(self, session_id: str, response: Dict) -> None:
-        lines = [
-            response.get("answer") or "Agent response ready.",
-            "",
-        ]
-        actions = response.get("proposed_actions") or []
-        write_actions = [action for action in actions if action.get("kind") != "data_answer"]
-        evidence_lines = render_table_rows(response.get("evidence_table"))
-        if evidence_lines:
-            lines.extend(evidence_lines)
-            lines.append("")
-        for action in actions:
-            if action.get("kind") == "data_answer":
-                rendered = render_data_answer(action)
-                if rendered:
-                    lines.extend(rendered)
-                    lines.append("")
-        if write_actions:
-            lines.append("Proposed actions:")
-            for idx, action in enumerate(actions):
-                if action.get("kind") == "data_answer":
-                    continue
-                lines.append("%s. %s: %s" % (idx + 1, action.get("kind"), action.get("summary", "")))
-        usage = response.get("usage") or {}
-        footer = "Audit: session %s" % session_id
-        if usage:
-            footer += " · Codex turns: %s · SQL: %s · fetches: %s · duration: %ss" % (
-                usage.get("codex_turns", 0),
-                usage.get("sql_queries", 0),
-                usage.get("http_fetches", 0),
-                usage.get("duration_seconds", 0),
-            )
-        lines.extend(["", footer])
-        keyboard = agent_actions_keyboard(session_id, actions)
-        self.send_message("\n".join(lines), reply_markup=keyboard or main_menu_keyboard())
+    def send_agent_response(self, session_id: str, response: Dict, message_id: Optional[int] = None) -> None:
+        text, keyboard = format_agent_response(session_id, response)
+        if message_id and len(text) <= 4000:
+            try:
+                self.edit_message_text(message_id, text, reply_markup=keyboard)
+                return
+            except TelegramError as exc:
+                log_context(LOGGER, logging.WARNING, "telegram_agent_response_edit_failed", error=str(exc), message_id=message_id)
+        if message_id:
+            self.delete_message(message_id)
+        self.send_long_message(text, reply_markup=keyboard)
 
     def delete_message(self, message_id: Optional[int]) -> None:
         if not self.enabled or not message_id:
@@ -131,10 +107,10 @@ class TelegramClient:
         except TelegramError as exc:
             log_context(LOGGER, logging.WARNING, "telegram_delete_message_failed", error=str(exc), message_id=message_id)
 
-    def send_message(self, text: str, reply_markup: Optional[Dict] = None, parse_mode: Optional[str] = None) -> None:
+    def send_message(self, text: str, reply_markup: Optional[Dict] = None, parse_mode: Optional[str] = None) -> Dict:
         if not self.enabled:
             print(text)
-            return
+            return {"message_id": None}
         payload = {
             "chat_id": str(self.allowed_chat_id),
             "text": text,
@@ -144,14 +120,39 @@ class TelegramClient:
             payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
-        self._post("sendMessage", payload)
+        data = self._post("sendMessage", payload)
+        return data.get("result") or {}
 
-    def send_long_message(self, text: str) -> None:
+    def edit_message_text(
+        self,
+        message_id: int,
+        text: str,
+        reply_markup: Optional[Dict] = None,
+        parse_mode: Optional[str] = None,
+    ) -> Dict:
+        if not self.enabled:
+            print(text)
+            return {"message_id": message_id}
+        payload = {
+            "chat_id": str(self.allowed_chat_id),
+            "message_id": str(message_id),
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        data = self._post("editMessageText", payload)
+        return data.get("result") or {}
+
+    def send_long_message(self, text: str, reply_markup: Optional[Dict] = None) -> None:
         max_len = 3600
         chunks = split_message(text, max_len)
         for idx, chunk in enumerate(chunks):
             prefix = "Part %s/%s\n" % (idx + 1, len(chunks)) if len(chunks) > 1 else ""
-            self.send_message(prefix + chunk)
+            markup = reply_markup if idx == len(chunks) - 1 else None
+            self.send_message(prefix + chunk, reply_markup=markup)
 
     def answer_callback(self, callback_id: Optional[str], text: str) -> None:
         if not self.enabled or not callback_id:
@@ -263,21 +264,21 @@ def parse_message(text: str) -> Optional[TelegramAction]:
     command, rest = split_command(raw)
     first, tail = split_first_word(raw)
     if first.upper() == "CONFIRM" and tail:
-        return TelegramAction(scope="bot", action="confirm", target_id=tail.lstrip("#").strip())
+        return TelegramAction(scope="bot", action="confirm", target_id=tail.lstrip("#").strip(), text=raw)
     if command == "/agent":
         if not rest:
-            return TelegramAction(scope="bot", action="agent_help")
+            return TelegramAction(scope="bot", action="agent_help", text=raw)
         return TelegramAction(scope="bot", action="agent", text=rest)
     if command == "/revert":
-        return TelegramAction(scope="bot", action="revert", target_id=rest.strip())
+        return TelegramAction(scope="bot", action="revert", target_id=rest.strip(), text=raw)
     if command == "/scoring":
         sub, _tail = split_first_word(rest)
         if sub == "history":
-            return TelegramAction(scope="bot", action="scoring_history")
+            return TelegramAction(scope="bot", action="scoring_history", text=raw)
     normalized = normalize_message_text(text)
     action = BOT_MESSAGE_ACTIONS.get(normalized)
     if action:
-        return TelegramAction(scope="bot", action=action)
+        return TelegramAction(scope="bot", action=action, text=raw)
     return TelegramAction(scope="bot", action="agent", text=raw)
 
 
@@ -394,6 +395,43 @@ def agent_actions_keyboard(session_id: str, actions: List[Dict]) -> Optional[Dic
         ]
     )
     return {"inline_keyboard": rows}
+
+
+def format_agent_response(session_id: str, response: Dict):
+    lines = [
+        response.get("answer") or "Agent response ready.",
+        "",
+    ]
+    actions = response.get("proposed_actions") or []
+    write_actions = [action for action in actions if action.get("kind") != "data_answer"]
+    evidence_lines = render_table_rows(response.get("evidence_table"))
+    if evidence_lines:
+        lines.extend(evidence_lines)
+        lines.append("")
+    for action in actions:
+        if action.get("kind") == "data_answer":
+            rendered = render_data_answer(action)
+            if rendered:
+                lines.extend(rendered)
+                lines.append("")
+    if write_actions:
+        lines.append("Proposed actions:")
+        for idx, action in enumerate(actions):
+            if action.get("kind") == "data_answer":
+                continue
+            lines.append("%s. %s: %s" % (idx + 1, action.get("kind"), action.get("summary", "")))
+    usage = response.get("usage") or {}
+    footer = "Audit: session %s" % session_id
+    if usage:
+        footer += " · Codex turns: %s · SQL: %s · fetches: %s · duration: %ss" % (
+            usage.get("codex_turns", 0),
+            usage.get("sql_queries", 0),
+            usage.get("http_fetches", 0),
+            usage.get("duration_seconds", 0),
+        )
+    lines.extend(["", footer])
+    keyboard = agent_actions_keyboard(session_id, actions)
+    return "\n".join(lines), keyboard or main_menu_keyboard()
 
 
 def render_data_answer(action: Dict) -> List[str]:

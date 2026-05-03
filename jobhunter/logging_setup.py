@@ -41,6 +41,12 @@ def log_context(logger: logging.Logger, level: int, message: str, **context) -> 
     logger.log(level, message, extra={"_context": context})
 
 
+def safe_log_text(value, limit: int) -> str:
+    text = str(value or "").replace("\x00", " ")
+    text = " ".join(text.split())
+    return text[:limit]
+
+
 def mask_secrets(value):
     if isinstance(value, dict):
         return {key: mask_secrets_item(key, item) for key, item in value.items()}

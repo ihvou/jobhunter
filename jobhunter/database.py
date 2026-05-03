@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 
 class Database:
@@ -51,6 +51,9 @@ class Database:
             if current < 5:
                 migrate_v5(conn)
                 set_schema_version(conn, 5)
+            if current < 6:
+                migrate_v6(conn)
+                set_schema_version(conn, 6)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -487,7 +490,18 @@ class Database:
 
     def pending_agent_runs(self) -> List[sqlite3.Row]:
         with self.connection() as conn:
-            return list(conn.execute("select * from agent_runs where status in ('pending', 'running')"))
+            return list(conn.execute("select * from agent_runs where status in ('pending', 'running') order by requested_at asc"))
+
+    def active_agent_run(self) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                select * from agent_runs
+                where status in ('pending', 'running')
+                order by requested_at asc
+                limit 1
+                """
+            ).fetchone()
 
     def get_agent_run(self, session_id: str) -> Optional[sqlite3.Row]:
         with self.connection() as conn:
@@ -531,6 +545,22 @@ class Database:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def find_applied_agent_action(self, session_id: str, kind: str, payload: Dict) -> Optional[sqlite3.Row]:
+        payload_json = json.dumps(payload, sort_keys=True)
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                select * from agent_actions
+                where session_id = ?
+                  and kind = ?
+                  and payload_json = ?
+                  and status in ('applied', 'pending_confirm')
+                order by id asc
+                limit 1
+                """,
+                (session_id, kind, payload_json),
+            ).fetchone()
 
     def recent_agent_actions(self, limit: int = 10) -> List[sqlite3.Row]:
         with self.connection() as conn:
@@ -1021,6 +1051,13 @@ def migrate_v5(conn) -> None:
         create index if not exists idx_email_templates_source on email_templates(source_id, status);
         """
     )
+
+
+def migrate_v6(conn) -> None:
+    try:
+        conn.execute("alter table agent_runs add column placeholder_message_id integer")
+    except sqlite3.OperationalError:
+        pass
 
 
 def set_schema_version(conn, version: int) -> None:

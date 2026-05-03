@@ -6,7 +6,7 @@ from typing import Dict, List
 from .agent_actions import sanitize_actions
 from .config import AppConfig
 from .database import Database
-from .logging_setup import log_context
+from .logging_setup import log_context, safe_log_text
 from .models import UserProfile, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
@@ -90,7 +90,14 @@ class AgentCoordinator:
         write_json(request_path, payload)
         write_json(status_path, {"state": "pending", "updated_at": utc_now_iso(), "message": "Waiting for OpenClaw"})
         self.database.create_agent_run(session_id, user_text, str(request_path), str(status_path))
-        log_context(LOGGER, logging.INFO, "agent_request_created", session_id=session_id, request_path=str(request_path))
+        log_context(
+            LOGGER,
+            logging.INFO,
+            "agent_request_created",
+            session_id=session_id,
+            request_path=str(request_path),
+            user_text=safe_log_text(user_text, 200),
+        )
         return session_id
 
     def poll_done(self) -> List[Dict]:
