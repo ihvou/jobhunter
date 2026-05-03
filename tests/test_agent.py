@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class AgentCoordinatorTests(unittest.TestCase):
-    def test_create_request_keeps_agent_context_under_budget(self):
+    def test_create_request_is_metadata_only_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text((ROOT / "input" / "profile.example.md").read_text(encoding="utf-8"), encoding="utf-8")
@@ -35,9 +35,17 @@ class AgentCoordinatorTests(unittest.TestCase):
             session_id = bot.agent.create_request("find better sources")
             payload = json.loads((config.workspace_dir / "agent" / ("request-%s.json" % session_id)).read_text(encoding="utf-8"))
 
-            self.assertLess(len(json.dumps(payload)), 30000)
-            self.assertEqual(len(payload["recent_jobs_sample"]), 15)
-            self.assertTrue(all(len(job["description_excerpt"]) <= 250 for job in payload["recent_jobs_sample"]))
+            self.assertLess(len(json.dumps(payload)), 5000)
+            self.assertNotIn("profile_md_full", payload)
+            self.assertNotIn("recent_jobs_sample", payload)
+            self.assertNotIn("sources_summary", payload)
+            self.assertNotIn("recent_feedback_summary", payload)
+            self.assertIn("input/profile.local.md", payload["available_files"])
+            self.assertIn("jobhunter/database.py", payload["available_files"])
+            self.assertIn("jobs", payload["db_tables"])
+            self.assertIn("sources", payload["db_tables"])
+            self.assertEqual(payload["counts"]["jobs_total"], 30)
+            self.assertEqual(payload["counts"]["sources_total"], 1)
 
 
 if __name__ == "__main__":

@@ -337,8 +337,8 @@ async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
     const result = await runCodexForAgent(kind, sessionId, workingPrompt, Math.min(timeoutMs, remainingMs));
     const parsed = extractJson(result.finalText);
     if (!Array.isArray(parsed.tool_calls) || parsed.tool_calls.length === 0) {
-      if (turn === 1 && requestRequiresToolInspection(requestPayload)) {
-        throw new Error("agent first turn must use tool_calls for data/file/source/code/url/why requests");
+      if (turn === 1 && agentRequiresInspection(requestPayload)) {
+        throw new Error("agent_no_tools_used");
       }
       parsed.usage = { ...(parsed.usage || {}), ...usage, duration_seconds: Math.round((Date.now() - usage.started_at) / 1000) };
       return parsed;
@@ -355,17 +355,17 @@ async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
   throw new Error(`cap exceeded: OPENCLAW_AGENT_MAX_CODEX_TURNS=${maxAgentTurns}`);
 }
 
-function requestRequiresToolInspection(requestPayload) {
+function agentRequiresInspection(requestPayload) {
   const text = String(
     (requestPayload && (requestPayload.user_text || requestPayload.instructions_hint || requestPayload.query || requestPayload.prompt)) || ""
-  ).toLowerCase();
-  if (!text.trim()) {
+  ).trim();
+  if (!text) {
     return false;
   }
-  return (
-    /https?:\/\//.test(text)
-    || /\b(why|missed|source|sources|scrap|scrape|fetch|parse|parser|email|db|database|sql|jobs?|applied|snoozed|irrelevant|digest|score|scoring|rule|history|file|code|schema|usage|quota)\b/.test(text)
-  );
+  if (/^(hi|hello|hey|thanks?|thank you|ok|okay|cool|nice)[!.\s]*$/i.test(text)) {
+    return false;
+  }
+  return true;
 }
 
 function setRunCodexForTests(fn) {
@@ -625,7 +625,7 @@ module.exports = {
   runCodex,
   runAgentCodex,
   setRunCodexForTests,
-  requestRequiresToolInspection,
+  agentRequiresInspection,
   assertSelectOnly,
   readFileTool,
   listDirTool,

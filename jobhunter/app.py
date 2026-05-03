@@ -435,7 +435,7 @@ class JobHunter:
         for item in self.agent.poll_done():
             if item.get("error"):
                 log_context(LOGGER, logging.WARNING, "sending_agent_failure", session_id=item["session_id"], error=item["error"])
-                self.telegram.send_message("Agent request failed for session %s: %s" % (item["session_id"], item["error"]))
+                self.telegram.send_message(friendly_agent_error(item["error"]))
                 continue
             log_context(LOGGER, logging.INFO, "sending_agent_response", session_id=item["session_id"])
             self.telegram.send_agent_response(item["session_id"], item["response"])
@@ -902,6 +902,20 @@ def run_once() -> None:
     bot.initialize()
     bot.collect()
     bot.send_digest()
+
+
+def friendly_agent_error(error: str) -> str:
+    text = str(error or "").lower()
+    if "agent_no_tools_used" in text:
+        return (
+            "Agent didn't inspect any data before answering — refusing to risk a hallucinated reply. "
+            "Try rephrasing more specifically (mention a file, job URL, or 'why')."
+        )
+    if "cap exceeded" in text:
+        return "Agent hit a per-request cap (turns / queries / wall time). Try a narrower question."
+    if "prompt too large" in text:
+        return "Request too large after expansion. Ask one question at a time or be more specific."
+    return "Agent request failed: %s" % error
 
 
 def format_usage(usage) -> str:

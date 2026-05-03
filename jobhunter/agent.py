@@ -4,12 +4,51 @@ from pathlib import Path
 from typing import Dict, List
 
 from .agent_actions import sanitize_actions
-from .config import AppConfig, load_sources
+from .config import AppConfig
 from .database import Database
 from .logging_setup import log_context
 from .models import UserProfile, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
+
+
+AVAILABLE_FILES = [
+    "input/profile.local.md",
+    "input/cv.local.md",
+    "config/sources.json",
+    "config/scoring.json",
+    "config/jobhunter.json",
+    "jobhunter/database.py",
+    "jobhunter/agent_actions.py",
+    "jobhunter/sources.py",
+    "jobhunter/scoring.py",
+    "jobhunter/coordinators.py",
+    "jobhunter/app.py",
+    "openclaw/prompts/agent.md",
+    "openclaw/prompts/discovery.md",
+    "openclaw/prompts/tuning.md",
+    "tasks.md",
+    "ARCHITECTURE.md",
+]
+
+DB_TABLES = [
+    "jobs",
+    "sources",
+    "job_scores",
+    "job_feedback",
+    "job_l2_verdicts",
+    "digest_log",
+    "source_runs",
+    "scoring_versions",
+    "discovery_runs",
+    "agent_runs",
+    "agent_actions",
+    "usage_log",
+    "usage_daily",
+    "drafts",
+    "email_templates",
+    "email_parser_configs",
+]
 
 
 class AgentCoordinator:
@@ -29,20 +68,12 @@ class AgentCoordinator:
         payload = {
             "session_id": session_id,
             "user_text": user_text,
-            "profile_md_full": self.profile.raw_text[:20000],
-            "recent_directives_count": directive_count(self.profile.directives),
-            "sources_summary": [source_summary(source) for source in load_sources(self.config.sources_path)],
-            "recent_jobs_sample": [
-                job_summary(row, self.config.agent_request_desc_chars)
-                for row in self.database.recent_jobs(max(0, self.config.agent_request_recent_jobs))
-            ],
-            "recent_feedback_summary": recent_feedback_summary(
-                self.database,
-                max(0, self.config.agent_request_feedback_items),
-                self.config.agent_request_desc_chars,
-            ),
-            "scoring_version": current_scoring_version(self.config.scoring_path),
             "instructions_hint": instructions_hint,
+            "available_files": AVAILABLE_FILES,
+            "db_tables": DB_TABLES,
+            "counts": agent_counts(self.database),
+            "scoring_version": current_scoring_version(self.config.scoring_path),
+            "note": "This payload is metadata only. All real data lives in the files above and the SQLite DB at /jobhunter/data/jobs.sqlite. Use read_file / list_dir / query_sql / http_fetch on turn 1 to fetch what you need; do not answer from training memory.",
             "response_contract": {
                 "user_intent_summary": "short text",
                 "answer": "plain text shown to the user",
@@ -123,41 +154,24 @@ def timestamp_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
 
 
-def directive_count(text: str) -> int:
-    return len([line for line in (text or "").splitlines() if line.strip()])
-
-
-def source_summary(source) -> Dict:
-    return {
-        "id": source.id,
-        "name": source.name,
-        "type": source.type,
-        "url": source.url,
-        "status": source.status,
-        "created_by": source.created_by,
-        "query": source.query,
-    }
-
-
-def job_summary(row, desc_chars: int = 250) -> Dict:
-    return {
-        "id": row["id"],
-        "title": row["title"],
-        "company": row["company"],
-        "source_id": row["source_id"],
-        "url": row["url"],
-        "score": row["score"] if "score" in row.keys() else None,
-        "status": row["status"],
-        "description_excerpt": (row["description"] or "")[: max(0, desc_chars)],
-    }
-
-
-def recent_feedback_summary(database: Database, limit: int = 5, desc_chars: int = 250) -> Dict:
-    return {
-        "applied": [job_summary(row, desc_chars) for row in database.feedback_jobs("applied", limit)],
-        "irrelevant": [job_summary(row, desc_chars) for row in database.feedback_jobs("irrelevant", limit)],
-        "cover_note_requested": [job_summary(row, desc_chars) for row in database.feedback_jobs("cover_note", limit)],
-    }
+def agent_counts(database: Database) -> Dict:
+    try:
+        with database.connection() as conn:
+            counts = {
+                "sources_total": conn.execute("select count(*) as c from sources").fetchone()["c"],
+                "sources_active": conn.execute("select count(*) as c from sources where status = 'active'").fetchone()["c"],
+                "jobs_total": conn.execute("select count(*) as c from jobs").fetchone()["c"],
+                "jobs_new": conn.execute("select count(*) as c from jobs where status = 'new'").fetchone()["c"],
+                "applied": conn.execute("select count(*) as c from job_feedback where action = 'applied'").fetchone()["c"],
+                "irrelevant": conn.execute("select count(*) as c from job_feedback where action = 'irrelevant'").fetchone()["c"],
+                "cover_notes": conn.execute("select count(*) as c from job_feedback where action = 'cover_note'").fetchone()["c"],
+            }
+            last_digest = conn.execute("select max(sent_at) as t from digest_log").fetchone()
+            counts["last_digest_at"] = last_digest["t"] if last_digest and last_digest["t"] else ""
+            return counts
+    except Exception as exc:
+        LOGGER.warning("agent_counts_failed: %s", exc)
+        return {}
 
 
 def current_scoring_version(path: Path) -> int:

@@ -188,7 +188,7 @@ worker.setRunCodexForTests(async () => ({
 }));
 (async () => {
   try {
-    await worker.runAgentCodex("agent", "need-tools", "prompt", {user_text: "why did you miss https://example.com/job"});
+    await worker.runAgentCodex("agent", "need-tools", "prompt", {user_text: "what's my current job profile?"});
     process.stdout.write("completed");
   } catch (error) {
     process.stdout.write(error.message);
@@ -196,7 +196,27 @@ worker.setRunCodexForTests(async () => ({
 })();
 """
         )
-        self.assertIn("first turn must use tool_calls", output)
+        self.assertIn("agent_no_tools_used", output)
+
+    def test_agent_first_turn_allows_greeting_without_tools(self):
+        output = run_node(
+            """
+const worker = require("./openclaw/worker/watcher.js");
+worker.setRunCodexForTests(async () => ({
+  finalText: JSON.stringify({user_intent_summary: "greeting", answer: "Hi!", proposed_actions: []})
+}));
+(async () => {
+  try {
+    const r = await worker.runAgentCodex("agent", "greeting", "prompt", {user_text: "hi"});
+    process.stdout.write(JSON.stringify(r));
+  } catch (error) {
+    process.stdout.write("ERROR: " + error.message);
+  }
+})();
+"""
+        )
+        self.assertIn("Hi!", output)
+        self.assertNotIn("ERROR:", output)
 
 
 if __name__ == "__main__":
