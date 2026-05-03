@@ -19,6 +19,7 @@ class FakeTelegram:
         self.messages = []
         self.answers = []
         self.jobs = []
+        self.deleted = []
 
     def send_digest_header(self, title, body=""):
         self.messages.append((title, body))
@@ -37,6 +38,9 @@ class FakeTelegram:
 
     def answer_callback(self, callback_id, text):
         self.answers.append(text)
+
+    def delete_message(self, message_id):
+        self.deleted.append(message_id)
 
     def poll_actions(self):
         return []
@@ -186,16 +190,30 @@ class AppTests(unittest.TestCase):
             called = []
             bot.submit_background = lambda fn, *args: called.append((fn.__name__, args))
             job_id = add_scored_job(bot, "irrelevant")
-            bot.handle_action(TelegramAction(scope="job", action="irrelevant", target_id=job_id, callback_id="cb"))
+            bot.handle_action(TelegramAction(scope="job", action="irrelevant", target_id=job_id, callback_id="cb", message_id=101))
             self.assertEqual(bot.database.get_job(job_id)["status"], "rejected")
+            self.assertIn(101, bot.telegram.deleted)
 
             job_id = add_scored_job(bot, "snooze")
-            bot.handle_action(TelegramAction(scope="job", action="snooze_1d", target_id=job_id, callback_id="cb"))
+            bot.handle_action(TelegramAction(scope="job", action="snooze_1d", target_id=job_id, callback_id="cb", message_id=102))
             self.assertEqual(bot.database.get_job(job_id)["status"], "snoozed")
+            self.assertIn(102, bot.telegram.deleted)
 
             job_id = add_scored_job(bot, "cover")
-            bot.handle_action(TelegramAction(scope="job", action="cover_note", target_id=job_id, callback_id="cb"))
+            bot.handle_action(TelegramAction(scope="job", action="cover_note", target_id=job_id, callback_id="cb", message_id=103))
             self.assertIn(("generate_cover_note", (job_id, False)), called)
+            self.assertIn(103, bot.telegram.deleted)
+
+    def test_job_status_commands_return_deleted_cards(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            add_scored_job(bot, "applied-list", status="applied")
+
+            bot.handle_action(TelegramAction(scope="bot", action="list_applied"))
+
+            self.assertIn("Recent applied jobs", bot.telegram.messages[-1][0])
+            self.assertIn("https://example.com/applied-list", bot.telegram.messages[-1][0])
 
     def test_duplicate_applied_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,6 +263,44 @@ class AppTests(unittest.TestCase):
             with bot.database.connection() as conn:
                 archived = conn.execute("select count(*) as c from jobs where status = 'archived'").fetchone()["c"]
             self.assertEqual(archived, 12)
+
+    def test_email_parser_proposal_agent_action_persists_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            session_id = "email1"
+            agent_dir = bot.config.workspace_dir / "agent"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            (agent_dir / "response-email1.json").write_text(
+                json.dumps(
+                    {
+                        "answer": "Add parser",
+                        "proposed_actions": [
+                            {
+                                "kind": "email_parser_proposal",
+                                "summary": "Parse LinkedIn alert cards",
+                                "payload": {
+                                    "template": {
+                                        "id": "linkedin-alerts",
+                                        "source_id": "email-job-alerts",
+                                        "sender_pattern": "linkedin",
+                                        "subject_pattern": "jobs",
+                                        "parser_config": {"max_jobs": 5},
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bot.database.create_agent_run(session_id, "add email parser", str(agent_dir / "request-email1.json"), str(agent_dir / "status-email1.json"))
+
+            bot.handle_action(TelegramAction(scope="agent", action="apply", target_id=session_id, callback_id="cb"))
+
+            templates = bot.database.email_templates_for_source("email-job-alerts")
+            self.assertEqual(templates[0]["id"], "linkedin-alerts")
+            self.assertEqual(templates[0]["parser_config"]["max_jobs"], 5)
 
     def test_discovery_approval_appends_test_source(self):
         with tempfile.TemporaryDirectory() as tmp:

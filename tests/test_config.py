@@ -6,6 +6,8 @@ from pathlib import Path
 from jobhunter.config import ConfigError, ensure_profile_file, load_app_config, load_sources, parse_optional_int, parse_profile_description
 from test_app import config_for
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 class ConfigTests(unittest.TestCase):
     def test_profile_description_extracts_product_titles(self):
@@ -53,6 +55,13 @@ class ConfigTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ConfigError, "invalid type 'html'"):
                 load_sources(path)
+
+    def test_baseline_sources_are_low_risk_for_trust_mode(self):
+        sources = load_sources(ROOT / "config" / "sources.json")
+
+        active_public = [source for source in sources if source.status == "active" and source.type != "imap"]
+        self.assertTrue(active_public)
+        self.assertTrue(all(source.risk_level == "low" for source in active_public))
 
 
 if __name__ == "__main__":

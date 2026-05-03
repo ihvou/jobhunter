@@ -71,6 +71,24 @@ class DatabaseTests(unittest.TestCase):
             rows = db.jobs_for_digest(10, min_score=50)
             self.assertEqual([row["id"] for row in rows], [high_id])
 
+    def test_due_snoozed_jobs_sort_after_fresh_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            snoozed_id, _ = db.upsert_job(
+                Job(source_id="s", source_name="S", external_id="snoozed", url="https://example.com/snoozed", title="Snoozed", company="C")
+            )
+            fresh_id, _ = db.upsert_job(
+                Job(source_id="s", source_name="S", external_id="fresh", url="https://example.com/fresh", title="Fresh", company="C")
+            )
+            db.save_score(snoozed_id, ScoreResult(score=95, hard_reject=False))
+            db.save_score(fresh_id, ScoreResult(score=70, hard_reject=False))
+            db.update_job_status(snoozed_id, "snoozed", snoozed_until="2000-01-01T00:00:00Z")
+
+            rows = db.jobs_for_digest(10)
+
+            self.assertEqual([row["id"] for row in rows], [fresh_id, snoozed_id])
+
     def test_secondary_dedupe_same_title_company_nearby_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")

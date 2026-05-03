@@ -179,6 +179,25 @@ worker.setRunCodexForTests(async () => {
         )
         self.assertIn("OPENCLAW_AGENT_MAX_WALL_SECONDS", output)
 
+    def test_agent_first_turn_must_use_tools_for_data_requests(self):
+        output = run_node(
+            """
+const worker = require("./openclaw/worker/watcher.js");
+worker.setRunCodexForTests(async () => ({
+  finalText: JSON.stringify({user_intent_summary: "x", answer: "from memory", proposed_actions: []})
+}));
+(async () => {
+  try {
+    await worker.runAgentCodex("agent", "need-tools", "prompt", {user_text: "why did you miss https://example.com/job"});
+    process.stdout.write("completed");
+  } catch (error) {
+    process.stdout.write(error.message);
+  }
+})();
+"""
+        )
+        self.assertIn("first turn must use tool_calls", output)
+
 
 if __name__ == "__main__":
     unittest.main()

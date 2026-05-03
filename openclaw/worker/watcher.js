@@ -314,7 +314,7 @@ function runCodex(kind, sessionId, prompt, timeoutOverrideMs = timeoutMs) {
 
 let runCodexForAgent = runCodex;
 
-async function runAgentCodex(kind, sessionId, prompt) {
+async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
   const startedAt = Date.now();
   const usage = {
     codex_turns: 0,
@@ -337,6 +337,9 @@ async function runAgentCodex(kind, sessionId, prompt) {
     const result = await runCodexForAgent(kind, sessionId, workingPrompt, Math.min(timeoutMs, remainingMs));
     const parsed = extractJson(result.finalText);
     if (!Array.isArray(parsed.tool_calls) || parsed.tool_calls.length === 0) {
+      if (turn === 1 && requestRequiresToolInspection(requestPayload)) {
+        throw new Error("agent first turn must use tool_calls for data/file/source/code/url/why requests");
+      }
       parsed.usage = { ...(parsed.usage || {}), ...usage, duration_seconds: Math.round((Date.now() - usage.started_at) / 1000) };
       return parsed;
     }
@@ -350,6 +353,19 @@ async function runAgentCodex(kind, sessionId, prompt) {
     }
   }
   throw new Error(`cap exceeded: OPENCLAW_AGENT_MAX_CODEX_TURNS=${maxAgentTurns}`);
+}
+
+function requestRequiresToolInspection(requestPayload) {
+  const text = String(
+    (requestPayload && (requestPayload.user_text || requestPayload.instructions_hint || requestPayload.query || requestPayload.prompt)) || ""
+  ).toLowerCase();
+  if (!text.trim()) {
+    return false;
+  }
+  return (
+    /https?:\/\//.test(text)
+    || /\b(why|missed|source|sources|scrap|scrape|fetch|parse|parser|email|db|database|sql|jobs?|applied|snoozed|irrelevant|digest|score|scoring|rule|history|file|code|schema|usage|quota)\b/.test(text)
+  );
 }
 
 function setRunCodexForTests(fn) {
@@ -554,7 +570,7 @@ async function processRequest(kind, requestPath) {
     const prompt = buildPrompt(kind, requestPath);
     const requestPayload = JSON.parse(fs.readFileSync(requestPath, "utf8"));
     const parsed = kind === "agent"
-      ? await runAgentCodex(kind, sessionId, prompt)
+      ? await runAgentCodex(kind, sessionId, prompt, requestPayload)
       : extractJson((await runCodex(kind, sessionId, prompt)).finalText);
     validateResponse(kind, parsed, requestPayload);
     writeJson(responsePath(kind, sessionId), parsed);
@@ -609,6 +625,7 @@ module.exports = {
   runCodex,
   runAgentCodex,
   setRunCodexForTests,
+  requestRequiresToolInspection,
   assertSelectOnly,
   readFileTool,
   listDirTool,

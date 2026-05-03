@@ -248,6 +248,8 @@ def rescore_jobs(payload: Dict, context: AgentActionContext) -> ActionResult:
     if validation:
         return validation
     hours = min(168, max(1, int(payload.get("window_hours", 24) or 24)))
+    if hours > 48 and not context.confirmed:
+        return ActionResult(False, "Rescoring more than 48 hours requires typed CONFIRM", requires_confirm=True)
     source_ids = payload.get("source_ids") or []
     if not isinstance(source_ids, list):
         return ActionResult(False, "rescore_jobs source_ids must be a list")
