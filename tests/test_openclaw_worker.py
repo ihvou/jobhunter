@@ -99,6 +99,7 @@ process.stdout.write(prompt);
 const worker = require("./openclaw/worker/watcher.js");
 const result = {
   select: worker.assertSelectOnly("select id from jobs"),
+  params: worker.assertSqlParams(["%wework%", 1, true, null]),
   rejected: false
 };
 try {
@@ -111,7 +112,27 @@ console.log(JSON.stringify(result));
         )
         result = json.loads(output)
         self.assertEqual(result["select"], "select id from jobs")
+        self.assertEqual(result["params"], ["%wework%", 1, True, None])
         self.assertTrue(result["rejected"])
+
+    def test_agent_tool_results_are_compacted_under_budget(self):
+        output = run_node(
+            """
+process.env.OPENCLAW_MAX_PROMPT_CHARS = "12000";
+process.env.OPENCLAW_AGENT_MAX_TOOL_RESULTS_CHARS = "3000";
+process.env.OPENCLAW_AGENT_MAX_FILE_CONTENT_CHARS = "1200";
+const worker = require("./openclaw/worker/watcher.js");
+const huge = "x".repeat(10000);
+const block = worker.buildToolResultsBlock(1, [
+  {id: "1", name: "read_file", result: {path: "/jobhunter/repo/jobhunter/sources.py", size_bytes: huge.length, content: huge}},
+  {id: "2", name: "read_file", result: {path: "/jobhunter/repo/jobhunter/agent_actions.py", size_bytes: huge.length, content: huge}}
+], 5000);
+process.stdout.write(JSON.stringify({length: block.length, hasHint: block.includes("Tool results were compacted") || block.includes("next_read_hint")}));
+"""
+        )
+        result = json.loads(output)
+        self.assertLess(result["length"], 7000)
+        self.assertTrue(result["hasHint"])
 
     def test_extract_json_uses_last_balanced_object(self):
         output = run_node(

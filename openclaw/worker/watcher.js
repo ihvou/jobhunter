@@ -13,6 +13,10 @@ const maxPromptChars = Math.max(10000, Number(process.env.OPENCLAW_MAX_PROMPT_CH
 const maxSqlQueries = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_SQL_QUERIES || "20"));
 const maxFileReads = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_FILE_READS || "10"));
 const maxHttpFetches = Math.max(0, Number(process.env.OPENCLAW_AGENT_MAX_HTTP_FETCHES || "5"));
+const maxFileContentChars = Math.max(1000, Number(process.env.OPENCLAW_AGENT_MAX_FILE_CONTENT_CHARS || "8000"));
+const maxToolResultsChars = Math.max(2000, Number(process.env.OPENCLAW_AGENT_MAX_TOOL_RESULTS_CHARS || "24000"));
+const maxQueryRows = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_QUERY_ROWS || "50"));
+const maxQueryCellChars = Math.max(100, Number(process.env.OPENCLAW_AGENT_MAX_QUERY_CELL_CHARS || "600"));
 const dbPath = process.env.OPENCLAW_JOBHUNTER_DB_PATH || "/jobhunter/data/jobs.sqlite";
 const inFlight = new Set();
 const KINDS = ["discovery", "tuning", "agent"];
@@ -138,7 +142,9 @@ function buildPrompt(kind, requestPath) {
 Agent tool-call protocol:
 - If you need data, return JSON {"tool_calls":[{"id":"1","name":"query_sql|read_file|list_dir|http_fetch","arguments":{...}}]}.
 - The worker will execute allowed read-only tool calls and append tool_results for another turn.
-- query_sql accepts SELECT only. read_file/list_dir/http_fetch are allowlisted and capped.
+- query_sql accepts SELECT only and optional params: {"sql":"select ... where name like ?","params":["%term%"]}.
+- read_file accepts optional max_chars, start_line, and max_lines. File content is excerpted; ask for another section if needed.
+- read_file/list_dir/http_fetch are allowlisted and capped.
 - When ready, return final JSON {user_intent_summary, answer, evidence_table?, proposed_actions[], usage?}.
 ` : "";
   const prompt = `${template}
@@ -347,12 +353,93 @@ async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
     for (const call of parsed.tool_calls) {
       toolResults.push(await executeToolCall(call, usage));
     }
-    workingPrompt += `\n\nTool results for turn ${turn}:\n${JSON.stringify({ tool_results: toolResults }, null, 2)}\n\nContinue. If enough evidence is available, return final JSON with user_intent_summary, answer, evidence_table, proposed_actions.\n`;
+    const rawChars = JSON.stringify({ tool_results: toolResults }).length;
+    const block = buildToolResultsBlock(turn, toolResults, workingPrompt.length);
+    if (block.length < rawChars) {
+      log("INFO", "agent_tool_results_compacted", { turn, raw_chars: rawChars, block_chars: block.length });
+    }
+    workingPrompt += block;
     if (workingPrompt.length > maxPromptChars) {
       throw new Error(`Prompt too large: ${workingPrompt.length} > ${maxPromptChars}`);
     }
   }
   throw new Error(`cap exceeded: OPENCLAW_AGENT_MAX_CODEX_TURNS=${maxAgentTurns}`);
+}
+
+function buildToolResultsBlock(turn, toolResults, workingPromptLength = 0) {
+  const compacted = toolResults.map(compactToolResult);
+  const budget = Math.max(1000, Math.min(maxToolResultsChars, maxPromptChars - workingPromptLength - 500));
+  let block = renderToolResultsBlock(turn, compacted);
+  if (block.length <= budget) {
+    return block;
+  }
+  const summaries = compacted.map(summarizeToolResult);
+  block = renderToolResultsBlock(turn, summaries);
+  if (block.length <= budget) {
+    return block;
+  }
+  let summaryText = summaries.map((item) => item.result && item.result.summary || item.error || "").join("\n");
+  while (summaryText.length > 100 && renderToolResultsBlock(turn, [summaryToolResult(turn, summaryText)]).length > budget) {
+    summaryText = summaryText.slice(0, Math.floor(summaryText.length / 2));
+  }
+  return renderToolResultsBlock(turn, [summaryToolResult(turn, summaryText)]);
+}
+
+function renderToolResultsBlock(turn, toolResults) {
+  return `\n\nTool results for turn ${turn}:\n${JSON.stringify({ tool_results: toolResults }, null, 2)}\n\nContinue. If enough evidence is available, return final JSON with user_intent_summary, answer, evidence_table, proposed_actions.\n`;
+}
+
+function compactToolResult(toolResult) {
+  const compacted = JSON.parse(JSON.stringify(toolResult || {}));
+  if (compacted.result && typeof compacted.result.content === "string") {
+    const original = compacted.result.content.length;
+    compacted.result.content = truncateText(compacted.result.content, maxFileContentChars);
+    compacted.result.content_truncated = compacted.result.content_truncated || original > compacted.result.content.length;
+    if (original > compacted.result.content.length) {
+      compacted.result.original_content_chars = original;
+      compacted.result.next_read_hint = "Call read_file with start_line/max_lines for another section.";
+    }
+  }
+  if (compacted.result && Array.isArray(compacted.result.rows)) {
+    compacted.result = compactQueryResult(compacted.result);
+  }
+  if (JSON.stringify(compacted).length <= maxToolResultsChars) {
+    return compacted;
+  }
+  return summarizeToolResult(compacted);
+}
+
+function summarizeToolResult(toolResult) {
+  if (toolResult.error) {
+    return { id: toolResult.id, name: toolResult.name, error: toolResult.error };
+  }
+  const result = toolResult.result || {};
+  const summary = {
+    path: result.path,
+    url: result.url,
+    status: result.status,
+    content_type: result.content_type,
+    size_bytes: result.size_bytes,
+    total_lines: result.total_lines,
+    start_line: result.start_line,
+    end_line: result.end_line,
+    row_count: result.row_count,
+    truncated: true,
+    summary: truncateText(JSON.stringify(compactJsonValue(result, 300)), 1200),
+  };
+  return { id: toolResult.id, name: toolResult.name, result: summary };
+}
+
+function summaryToolResult(turn, summaryText) {
+  return {
+    id: `turn-${turn}-summary`,
+    name: "tool_results_summary",
+    result: {
+      truncated: true,
+      summary: truncateText(summaryText, 2000),
+      note: "Tool results were compacted to stay under the prompt cap. Request narrower file sections or SQL columns if needed.",
+    },
+  };
 }
 
 function agentRequiresInspection(requestPayload) {
@@ -381,11 +468,11 @@ async function executeToolCall(call, usage) {
     if (name === "query_sql") {
       if (usage.sql_queries >= maxSqlQueries) throw new Error("cap exceeded: sql_queries");
       usage.sql_queries += 1;
-      result = await querySql(args.sql);
+      result = await querySql(args.sql, args.params);
     } else if (name === "read_file") {
       if (usage.file_reads >= maxFileReads) throw new Error("cap exceeded: file_reads");
       usage.file_reads += 1;
-      result = readFileTool(args.path);
+      result = readFileTool(args.path, args);
     } else if (name === "list_dir") {
       if (usage.file_reads >= maxFileReads) throw new Error("cap exceeded: file_reads");
       usage.file_reads += 1;
@@ -419,18 +506,41 @@ function assertSelectOnly(sql) {
   return text;
 }
 
-function querySql(sql) {
+function assertSqlParams(params) {
+  if (params === undefined || params === null) {
+    return [];
+  }
+  if (!Array.isArray(params)) {
+    throw new Error("query_sql params must be an array");
+  }
+  if (params.length > 50) {
+    throw new Error("query_sql params too large");
+  }
+  return params.map((value) => {
+    if (value === null || typeof value === "number" || typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.slice(0, 1000);
+    }
+    throw new Error("query_sql params must be strings, numbers, booleans, or null");
+  });
+}
+
+function querySql(sql, params = []) {
   const safeSql = assertSelectOnly(sql);
+  const safeParams = assertSqlParams(params);
   const source = `
 import json, sqlite3, sys
-db, sql = sys.argv[1], sys.argv[2]
+db, sql, params_json = sys.argv[1], sys.argv[2], sys.argv[3]
+params = json.loads(params_json)
 conn = sqlite3.connect(db)
 conn.row_factory = sqlite3.Row
-rows = conn.execute(sql).fetchmany(100)
-print(json.dumps({"rows": [dict(row) for row in rows], "row_count": len(rows), "truncated": len(rows) == 100}, default=str))
+rows = conn.execute(sql, params).fetchmany(${maxQueryRows})
+print(json.dumps({"rows": [dict(row) for row in rows], "row_count": len(rows), "truncated": len(rows) == ${maxQueryRows}}, default=str))
 `;
   return new Promise((resolve, reject) => {
-    const child = spawn("python3", ["-c", source, dbPath, safeSql], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("python3", ["-c", source, dbPath, safeSql, JSON.stringify(safeParams)], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => stdout += chunk.toString());
@@ -441,9 +551,55 @@ print(json.dumps({"rows": [dict(row) for row in rows], "row_count": len(rows), "
         reject(new Error(stderr || `query_sql exited ${code}`));
         return;
       }
-      resolve(JSON.parse(stdout || "{}"));
+      resolve(compactQueryResult(JSON.parse(stdout || "{}")));
     });
   });
+}
+
+function compactQueryResult(result) {
+  if (!result || !Array.isArray(result.rows)) {
+    return result;
+  }
+  let rows = result.rows.map((row) => compactJsonValue(row, maxQueryCellChars));
+  let compacted = { ...result, rows };
+  while (JSON.stringify(compacted).length > maxToolResultsChars && rows.length > 10) {
+    rows = rows.slice(0, Math.ceil(rows.length / 2));
+    compacted = { ...compacted, rows, rows_truncated_for_prompt: true };
+  }
+  return compacted;
+}
+
+function compactJsonValue(value, stringLimit) {
+  if (typeof value === "string") {
+    return truncateText(value, stringLimit);
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => compactJsonValue(item, stringLimit));
+  }
+  if (value && typeof value === "object") {
+    const output = {};
+    for (const [key, item] of Object.entries(value)) {
+      output[key] = compactJsonValue(item, stringLimit);
+    }
+    return output;
+  }
+  return value;
+}
+
+function truncateText(value, limit) {
+  const text = String(value || "");
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}\n[truncated ${text.length - limit} chars]`;
+}
+
+function clampInt(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.floor(number)));
 }
 
 function resolveAllowedPath(inputPath) {
@@ -481,12 +637,42 @@ function isBlockedPath(absolute) {
   );
 }
 
-function readFileTool(inputPath) {
+function readFileTool(inputPath, options = {}) {
   const absolute = resolveAllowedPath(inputPath);
   const stat = fs.statSync(absolute);
   if (!stat.isFile()) throw new Error("path is not a file");
   if (stat.size > 1024 * 1024) throw new Error("file too large");
-  return { path: absolute, size_bytes: stat.size, content: fs.readFileSync(absolute, "utf8") };
+  const text = fs.readFileSync(absolute, "utf8");
+  const lines = text.split(/\r?\n/);
+  const maxChars = clampInt(options.max_chars, 1000, maxFileContentChars, maxFileContentChars);
+  const requestedStartLine = clampInt(options.start_line, 1, Math.max(lines.length, 1), 1);
+  const requestedMaxLines = clampInt(options.max_lines, 1, 500, 0);
+  let startLine = requestedStartLine;
+  let endLine = lines.length;
+  let content;
+  if (requestedMaxLines > 0 || startLine > 1) {
+    endLine = Math.min(lines.length, startLine + (requestedMaxLines || 200) - 1);
+    content = lines.slice(startLine - 1, endLine).join("\n");
+  } else {
+    content = text;
+    startLine = 1;
+  }
+  const originalChars = content.length;
+  if (content.length > maxChars) {
+    content = content.slice(0, maxChars);
+    endLine = startLine + content.split(/\r?\n/).length - 1;
+  }
+  const truncated = originalChars > content.length || endLine < lines.length;
+  return {
+    path: absolute,
+    size_bytes: stat.size,
+    total_lines: lines.length,
+    start_line: startLine,
+    end_line: endLine,
+    content,
+    content_truncated: truncated,
+    next_read_hint: truncated ? "Call read_file with start_line/max_lines for another section." : "",
+  };
 }
 
 function listDirTool(inputPath) {
@@ -625,6 +811,9 @@ module.exports = {
   setRunCodexForTests,
   agentRequiresInspection,
   assertSelectOnly,
+  assertSqlParams,
+  buildToolResultsBlock,
+  compactToolResult,
   readFileTool,
   listDirTool,
   httpFetchTool,
