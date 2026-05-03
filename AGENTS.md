@@ -17,7 +17,7 @@ Everything is on-demand. There is no cron-driven collection.
 
 | Entry Point | Behavior |
 |---|---|
-| `Get more jobs` | Rate-limited collection across enabled sources, cross-source dedupe, deterministic L1 scoring, capped L2 relevance, fresh digest of jobs not previously shown |
+| `Get more jobs` | Instant ranked digest from indexed jobs; if sources are stale, queue background collection + L1/L2 indexing for next time |
 | `Update sources` | Routes a canned `/agent` request; OpenClaw/Codex proposes `sources_proposal` actions; user approves in Telegram |
 | `Tune scoring` | Routes a canned `/agent` request; OpenClaw/Codex proposes `scoring_rule_proposal` actions; user approves in Telegram |
 | `Usage` | Replies with local spend/quota/recent-activity counters; does not queue Codex |
@@ -30,7 +30,7 @@ Two LLM tiers stay separate:
 | Codex subscription | OpenClaw side | Source discovery, strategy analysis, read-only data answers, and scoring/filter tuning |
 | OpenAI API | `jobhunter` | Cover notes and capped L2 relevance only, behind local budget gates and per-day count caps |
 
-L1 scoring is deterministic and free. L2 relevance is an optional, cached, budget-gated OpenAI API pass on top L1 candidates; Codex is not used to score every job.
+L1 scoring is deterministic and free. L2 relevance is an optional, cached, budget-gated OpenAI API pass at indexing time for top L1 candidates; Codex is not used to score every job.
 
 ## Source Of Truth
 
@@ -148,7 +148,7 @@ docker compose --profile openclaw up -d openclaw-gateway
 | OpenClaw worker runtime | Implemented in `openclaw/worker/` with Codex CLI |
 | Agentic free-form loop | Implemented: `/agent` plus normal free-form text, shared `agent/` workspace, multi-action response schema |
 | Agent action registry | Implemented with bounded handlers and audit/revert rows |
-| L2 relevance pass | Implemented: cached OpenAI/API-or-local-fallback verdicts sorted into digest |
+| L2 relevance pass | Implemented: cached OpenAI/API-or-local-fallback verdicts persisted into `jobs.l2_score`; digest is a pure ranked SELECT |
 | Single profile file | Implemented: `input/profile.local.md` with `# About me` and `# Directives`; legacy JSON folds into it |
 | Worker read-only tools | Implemented for agent loop with SELECT/file/path/http caps |
 | IMAP source filters | Implemented via per-source `query` and UID high-water |

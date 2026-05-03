@@ -31,7 +31,7 @@ from .coordinators import DiscoveryCoordinator, ScoringCoordinator, read_json
 from .database import Database, tomorrow_iso
 from .llm import BudgetExceeded, LLMClient, LLMError
 from .logging_setup import configure_logging, log_context, safe_log_text
-from .models import SourceConfig, utc_now_iso
+from .models import Job, SourceConfig, utc_now_iso
 from .scoring import load_scoring_rules, score_job
 from . import sources as source_module
 from .sources import SourceError, VALID_SOURCE_TYPES, collect_from_source, normalize_source_type, validate_safe_url
@@ -124,6 +124,7 @@ class JobHunter:
         fetched_count = 0
         inserted_count = 0
         error = None
+        l2_candidates = []
         try:
             if self.shutdown_requested:
                 raise SourceError("interrupted")
@@ -137,13 +138,21 @@ class JobHunter:
                     inserted_count += 1
                 result = score_job(job, self.profile, ruleset)
                 self.database.save_score(job_id, result)
+                if inserted and result.score >= 40 and len(l2_candidates) < self.config.l2_max_jobs:
+                    row = self.database.get_job(job_id)
+                    if row:
+                        l2_candidates.append(row)
+            if l2_candidates:
+                self.run_l2_relevance(l2_candidates)
             log_context(LOGGER, logging.INFO, "source_collected", source_id=source.id, fetched=fetched_count, inserted=inserted_count)
         except SourceError as exc:
             error = str(exc)
             log_context(LOGGER, logging.WARNING, "source_error", source_id=source.id, error=error)
+            self.warn_agent_source_collection_failure(source, error)
         except Exception as exc:
             error = "%s: %s" % (exc.__class__.__name__, exc)
             log_context(LOGGER, logging.ERROR, "source_unexpected_error", source_id=source.id, error=error)
+            self.warn_agent_source_collection_failure(source, error)
         finally:
             if self.shutdown_requested and error is None:
                 error = "interrupted"
@@ -151,15 +160,7 @@ class JobHunter:
         return fetched_count, inserted_count
 
     def send_digest(self) -> None:
-        ruleset = load_scoring_rules(self.config.scoring_path)
-        min_show_score = int(ruleset.get("thresholds", {}).get("min_show_score", 0) or 0)
-        pre_rows = self.database.jobs_for_digest(
-            max(self.config.digest_max_jobs, self.config.l2_max_jobs),
-            min_score=min_show_score,
-            include_l2_rejected=True,
-        )
-        self.run_l2_relevance(pre_rows[: self.config.l2_max_jobs])
-        rows = self.database.jobs_for_digest(self.config.digest_max_jobs, min_score=min_show_score)
+        rows = self.database.jobs_for_digest(self.config.digest_max_jobs)
         usage = self.database.usage_summary()
         body = (
             "Jobs today: %(jobs_today)s\n"
@@ -199,6 +200,7 @@ class JobHunter:
 
     def handle_action(self, action) -> None:
         log_fields = {"scope": action.scope, "action": action.action, "target_id": action.target_id}
+        started_at = time.time()
         text = action_log_text(action)
         if text:
             log_fields["text"] = text
@@ -208,55 +210,96 @@ class JobHunter:
             "telegram_action_received",
             **log_fields,
         )
-        if action.scope == "bot":
-            self.handle_bot_action(action)
-            return
-        if action.scope == "agent":
-            self.handle_agent_action(action)
-            return
-        if action.scope == "profile":
-            self.handle_profile_action(action)
-            return
-        if action.scope == "disc":
-            self.handle_discovery_action(action)
-            return
-        if action.scope == "tune":
-            self.handle_tuning_action(action)
-            return
-        if action.scope == "cover":
-            self.handle_cover_override(action)
-            return
-        if action.scope == "job":
-            self.handle_job_action(action)
-            return
-        self.answer_action(action, "Unknown action")
+        try:
+            if action.scope == "bot":
+                self.handle_bot_action(action)
+                return
+            if action.scope == "agent":
+                self.handle_agent_action(action)
+                return
+            if action.scope == "profile":
+                self.handle_profile_action(action)
+                return
+            if action.scope == "disc":
+                self.handle_discovery_action(action)
+                return
+            if action.scope == "tune":
+                self.handle_tuning_action(action)
+                return
+            if action.scope == "cover":
+                self.handle_cover_override(action)
+                return
+            if action.scope == "job":
+                self.handle_job_action(action)
+                return
+            self.log_action_outcome(action, "refused", "unknown scope", started_at)
+            self.answer_action(action, "Unknown action")
+        except Exception as exc:
+            log_context(
+                LOGGER,
+                logging.ERROR,
+                "telegram_action_exception",
+                scope=action.scope,
+                action=action.action,
+                target_id=action.target_id,
+                error=str(exc),
+            )
+            self.log_action_outcome(action, "failed", exc.__class__.__name__, started_at)
+            try:
+                self.answer_action(action, "Internal error processing action - see logs")
+            except Exception as send_exc:
+                log_context(LOGGER, logging.ERROR, "telegram_action_fallback_failed", error=str(send_exc))
 
     def handle_bot_action(self, action) -> None:
         if action.action == "collect":
             allowed, wait = self.database.rate_limit_check("bot:collect", self.config.rate_limit_collect_seconds)
             if not allowed:
                 self.answer_action(action, "Please wait %ss" % wait)
+                self.log_action_outcome(action, "rate_limited", "wait_%ss" % wait)
                 return
-            self.answer_action(action, "Searching for new jobs...")
-            self.submit_background(self.collect_and_digest)
+            self.answer_action(action, "Showing latest indexed jobs...")
+            self.send_digest()
+            stale, age_minutes = self.collection_is_stale()
+            if stale:
+                self.telegram.send_message("Refreshing sources in background for next time.")
+                self.submit_background(self.collect)
+                self.log_action_outcome(action, "queued", "background_refresh")
+            else:
+                self.telegram.send_message("Sources checked %sm ago; skipping refresh." % age_minutes)
+                self.log_action_outcome(action, "served", "cache_fresh")
+            return
+        if action.action == "refresh_collect":
+            allowed, wait = self.database.rate_limit_check("bot:collect", self.config.rate_limit_collect_seconds)
+            if not allowed:
+                self.answer_action(action, "Please wait %ss" % wait)
+                self.log_action_outcome(action, "rate_limited", "wait_%ss" % wait)
+                return
+            self.answer_action(action, "Refreshing sources now...")
+            self.submit_background(self.collect)
+            self.log_action_outcome(action, "queued", "forced_refresh")
             return
         if action.action == "discover_sources":
             allowed, _count = self.database.rate_limit_daily("bot:discover_sources", self.config.rate_limit_discovery_per_day)
             if not allowed:
                 self.answer_action(action, "Discovery limit reached today")
+                self.log_action_outcome(action, "rate_limited", "daily_discovery")
                 return
             self.start_agent_request("Please run a source discovery strategy cycle and propose new high-signal sources.", action)
+            self.log_action_outcome(action, "queued", "agent_discovery")
             return
         if action.action == "tune_scoring":
             allowed, _count = self.database.rate_limit_daily("bot:tune_scoring", self.config.rate_limit_tuning_per_day)
             if not allowed:
                 self.answer_action(action, "Tuning limit reached today")
+                self.log_action_outcome(action, "rate_limited", "daily_tuning")
                 return
             self.start_agent_request("Please propose scoring/filtering improvements based on recent feedback and job quality.", action)
+            self.log_action_outcome(action, "queued", "agent_tuning")
             return
         if action.action == "usage":
             self.answer_action(action, "Usage sent", send_message_if_no_callback=False)
             self.telegram.send_message(format_usage(self.database.usage_summary()))
+            self.log_action_outcome(action, "served", "usage")
             return
         if action.action == "agent":
             self.start_agent_request(action.text, action)
@@ -285,7 +328,9 @@ class JobHunter:
             return
         if action.action == "menu":
             self.telegram.send_digest_header("Jobhunter ready", "Use the keyboard buttons below.")
+            self.log_action_outcome(action, "served", "menu")
             return
+        self.log_action_outcome(action, "refused", "unknown bot action")
         self.answer_action(action, "Unknown bot action")
 
     def start_agent_request(self, text: str, action) -> None:
@@ -315,10 +360,59 @@ class JobHunter:
             self.database.update_agent_run(session_id, placeholder_message_id=message_id)
 
     def answer_action(self, action, text: str, send_message_if_no_callback: bool = True) -> None:
-        if action.callback_id:
-            self.telegram.answer_callback(action.callback_id, text)
-        elif send_message_if_no_callback:
-            self.telegram.send_message(text)
+        try:
+            if action.callback_id:
+                self.telegram.answer_callback(action.callback_id, text)
+            elif send_message_if_no_callback:
+                self.telegram.send_message(text)
+        except TelegramError as exc:
+            log_context(
+                LOGGER,
+                logging.ERROR,
+                "answer_action_failed",
+                scope=action.scope,
+                action=action.action,
+                target_id=action.target_id,
+                callback=bool(action.callback_id),
+                error=str(exc),
+            )
+            raise
+
+    def log_action_outcome(self, action, outcome: str, reason: str = "", started_at: float = None) -> None:
+        elapsed_ms = int((time.time() - started_at) * 1000) if started_at else 0
+        log_context(
+            LOGGER,
+            logging.INFO,
+            "action_outcome",
+            scope=action.scope,
+            action=action.action,
+            target_id=action.target_id,
+            outcome=outcome,
+            reason=reason,
+            elapsed_ms=elapsed_ms,
+        )
+
+    def collection_is_stale(self):
+        last = self.database.last_successful_collection_at()
+        if not last:
+            return True, "never"
+        try:
+            last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return True, "unknown"
+        age_minutes = max(0, int((datetime.utcnow() - last_dt).total_seconds() // 60))
+        return age_minutes >= self.config.collect_stale_minutes, age_minutes
+
+    def warn_agent_source_collection_failure(self, source: SourceConfig, error: str) -> None:
+        if source.created_by != "agent" or source.status not in ("test", "active"):
+            return
+        try:
+            self.telegram.send_message(
+                "Agent-added source failed its collection test: %s (%s)\nReason: %s"
+                % (source.id, source.url, safe_log_text(error, 500))
+            )
+        except TelegramError as exc:
+            log_context(LOGGER, logging.WARNING, "agent_source_failure_warning_failed", source_id=source.id, error=str(exc))
 
     def edit_or_send_status(self, message_id, text: str) -> None:
         if message_id and hasattr(self.telegram, "edit_message_text"):
@@ -558,6 +652,9 @@ class JobHunter:
                 )
                 if result.applied:
                     applied += 1
+                    if proposed.get("kind") in ("scoring_rule_proposal", "profile_edit"):
+                        self.rescore_recent_jobs()
+                        self.send_ranking_preview("Preview after %s" % proposed.get("kind"), row_id)
                 if result.requires_confirm:
                     messages.append("#%s %s: %s. Reply `CONFIRM %s` to apply." % (row_id, proposed.get("kind", ""), result.message, row_id))
                 else:
@@ -624,6 +721,9 @@ class JobHunter:
         )
         self.answer_action(action, "Confirmed action #%s" % action_id, send_message_if_no_callback=False)
         self.telegram.send_message("Confirmed agent action #%s: %s\nAudit: status %s" % (action_id, result.message, status))
+        if result.applied and row["kind"] in ("scoring_rule_proposal", "profile_edit"):
+            self.rescore_recent_jobs()
+            self.send_ranking_preview("Preview after confirmed %s" % row["kind"], action_id)
 
     def handle_revert_action(self, action) -> None:
         try:
@@ -792,7 +892,7 @@ class JobHunter:
                     "url": source_url,
                     "enabled": True,
                     "status": "test",
-                    "risk_level": sanitize_agent_string(candidate.get("risk", "medium"), 20),
+                    "risk_level": sanitize_agent_string(candidate.get("risk") or candidate.get("risk_level") or "low", 20),
                     "created_by": "agent",
                     "why_it_matches": sanitize_agent_string(candidate.get("why_it_matches", ""), 300),
                     "validation_notes": sanitize_agent_string(candidate.get("validation_notes", ""), 500),
@@ -827,6 +927,8 @@ class JobHunter:
             log_context(LOGGER, logging.INFO, "tuning_applied", session_id=action.target_id, version=version)
             self.telegram.answer_callback(action.callback_id, "Applied scoring v%s" % version)
             self.telegram.send_message("Applied scoring rules version %s." % version)
+            self.rescore_recent_jobs()
+            self.send_ranking_preview("Preview after scoring v%s" % version)
 
     def discover_sources(self) -> None:
         session_id = self.discovery.create_request(load_sources(self.config.sources_path), self.source_metrics_markdown())
@@ -848,6 +950,59 @@ class JobHunter:
             if jobs_seen >= 10 and irrelevant / float(jobs_seen) > 0.5:
                 score -= 15
             self.database.update_source_score(row["id"], max(0, min(100, score)))
+
+    def rescore_recent_jobs(self, limit: int = 500) -> None:
+        ruleset = load_scoring_rules(self.config.scoring_path)
+        candidates = []
+        for row in self.database.recent_jobs(limit):
+            job = Job(
+                source_id=row["source_id"],
+                source_name=row["source_name"],
+                external_id=row["external_id"],
+                url=row["url"],
+                title=row["title"],
+                company=row["company"],
+                location=row["location"] or "",
+                remote_policy=row["remote_policy"] or "unknown",
+                salary_min=row["salary_min"],
+                salary_max=row["salary_max"],
+                currency=row["currency"],
+                description=row["description"] or "",
+                posted_at=row["posted_at"],
+            )
+            result = score_job(job, self.profile, ruleset)
+            self.database.save_score(row["id"], result)
+            if result.score >= 40 and len(candidates) < self.config.l2_max_jobs:
+                current = self.database.get_job(row["id"])
+                if current:
+                    candidates.append(current)
+        if candidates:
+            self.run_l2_relevance(candidates)
+        log_context(LOGGER, logging.INFO, "recent_jobs_rescored", limit=limit, l2_candidates=len(candidates))
+
+    def send_ranking_preview(self, title: str, action_id=None) -> None:
+        rows = self.database.top_ranked_jobs(5)
+        if not rows:
+            self.telegram.send_message("%s\nNo ranked jobs are indexed yet." % title)
+            return
+        lines = [title, "Top 5 indexed jobs under current profile/scoring:"]
+        for idx, row in enumerate(rows, start=1):
+            reason = row["l2_reason"] if "l2_reason" in row.keys() and row["l2_reason"] else "no L2 reason yet"
+            lines.append(
+                "%s. %s - %s | total %s (L1 %s + L2 %s) | %s"
+                % (
+                    idx,
+                    row["title"],
+                    row["company"],
+                    row["total_score"] or row["score"] or 0,
+                    row["l1_score"] or 0,
+                    row["l2_score"] or 0,
+                    safe_log_text(reason, 160),
+                )
+            )
+        if action_id:
+            lines.append("Revert with /revert %s" % action_id)
+        self.telegram.send_message("\n".join(lines))
 
     def source_metrics_markdown(self) -> str:
         rows = self.database.source_feedback_metrics()

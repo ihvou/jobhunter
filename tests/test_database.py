@@ -24,7 +24,8 @@ class DatabaseTests(unittest.TestCase):
             db.save_score(job_id, ScoreResult(score=88, hard_reject=False, reasons=["Good fit"], concerns=[]))
             rows = db.jobs_for_digest(10)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["score"], 88)
+            self.assertEqual(rows[0]["score"], 44)
+            self.assertEqual(rows[0]["l1_score"], 44)
 
     def test_cross_source_dedupe_and_no_respam(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,7 +57,7 @@ class DatabaseTests(unittest.TestCase):
             db.mark_digested([job_id])
             self.assertEqual(len(db.jobs_for_digest(10)), 0)
 
-    def test_digest_filters_min_show_score(self):
+    def test_digest_ignores_score_threshold_and_sorts_by_total(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -69,9 +70,9 @@ class DatabaseTests(unittest.TestCase):
             db.save_score(low_id, ScoreResult(score=30, hard_reject=False))
             db.save_score(high_id, ScoreResult(score=80, hard_reject=False))
             rows = db.jobs_for_digest(10, min_score=50)
-            self.assertEqual([row["id"] for row in rows], [high_id])
+            self.assertEqual([row["id"] for row in rows], [high_id, low_id])
 
-    def test_due_snoozed_jobs_sort_after_fresh_jobs(self):
+    def test_due_snoozed_jobs_sort_by_total_score(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -87,7 +88,7 @@ class DatabaseTests(unittest.TestCase):
 
             rows = db.jobs_for_digest(10)
 
-            self.assertEqual([row["id"] for row in rows], [fresh_id, snoozed_id])
+            self.assertEqual([row["id"] for row in rows], [snoozed_id, fresh_id])
 
     def test_secondary_dedupe_same_title_company_nearby_dates(self):
         with tempfile.TemporaryDirectory() as tmp:

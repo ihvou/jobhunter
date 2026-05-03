@@ -390,7 +390,7 @@ def normalize_source_row(source: Dict) -> Dict:
         "url": sanitize_text(source.get("url") or ("imap://job-alerts" if source_type == "imap" else ""), 500),
         "status": source.get("status") or "test",
         "enabled": source.get("status") != "disabled",
-        "risk_level": sanitize_text(source.get("risk_level") or source.get("risk") or "medium", 20),
+        "risk_level": sanitize_text(source.get("risk_level") or source.get("risk") or "low", 20),
         "created_by": source.get("created_by") or "agent",
     }
     if source.get("query"):

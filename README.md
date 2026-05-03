@@ -55,7 +55,7 @@ After `./bin/jobhunter start`:
     AI tooling. Strengths: discovery, product analytics, fast prototyping. Avoid:
     internships, junior-only roles.
     ```
-2. **Get your first digest** — tap `Get more jobs`. The bot collects, scores, and sends you the top matches.
+2. **Get your first digest** — tap `Get more jobs`. The bot instantly serves the best indexed jobs, then refreshes sources in the background if the last successful collection is older than `JOBHUNTER_COLLECT_STALE_MINUTES` (default 30). Use `/refresh` to force a source refresh.
 3. **React to each card** — tap `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied`. The card disappears from chat after the action.
 4. **Teach the system in plain English** — type `skip jobs that mention German required` or `prioritize Product Builder roles building with Claude or Codex`. The agent proposes a directive change; you approve; the next `Get more jobs` reflects it.
 5. **Refine sources and scoring when needed** — tap `Update sources` or `Tune scoring`. The agent proposes changes; you approve per-candidate or per-rule.
@@ -87,6 +87,7 @@ After `./bin/jobhunter start`:
 | `/revert <id>` | Restore the archived file for a reversible agent action |
 | `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status (since cards leave the chat after each action) |
 | `/jobs`, `/sources`, `/tune`, `/usage` | Slash equivalents of the four reply-keyboard buttons |
+| `/refresh` | Force a background source refresh without waiting for the stale gate |
 
 ## Agent Examples
 
@@ -114,7 +115,7 @@ Every write action is gated behind `[Apply 1] [Apply 2] [Apply all] [Reject all]
 | Item | Default cap |
 |---|---|
 | L1 per-job scoring | Free (no LLM) |
-| L2 relevance pass | OpenAI on top L1 candidates only, ≤ `JOBHUNTER_L2_MAX_JOBS=30` per click, cached per job (~$0.003/click typical) |
+| L2 relevance pass | OpenAI at indexing/collection time for new candidates above the L1 cutoff, ≤ `JOBHUNTER_L2_MAX_JOBS=30` per source run, cached per job (~$0.003/run typical with current caps) |
 | Cover notes | OpenAI, `gpt-4o-mini`, daily/monthly budget gate, 10/day, one-tap override on overage |
 | Agent requests | Codex subscription (no per-call cost), 20/day, 10s cooldown, capped per-request (5 turns / 20 SQL / 10 file reads / 5 fetches / 180s) |
 | Bulk write actions | Approval tap PLUS typed `CONFIRM <id>` reply within 60s |
@@ -215,8 +216,8 @@ For day-to-day use, prefer Telegram + `./bin/jobhunter`. The Python CLI is for d
 
 ```bash
 python3 -m jobhunter init           # init schema, sources, workspace dirs; migrate legacy profile
-python3 -m jobhunter collect        # fetch from enabled sources (no L2, no Telegram send)
-python3 -m jobhunter digest         # run L2 on top L1 survivors and send/print top matches
+python3 -m jobhunter collect        # fetch from enabled sources, L1-score, and index capped L2 relevance
+python3 -m jobhunter digest         # pure indexed SELECT and send/print top matches
 python3 -m jobhunter run-once       # init + collect + digest
 python3 -m jobhunter telegram-poll  # one tick of serve's poll loop
 python3 -m jobhunter discover-sources  # legacy discovery request file (kept for debugging)

@@ -17,6 +17,7 @@ const maxFileContentChars = Math.max(1000, Number(process.env.OPENCLAW_AGENT_MAX
 const maxToolResultsChars = Math.max(2000, Number(process.env.OPENCLAW_AGENT_MAX_TOOL_RESULTS_CHARS || "24000"));
 const maxQueryRows = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_QUERY_ROWS || "50"));
 const maxQueryCellChars = Math.max(100, Number(process.env.OPENCLAW_AGENT_MAX_QUERY_CELL_CHARS || "600"));
+const keepFullToolTurns = Math.max(1, Number(process.env.OPENCLAW_AGENT_KEEP_FULL_TOOL_TURNS || "2"));
 const dbPath = process.env.OPENCLAW_JOBHUNTER_DB_PATH || "/jobhunter/data/jobs.sqlite";
 const inFlight = new Set();
 const KINDS = ["discovery", "tuning", "agent"];
@@ -329,7 +330,7 @@ async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
     http_fetches: 0,
     started_at: startedAt,
   };
-  let workingPrompt = prompt;
+  const toolHistory = [];
   for (let turn = 1; turn <= maxAgentTurns; turn += 1) {
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs > maxAgentWallMs) {
@@ -340,6 +341,7 @@ async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
       throw new Error("cap exceeded: OPENCLAW_AGENT_MAX_WALL_SECONDS");
     }
     usage.codex_turns = turn;
+    const workingPrompt = buildPromptWithToolHistory(prompt, toolHistory);
     const result = await runCodexForAgent(kind, sessionId, workingPrompt, Math.min(timeoutMs, remainingMs));
     const parsed = extractJson(result.finalText);
     if (!Array.isArray(parsed.tool_calls) || parsed.tool_calls.length === 0) {
@@ -354,16 +356,75 @@ async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
       toolResults.push(await executeToolCall(call, usage));
     }
     const rawChars = JSON.stringify({ tool_results: toolResults }).length;
-    const block = buildToolResultsBlock(turn, toolResults, workingPrompt.length);
-    if (block.length < rawChars) {
-      log("INFO", "agent_tool_results_compacted", { turn, raw_chars: rawChars, block_chars: block.length });
+    const entry = buildToolHistoryEntry(turn, toolResults, workingPrompt.length);
+    if (entry.block.length < rawChars) {
+      log("INFO", "agent_tool_results_compacted", { turn, raw_chars: rawChars, block_chars: entry.block.length });
     }
-    workingPrompt += block;
-    if (workingPrompt.length > maxPromptChars) {
-      throw new Error(`Prompt too large: ${workingPrompt.length} > ${maxPromptChars}`);
+    toolHistory.push(entry);
+    const nextPrompt = buildPromptWithToolHistory(prompt, toolHistory);
+    const naiveLength = workingPrompt.length + entry.block.length;
+    if (nextPrompt.length < naiveLength) {
+      log("INFO", "agent_tool_history_evicted", {
+        turn,
+        naive_chars: naiveLength,
+        prompt_chars: nextPrompt.length,
+        history_turns: toolHistory.length,
+      });
     }
   }
   throw new Error(`cap exceeded: OPENCLAW_AGENT_MAX_CODEX_TURNS=${maxAgentTurns}`);
+}
+
+function buildToolHistoryEntry(turn, toolResults, workingPromptLength = 0) {
+  const compacted = toolResults.map(compactToolResult);
+  const block = buildToolResultsBlock(turn, compacted, workingPromptLength);
+  return {
+    turn,
+    block,
+    summary: summarizeToolHistoryTurn(turn, compacted),
+  };
+}
+
+function buildPromptWithToolHistory(basePrompt, toolHistory) {
+  const prompt = renderPromptWithHistory(basePrompt, toolHistory, keepFullToolTurns);
+  if (prompt.length <= maxPromptChars) {
+    return prompt;
+  }
+  for (let fullTurns = keepFullToolTurns - 1; fullTurns >= 0; fullTurns -= 1) {
+    const candidate = renderPromptWithHistory(basePrompt, toolHistory, fullTurns);
+    if (candidate.length <= maxPromptChars) {
+      return candidate;
+    }
+  }
+  const summaryText = toolHistory.map((entry) => `turn ${entry.turn}: ${entry.summary}`).join("\n");
+  const finalPrompt = basePrompt + renderToolResultsBlock("all", [summaryToolResult("all", summaryText)]);
+  if (finalPrompt.length <= maxPromptChars) {
+    return finalPrompt;
+  }
+  throw new Error(`Prompt too large: ${finalPrompt.length} > ${maxPromptChars}`);
+}
+
+function renderPromptWithHistory(basePrompt, toolHistory, fullTurnsToKeep) {
+  const fullStart = Math.max(0, toolHistory.length - Math.max(0, fullTurnsToKeep));
+  const blocks = toolHistory.map((entry, index) => {
+    if (index >= fullStart) {
+      return entry.block;
+    }
+    return renderToolResultsBlock(entry.turn, [summaryToolResult(entry.turn, entry.summary)]);
+  });
+  return basePrompt + blocks.join("");
+}
+
+function summarizeToolHistoryTurn(turn, toolResults) {
+  const summaries = toolResults.map((result) => {
+    const compact = summarizeToolResult(result);
+    if (compact.error) {
+      return `${compact.name || "tool"} error: ${compact.error}`;
+    }
+    const detail = compact.result && (compact.result.path || compact.result.url || compact.result.summary || compact.result.row_count);
+    return `${compact.name || "tool"} ${truncateText(detail || "completed", 300)}`;
+  });
+  return truncateText(summaries.join("; ") || `turn ${turn} tools completed`, 2000);
 }
 
 function buildToolResultsBlock(turn, toolResults, workingPromptLength = 0) {
@@ -813,6 +874,8 @@ module.exports = {
   assertSelectOnly,
   assertSqlParams,
   buildToolResultsBlock,
+  buildToolHistoryEntry,
+  buildPromptWithToolHistory,
   compactToolResult,
   readFileTool,
   listDirTool,

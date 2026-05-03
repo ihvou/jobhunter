@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from jobhunter.agent_actions import AgentActionContext, apply_agent_action, sanitize_actions
 from jobhunter.app import JobHunter
@@ -84,6 +85,43 @@ class AgentActionTests(unittest.TestCase):
             self.assertIn("'new_about_me'", profile_result.message)
             self.assertFalse(scoring_result.applied)
             self.assertIn("'ruleset'", scoring_result.message)
+
+    def test_sources_proposal_defaults_agent_sources_to_low_risk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            bot = JobHunter(config)
+            context = AgentActionContext(
+                config=config,
+                database=bot.database,
+                profile=bot.profile,
+                source_reachable=lambda _url: True,
+            )
+
+            with mock.patch("jobhunter.agent_actions.validate_safe_url"):
+                result = apply_agent_action(
+                    {
+                        "kind": "sources_proposal",
+                        "payload": {
+                            "operations": [
+                                {
+                                    "op": "add",
+                                    "source": {
+                                        "id": "agent-feed",
+                                        "name": "Agent Feed",
+                                        "type": "rss",
+                                        "url": "https://example.com/jobs.rss",
+                                    },
+                                }
+                            ]
+                        },
+                    },
+                    context,
+                )
+
+            self.assertTrue(result.applied)
+            sources = json.loads(config.sources_path.read_text(encoding="utf-8"))
+            self.assertEqual(sources[0]["created_by"], "agent")
+            self.assertEqual(sources[0]["risk_level"], "low")
 
     def test_agent_response_apply_and_revert_audits_file_change(self):
         with tempfile.TemporaryDirectory() as tmp:

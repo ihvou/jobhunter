@@ -2,6 +2,7 @@
   "openai_model": "gpt-4o-mini",
   "digest_max_jobs": 10,
   "collect_interval_minutes": 240,
+  "collect_stale_minutes": 30,
   "max_llm_jobs_per_run": 30,
   "rate_limit_collect_seconds": 600,
   "rate_limit_discovery_per_day": 3,

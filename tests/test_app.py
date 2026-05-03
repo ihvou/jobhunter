@@ -122,7 +122,8 @@ class AppTests(unittest.TestCase):
             called = []
             bot.submit_background = lambda fn, *args: called.append(fn.__name__)
             bot.handle_action(TelegramAction(scope="bot", action="collect", callback_id="cb"))
-            self.assertIn("collect_and_digest", called)
+            self.assertIn("collect", called)
+            self.assertEqual(bot.telegram.answers[-1], "Showing latest indexed jobs...")
 
     def test_bot_collect_reply_keyboard_message_acknowledges_in_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,8 +132,21 @@ class AppTests(unittest.TestCase):
             called = []
             bot.submit_background = lambda fn, *args: called.append(fn.__name__)
             bot.handle_action(TelegramAction(scope="bot", action="collect"))
-            self.assertIn("collect_and_digest", called)
-            self.assertIn(("Searching for new jobs...", None), bot.telegram.messages)
+            self.assertIn("collect", called)
+            self.assertIn(("Showing latest indexed jobs...", None), bot.telegram.messages)
+
+    def test_bot_collect_rate_limit_reports_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            bot = JobHunter(config)
+            bot.telegram = FakeTelegram()
+            bot.submit_background = lambda fn, *args: None
+            bot.handle_action(TelegramAction(scope="bot", action="collect"))
+            with self.assertLogs("jobhunter.app", level="INFO") as captured:
+                bot.handle_action(TelegramAction(scope="bot", action="collect"))
+            self.assertTrue(any("Please wait" in str(message[0]) for message in bot.telegram.messages))
+            contexts = [getattr(record, "_context", {}) for record in captured.records]
+            self.assertTrue(any(record.getMessage() == "action_outcome" and context.get("outcome") == "rate_limited" for record, context in zip(captured.records, contexts)))
 
     def test_bot_menu_action_sends_reply_keyboard_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,10 +225,10 @@ class AppTests(unittest.TestCase):
             requests = list((bot.config.workspace_dir / "agent").glob("request-*.json"))
             self.assertEqual(len(requests), 1)
             self.assertTrue(any("Still processing your previous request" in str(message[0]) for message in bot.telegram.messages))
-            self.assertIn("collect_and_digest", called)
+            self.assertIn("collect", called)
             self.assertIn("Usage", bot.telegram.messages[-1][0])
 
-    def test_send_digest_filters_by_min_show_score(self):
+    def test_send_digest_uses_ranked_index_without_score_threshold(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 50}}', encoding="utf-8")
@@ -225,28 +239,27 @@ class AppTests(unittest.TestCase):
 
             bot.send_digest()
 
-            self.assertEqual(bot.telegram.jobs, [high_id])
-            self.assertNotIn(low_id, bot.telegram.jobs)
+            self.assertEqual(bot.telegram.jobs, [high_id, low_id])
 
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 90}}', encoding="utf-8")
             bot = JobHunter(config)
             bot.telegram = FakeTelegram()
-            add_scored_job(bot, "below", score=80)
+            below_id = add_scored_job(bot, "below", score=80)
 
             bot.send_digest()
 
-            self.assertEqual(bot.telegram.jobs, [])
-            self.assertEqual(bot.telegram.messages[0][0], "No strong new matches right now")
+            self.assertEqual(bot.telegram.jobs, [below_id])
 
-    def test_l2_relevance_filters_obvious_bad_role_family(self):
+    def test_l2_relevance_lowers_bad_role_family_without_hard_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.scoring_path.write_text('{"rules": [], "thresholds": {"min_show_score": 50}}', encoding="utf-8")
             bot = JobHunter(config)
             bot.telegram = FakeTelegram()
             good_id = add_scored_job(bot, "good", score=80)
+            bot.database.save_l2_verdict(good_id, "relevant", "high", "Strong AI product fit", [], "test")
             bad_id, _ = bot.database.upsert_job(
                 Job(
                     source_id="s",
@@ -259,11 +272,11 @@ class AppTests(unittest.TestCase):
                 )
             )
             bot.database.save_score(bad_id, ScoreResult(score=80, hard_reject=False))
+            bot.database.save_l2_verdict(bad_id, "not_relevant", "low", "Product marketing role", [], "test")
 
             bot.send_digest()
 
-            self.assertIn(good_id, bot.telegram.jobs)
-            self.assertNotIn(bad_id, bot.telegram.jobs)
+            self.assertEqual(bot.telegram.jobs[:2], [good_id, bad_id])
 
     def test_job_feedback_callbacks(self):
         with tempfile.TemporaryDirectory() as tmp:

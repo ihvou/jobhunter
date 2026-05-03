@@ -43,6 +43,7 @@ class AppConfig:
     openai_model: str = "gpt-4o-mini"
     digest_max_jobs: int = 10
     collect_interval_minutes: int = 240
+    collect_stale_minutes: int = 30
     max_llm_jobs_per_run: int = 30
     max_response_bytes: int = 8 * 1024 * 1024
     check_robots: bool = True
@@ -144,6 +145,9 @@ def load_app_config() -> AppConfig:
         digest_max_jobs=env_or_setting("JOBHUNTER_DIGEST_MAX_JOBS", settings, "digest_max_jobs", 10, int),
         collect_interval_minutes=env_or_setting(
             "JOBHUNTER_COLLECT_INTERVAL_MINUTES", settings, "collect_interval_minutes", 240, int
+        ),
+        collect_stale_minutes=env_or_setting(
+            "JOBHUNTER_COLLECT_STALE_MINUTES", settings, "collect_stale_minutes", 30, int
         ),
         max_llm_jobs_per_run=env_or_setting("JOBHUNTER_MAX_LLM_JOBS_PER_RUN", settings, "max_llm_jobs_per_run", 30, int),
         max_response_bytes=env_or_setting("JOBHUNTER_MAX_RESPONSE_BYTES", settings, "max_response_bytes", 8 * 1024 * 1024, int),

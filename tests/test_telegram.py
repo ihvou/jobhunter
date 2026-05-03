@@ -45,6 +45,7 @@ class TelegramTests(unittest.TestCase):
             "Usage": "usage",
             "/jobs": "collect",
             "/jobs@jobhunter_bot": "collect",
+            "/refresh": "refresh_collect",
             "/sources": "discover_sources",
             "/tune": "tune_scoring",
             "/usage": "usage",

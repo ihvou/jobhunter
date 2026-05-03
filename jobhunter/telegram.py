@@ -24,6 +24,7 @@ BOT_MESSAGE_ACTIONS = {
     "jobs": "collect",
     "/jobs": "collect",
     "/get_more_jobs": "collect",
+    "/refresh": "refresh_collect",
     "update sources": "discover_sources",
     "sources": "discover_sources",
     "/sources": "discover_sources",
@@ -498,8 +499,11 @@ def format_job_message(row) -> str:
     if "l2_priority" in row.keys() and row["l2_priority"] == "high":
         priority = "High priority · "
     excerpt = strip_html(row["description"] if "description" in row.keys() else "")[:250]
+    score_label = "Score %s" % row["score"]
+    if "l1_score" in row.keys() and "l2_score" in row.keys():
+        score_label = "Score %s (L1 %s + L2 %s)" % (row["total_score"] or row["score"], row["l1_score"] or 0, row["l2_score"] or 0)
     return """*%s* — %s
-Score %s · %s%s · %s%s
+%s · %s%s · %s%s
 
 %s
 
@@ -508,7 +512,7 @@ Score %s · %s%s · %s%s
 %s""" % (
         mdv2_escape(title),
         mdv2_escape(row["company"]),
-        row["score"],
+        mdv2_escape(score_label),
         mdv2_escape(row["location"] or row["remote_policy"] or "Unknown"),
         mdv2_escape(new_source),
         mdv2_escape(row["source_name"]),

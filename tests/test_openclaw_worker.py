@@ -134,6 +134,36 @@ process.stdout.write(JSON.stringify({length: block.length, hasHint: block.includ
         self.assertLess(result["length"], 7000)
         self.assertTrue(result["hasHint"])
 
+    def test_agent_prompt_history_evicts_old_tool_results(self):
+        output = run_node(
+            """
+process.env.OPENCLAW_MAX_PROMPT_CHARS = "16000";
+process.env.OPENCLAW_AGENT_MAX_TOOL_RESULTS_CHARS = "5000";
+process.env.OPENCLAW_AGENT_MAX_FILE_CONTENT_CHARS = "3000";
+process.env.OPENCLAW_AGENT_KEEP_FULL_TOOL_TURNS = "2";
+const worker = require("./openclaw/worker/watcher.js");
+const huge = "x".repeat(9000);
+const history = [];
+for (let turn = 1; turn <= 4; turn += 1) {
+  history.push(worker.buildToolHistoryEntry(turn, [
+    {id: String(turn), name: "read_file", result: {path: "/jobhunter/repo/tasks.md", size_bytes: huge.length, content: huge}}
+  ], 1000));
+}
+const prompt = worker.buildPromptWithToolHistory("base prompt", history);
+process.stdout.write(JSON.stringify({
+  length: prompt.length,
+  summaries: (prompt.match(/tool_results_summary/g) || []).length,
+  turn1Summary: prompt.includes("turn-1-summary"),
+  turn4Full: prompt.includes('"id": "4"')
+}));
+"""
+        )
+        result = json.loads(output)
+        self.assertLess(result["length"], 16000)
+        self.assertGreaterEqual(result["summaries"], 1)
+        self.assertTrue(result["turn1Summary"])
+        self.assertTrue(result["turn4Full"])
+
     def test_extract_json_uses_last_balanced_object(self):
         output = run_node(
             """

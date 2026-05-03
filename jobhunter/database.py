@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 
 class Database:
@@ -54,6 +54,9 @@ class Database:
             if current < 6:
                 migrate_v6(conn)
                 set_schema_version(conn, 6)
+            if current < 7:
+                migrate_v7(conn)
+                set_schema_version(conn, 7)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -255,30 +258,42 @@ class Database:
                     utc_now_iso(),
                 ),
             )
-            if score.hard_reject:
-                conn.execute("update jobs set status = 'rejected' where id = ? and status = 'new'", (job_id,))
+            l1_score = l1_score_from_raw(score.score, score.hard_reject)
+            conn.execute(
+                """
+                update jobs
+                set l1_score = ?,
+                    l1_rules_fired_json = ?,
+                    total_score = ? + coalesce(l2_score, 0)
+                where id = ?
+                """,
+                (l1_score, json.dumps(score.fired_rules), l1_score, job_id),
+            )
 
     def jobs_for_digest(self, limit: int, min_score: int = 0, include_l2_rejected: bool = False) -> List[sqlite3.Row]:
         now = utc_now_iso()
-        l2_filter = "" if include_l2_rejected else "and (l2.verdict is null or l2.verdict in ('relevant', 'borderline'))"
         with self.connection() as conn:
             rows = list(
                 conn.execute(
                     """
-                    select j.*, s.score, s.reasons_json, s.concerns_json, s.fired_rules_json,
+                    select j.*,
+                           coalesce(j.total_score, s.score, 0) as score,
+                           coalesce(j.l1_score, 0) as l1_score,
+                           coalesce(j.l2_score, 0) as l2_score,
+                           coalesce(j.total_score, s.score, 0) as total_score,
+                           coalesce(j.l2_reason, l2.reason, '') as l2_reason,
+                           s.reasons_json,
+                           s.concerns_json,
+                           coalesce(j.l1_rules_fired_json, s.fired_rules_json, '[]') as fired_rules_json,
                            src.status as source_status,
                            l2.verdict as l2_verdict,
                            l2.priority as l2_priority,
-                           l2.reason as l2_reason,
                            l2.evidence_json as l2_evidence_json
                     from jobs j
-                    join job_scores s on s.job_id = j.id
+                    left join job_scores s on s.job_id = j.id
                     left join sources src on src.id = j.source_id
                     left join job_l2_verdicts l2 on l2.job_id = j.id
-                    where s.hard_reject = 0
-                      and s.score >= ?
-                      %s
-                      and (
+                    where (
                         j.status = 'new'
                         or (j.status = 'snoozed' and j.snoozed_until <= ?)
                       )
@@ -288,17 +303,44 @@ class Database:
                           and j.status != 'snoozed'
                       )
                     order by
-                      case when j.status = 'new' then 0 else 1 end,
-                      case l2.priority when 'high' then 3 when 'medium' then 2 when 'low' then 1 else 0 end desc,
-                      s.score desc,
+                      coalesce(j.total_score, s.score, 0) desc,
                       j.first_seen_at desc
                     limit ?
-                    """
-                    % l2_filter,
-                    (min_score, now, limit),
+                    """,
+                    (now, limit),
                 )
             )
             return rows
+
+    def top_ranked_jobs(self, limit: int = 5) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """
+                    select j.*,
+                           coalesce(j.total_score, s.score, 0) as score,
+                           coalesce(j.l1_score, 0) as l1_score,
+                           coalesce(j.l2_score, 0) as l2_score,
+                           coalesce(j.total_score, s.score, 0) as total_score,
+                           coalesce(j.l2_reason, l2.reason, '') as l2_reason,
+                           s.reasons_json,
+                           s.concerns_json,
+                           coalesce(j.l1_rules_fired_json, s.fired_rules_json, '[]') as fired_rules_json,
+                           src.status as source_status,
+                           l2.verdict as l2_verdict,
+                           l2.priority as l2_priority,
+                           l2.evidence_json as l2_evidence_json
+                    from jobs j
+                    left join job_scores s on s.job_id = j.id
+                    left join sources src on src.id = j.source_id
+                    left join job_l2_verdicts l2 on l2.job_id = j.id
+                    where j.status not in ('applied', 'rejected', 'archived')
+                    order by coalesce(j.total_score, s.score, 0) desc, j.first_seen_at desc
+                    limit ?
+                    """,
+                    (limit,),
+                )
+            )
 
     def mark_digested(self, job_ids: List[str]) -> str:
         digest_id = hashlib.sha256(("|".join(job_ids) + utc_now_iso()).encode("utf-8")).hexdigest()[:16]
@@ -393,6 +435,17 @@ class Database:
                     int(output_tokens or 0),
                 ),
             )
+            l2_score = l2_score_from_verdict(verdict, priority)
+            conn.execute(
+                """
+                update jobs
+                set l2_score = ?,
+                    l2_reason = ?,
+                    total_score = coalesce(l1_score, 0) + ?
+                where id = ?
+                """,
+                (l2_score, reason, l2_score, job_id),
+            )
 
     def latest_l2_verdict(self, job_id: str) -> Optional[sqlite3.Row]:
         with self.connection() as conn:
@@ -470,6 +523,18 @@ class Database:
             "last_discovery": last_discovery["requested_at"] if last_discovery else "",
             "last_scoring": last_scoring["activated_at"] if last_scoring else "",
         }
+
+    def last_successful_collection_at(self) -> Optional[str]:
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                select max(finished_at) as finished_at
+                from source_runs
+                where finished_at is not null
+                  and error is null
+                """
+            ).fetchone()
+            return row["finished_at"] if row and row["finished_at"] else None
 
     def create_agent_run(self, session_id: str, user_text: str, request_path: str, status_path: str) -> None:
         with self.connection() as conn:
@@ -1060,6 +1125,50 @@ def migrate_v6(conn) -> None:
         pass
 
 
+def migrate_v7(conn) -> None:
+    for column_sql in [
+        "alter table jobs add column l1_score integer not null default 0",
+        "alter table jobs add column l2_score integer not null default 0",
+        "alter table jobs add column total_score integer not null default 0",
+        "alter table jobs add column l2_reason text not null default ''",
+        "alter table jobs add column l1_rules_fired_json text not null default '[]'",
+    ]:
+        try:
+            conn.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
+    rows = conn.execute(
+        """
+        select j.id,
+               coalesce(s.score, 0) as raw_l1,
+               coalesce(s.hard_reject, 0) as hard_reject,
+               coalesce(s.fired_rules_json, '[]') as fired_rules_json,
+               l2.verdict,
+               l2.priority,
+               coalesce(l2.reason, '') as l2_reason
+        from jobs j
+        left join job_scores s on s.job_id = j.id
+        left join job_l2_verdicts l2 on l2.job_id = j.id
+        """
+    ).fetchall()
+    for row in rows:
+        l1_score = l1_score_from_raw(int(row["raw_l1"] or 0), bool(row["hard_reject"]))
+        l2_score = l2_score_from_verdict(row["verdict"] or "", row["priority"] or "")
+        conn.execute(
+            """
+            update jobs
+            set l1_score = ?,
+                l2_score = ?,
+                total_score = ?,
+                l2_reason = ?,
+                l1_rules_fired_json = ?
+            where id = ?
+            """,
+            (l1_score, l2_score, l1_score + l2_score, row["l2_reason"], row["fired_rules_json"], row["id"]),
+        )
+    conn.execute("create index if not exists idx_jobs_total_score on jobs(total_score desc, first_seen_at desc)")
+
+
 def set_schema_version(conn, version: int) -> None:
     conn.execute("insert or ignore into schema_version (version, applied_at) values (?, ?)", (version, utc_now_iso()))
 
@@ -1146,3 +1255,25 @@ def dedupe_date(posted_at: Optional[str], fallback: Optional[str]) -> Optional[d
 
 def tomorrow_iso() -> str:
     return (datetime.utcnow() + timedelta(days=1)).replace(microsecond=0).isoformat() + "Z"
+
+
+def l1_score_from_raw(score: int, hard_reject: bool = False) -> int:
+    if hard_reject:
+        return 0
+    return max(0, min(50, int(round(max(0, int(score or 0)) / 2.0))))
+
+
+def l2_score_from_verdict(verdict: str, priority: str) -> int:
+    verdict = str(verdict or "").strip().lower()
+    priority = str(priority or "").strip().lower()
+    base = {
+        "relevant": 38,
+        "borderline": 22,
+        "not_relevant": 4,
+    }.get(verdict, 0)
+    bump = {
+        "high": 12,
+        "medium": 7,
+        "low": 3,
+    }.get(priority, 0)
+    return max(0, min(50, base + bump))
