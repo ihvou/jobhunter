@@ -51,7 +51,7 @@ class DiscoveryCoordinator:
             "current_sources": [serialize_source_for_agent(source) for source in current_sources],
             "recent_metrics": metrics,
             "instructions": (
-                "Find high-signal public job sources. Validate candidates with HTTP fetch, robots.txt, "
+                "Find high-signal public job sources. Validate candidates with HTTP fetch, "
                 "sample parse, and dedupe against current sources. Avoid login/cookies."
             ),
             "max_candidates": max_candidates,

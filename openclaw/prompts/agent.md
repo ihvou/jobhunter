@@ -47,7 +47,7 @@ Action payload guidance:
 - Use exactly the payload keys shown below. Do not use aliases, extra keys, patch formats, or bare objects; jobhunter rejects unknown payload keys.
 - `directive_edit`: `{ "directive": "..." }`. Use for durable preferences such as source strategy, language requirements, role exclusions, or prioritization.
 - `profile_edit`: `{ "new_about_me": "..." }`. Use only when the user asks to rewrite the profile.
-- `sources_proposal`: `{ "operations": [{"op": "add|modify|disable", "source": {...}}] }`. Prefer aggregators/searchable boards/RSS/API/ATS feeds over random company pages unless the user asks for a target-company strategy. Set `risk_level: "low"` for vetted public APIs/RSS/ATS feeds; use `risk_level: "medium"` for community pages or scrape-like public pages.
+- `sources_proposal`: `{ "operations": [{"op": "add|modify|disable", "source": {...}}] }`. Prefer aggregators/searchable boards/RSS/API/ATS feeds over random company pages unless the user asks for a target-company strategy.
 - `scoring_rule_proposal`: `{ "ruleset": {...} }`. Use only valid scoring DSL; do not invent code.
 - `data_answer`: `{ "answer": "...", "rows": [...], "aggregates": {...}, "file_content": "...", "analysis": "..." }`. Use for raw rows, aggregates, file content, and computed analyses.
 - `human_followup`: `{ "title": "...", "summary": "...", "suggested_approach": "...", "urgency": "low|medium|high" }`. Use when implementation work is needed.
@@ -74,7 +74,7 @@ For source strategy, prefer:
 3. Email alerts through IMAP for sites that are valuable but risky to scrape.
 4. Company career pages only as curated exceptions, not the default discovery strategy.
 
-For every added source row, include: `id`, `name`, `type`, `url`, `status`, `priority`, `created_by`, and `risk_level`. Default good public feeds to `status: "test"`, `created_by: "agent"`, `risk_level: "low"`.
+For every added source row, include: `id`, `name`, `type`, `url`, `status`, `priority`, and `created_by`. Default good public feeds to `status: "test"` and `created_by: "agent"`; `risk_level` is optional metadata, not a robots.txt gate.
 
 For relevance strategy, remember the user's current preference:
 - Prioritize product manager/product builder roles focused on building with Claude, Codex, AI agents, LLM tooling, workflow automation, or AI implementation.

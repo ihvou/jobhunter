@@ -37,6 +37,20 @@ class ConfigTests(unittest.TestCase):
                 os.environ.update(old_env)
             self.assertEqual(config.digest_max_jobs, 5)
 
+    def test_robots_txt_respect_defaults_to_ignore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_env = dict(os.environ)
+            try:
+                os.environ["JOBHUNTER_DATA_DIR"] = str(Path(tmp) / "data")
+                os.environ["JOBHUNTER_CONFIG_DIR"] = str(Path(tmp) / "config")
+                os.environ["JOBHUNTER_INPUT_DIR"] = str(Path(tmp) / "input")
+                os.environ.pop("JOBHUNTER_ROBOTS_TXT_RESPECT", None)
+                config = load_app_config()
+            finally:
+                os.environ.clear()
+                os.environ.update(old_env)
+            self.assertEqual(config.robots_txt_respect, "ignore")
+
     def test_missing_local_profile_and_cv_are_copied_from_examples(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)

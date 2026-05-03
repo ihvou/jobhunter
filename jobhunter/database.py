@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 
 class Database:
@@ -60,6 +60,9 @@ class Database:
             if current < 8:
                 migrate_v8(conn)
                 set_schema_version(conn, 8)
+            if current < 9:
+                migrate_v9(conn)
+                set_schema_version(conn, 9)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -1221,6 +1224,21 @@ def migrate_v8(conn) -> None:
         alter table jobs_v8 rename to jobs;
         create index if not exists idx_jobs_normalized_title_company on jobs(normalized_title, normalized_company);
         create index if not exists idx_jobs_total_score on jobs(total_score desc, first_seen_at desc);
+        """
+    )
+
+
+def migrate_v9(conn) -> None:
+    conn.execute(
+        """
+        update sources
+        set risk_level = 'low'
+        where created_by = 'agent'
+          and (
+            risk_level is null
+            or trim(risk_level) = ''
+            or lower(trim(risk_level)) = 'medium'
+          )
         """
     )
 

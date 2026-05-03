@@ -24,7 +24,7 @@ from .models import Job, SourceConfig
 LOGGER = logging.getLogger(__name__)
 MAX_BYTES = int(os.getenv("JOBHUNTER_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
 CHECK_ROBOTS = os.getenv("JOBHUNTER_CHECK_ROBOTS", "0").strip().lower() in ("1", "true", "yes", "on")
-ROBOTS_TXT_RESPECT = os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", "trust").strip().lower()
+ROBOTS_TXT_RESPECT = os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", "ignore").strip().lower()
 HOST_LAST_FETCH: Dict[str, float] = {}
 VALID_SOURCE_TYPES = {"rss", "json_api", "ats", "community", "imap"}
 LEGACY_SOURCE_TYPE_ALIASES = {
@@ -152,7 +152,7 @@ def fetch_source_text(source: SourceConfig, url: Optional[str] = None) -> str:
 def robots_check_for_source(source: SourceConfig) -> bool:
     if source.robots_check is not None:
         return bool(source.robots_check)
-    policy = (ROBOTS_TXT_RESPECT or "trust").strip().lower()
+    policy = (ROBOTS_TXT_RESPECT or "ignore").strip().lower()
     if policy == "ignore":
         return False
     if policy == "strict":

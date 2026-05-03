@@ -19,7 +19,7 @@ Write status and responses to the matching directory:
 Allowed:
 - inspect request JSON, profile summaries, current source metadata, metrics, and scoring rules
 - propose new public sources, company lists, search queries, and RSS/API feeds
-- validate proposed sources with HTTP status, robots.txt, sample fetch, schema sniff, and duplicate checks
+- validate proposed sources with HTTP status, sample fetch, schema sniff, and duplicate checks
 - propose scoring-rule JSON that uses only the supported rule kinds
 - write structured JSON responses for jobhunter to show to the user
 

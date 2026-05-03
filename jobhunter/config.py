@@ -61,7 +61,7 @@ class AppConfig:
     agent_request_recent_jobs: int = 15
     agent_request_desc_chars: int = 250
     agent_request_feedback_items: int = 5
-    robots_txt_respect: str = "trust"
+    robots_txt_respect: str = "ignore"
     codex_handoff_mode: str = "auto"
     cost: CostConfig = field(default_factory=CostConfig)
 
@@ -194,7 +194,7 @@ def load_app_config() -> AppConfig:
             "JOBHUNTER_AGENT_REQUEST_FEEDBACK_ITEMS", settings, "agent_request_feedback_items", 5, int
         ),
         robots_txt_respect=str(
-            os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", settings.get("robots_txt_respect", "trust"))
+            os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", settings.get("robots_txt_respect", "ignore"))
         ).strip().lower(),
         codex_handoff_mode=str(os.getenv("JOBHUNTER_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
         cost=cost,

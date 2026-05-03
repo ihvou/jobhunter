@@ -10,6 +10,7 @@
   "rate_limit_cover_notes_per_day": 10,
   "max_response_bytes": 8388608,
   "check_robots": true,
+  "robots_txt_respect": "ignore",
   "cost": {
     "daily_budget_usd": 0.5,
     "monthly_budget_usd": 10.0,

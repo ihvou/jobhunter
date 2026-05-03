@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from jobhunter.database import Database
-from jobhunter.models import Job, ScoreResult
+from jobhunter.models import Job, ScoreResult, SourceConfig
 
 
 class DatabaseTests(unittest.TestCase):
@@ -47,6 +47,46 @@ class DatabaseTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 with db.connection() as conn:
                     conn.execute("update jobs set total_score = 1 where id = ?", (job_id,))
+
+    def test_v9_migrates_agent_medium_sources_to_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            db.upsert_sources(
+                [
+                    SourceConfig(
+                        id="agent-medium",
+                        name="Agent Medium",
+                        type="rss",
+                        url="https://example.com/agent.xml",
+                        created_by="agent",
+                        risk_level="medium",
+                    ),
+                    SourceConfig(
+                        id="agent-high",
+                        name="Agent High",
+                        type="rss",
+                        url="https://example.com/high.xml",
+                        created_by="agent",
+                        risk_level="high",
+                    ),
+                    SourceConfig(
+                        id="user-medium",
+                        name="User Medium",
+                        type="rss",
+                        url="https://example.com/user.xml",
+                        created_by="user",
+                        risk_level="medium",
+                    ),
+                ]
+            )
+            with db.connection() as conn:
+                conn.execute("delete from schema_version where version = 9")
+            db.init_schema()
+            sources = {row["id"]: row for row in db.source_rows()}
+            self.assertEqual(sources["agent-medium"]["risk_level"], "low")
+            self.assertEqual(sources["agent-high"]["risk_level"], "high")
+            self.assertEqual(sources["user-medium"]["risk_level"], "medium")
 
     def test_cross_source_dedupe_and_no_respam(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -86,7 +86,7 @@ approval click and is recorded with a one-tap undo.
 | Secret leakage | CV/API keys exposed in prompts or logs | Narrow Docker volume; scoped API keys; redact logs |
 | Runaway LLM cost | Agent loops on research or analyzes too many jobs | Local budget gate, daily caps, source caps, model allowlist |
 | Host compromise | Agent runs shell commands on host | Full Gateway in Docker; no host home mount; avoid Docker socket mount |
-| Source abuse | Agent aggressively crawls career pages | Rate limits, robots/ToS awareness, per-source fetch caps |
+| Source abuse | Agent aggressively crawls career pages | No recursive crawl, per-host rate limits, per-source fetch caps, timeout/size caps, robots.txt opt-in |
 
 ### 4.2 Tool Policy
 
@@ -245,7 +245,9 @@ Job collection is triggered by the user, not by a fixed schedule. The Telegram
 bot exposes a `Get more jobs` button. Clicking it runs a foreground collection
 across all enabled sources, then sends a fresh digest of new (not-yet-shown)
 jobs. A per-user rate limit prevents accidental hammering of sources. Active
-sources are visited in priority order so high-priority sources fetch first.
+sources are visited in priority order so high-priority sources fetch first. Each
+source fetches a configured public/API/RSS/ATS endpoint or single static page;
+the bot does not crawl or index sites recursively.
 
 | Step | Actor | Action | Output |
 |---:|---|---|---|
@@ -333,8 +335,8 @@ Draft constraints:
 Source discovery is one specific shape of the broader agent flow described
 in §6.6: the user taps `Update sources` (or types `/agent please run a
 discovery cycle`); jobhunter writes a request to the shared workspace; OpenClaw
-runs Codex against it with read-only validation tools (HTTP HEAD, robots.txt
-check, sample fetch, SPA detection); Codex returns one or more
+runs Codex against it with read-only validation tools (HTTP HEAD,
+sample fetch, SPA detection); Codex returns one or more
 `sources_proposal` actions; the user approves per-candidate before anything
 lands in `config/sources.json`.
 
@@ -602,6 +604,13 @@ Promotion `test → active` happens implicitly the first time the user clicks
 `Applied` or `Give me cover note` on a job from that source. Demotion to
 `disabled` is a manual user action (`config/sources.json` edit) or an agent
 recommendation surfaced through the next `Update sources` run.
+
+Robots.txt enforcement is opt-in through `JOBHUNTER_ROBOTS_TXT_RESPECT`.
+The default is `ignore` because jobhunter is not a crawler: collection is
+human-triggered, fetches one configured URL per source, and is bounded by a
+per-host rate limiter, 30s timeout, 8MB response cap, SSRF protection, and
+approval-gated source changes. Users who want stricter behavior can set
+`trust` or `strict`.
 
 ## 8. Job Scoring
 
@@ -1157,7 +1166,7 @@ This is a skeleton, not final production compose. The final compose should match
 | Feature | Included |
 |---|---|
 | `Update sources` flow: jobhunter ↔ OpenClaw ↔ Codex via shared workspace | Yes |
-| Per-candidate validation by OpenClaw (HTTP HEAD, robots.txt, sample fetch) | Yes |
+| Per-candidate validation by OpenClaw (HTTP HEAD, sample fetch, parseability) | Yes |
 | Telegram approval gate; agent-discovered sources written to `sources.json` with `created_by='agent'` | Yes |
 | `discovery_runs` table for audit | Yes |
 

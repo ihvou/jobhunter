@@ -3,7 +3,8 @@ import email
 from unittest import mock
 
 from jobhunter.models import SourceConfig
-from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, infer_company, jobs_from_email, strip_html, validate_safe_url
+from jobhunter import sources as source_module
+from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, fetch_source_text, infer_company, jobs_from_email, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -36,6 +37,60 @@ class SourceTests(unittest.TestCase):
     def test_rejects_file_urls(self):
         with self.assertRaises(SourceError):
             validate_safe_url("file:///etc/passwd")
+
+    def test_default_ignore_policy_does_not_check_robots(self):
+        source = SourceConfig(
+            id="blocked",
+            name="Blocked",
+            type="rss",
+            url="https://blocked.example/jobs.xml",
+            created_by="agent",
+            risk_level="medium",
+        )
+        response = mock.Mock()
+        response.geturl.return_value = source.url
+        response.headers.get_content_charset.return_value = "utf-8"
+        response.read.return_value = b"ok"
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        old_check = source_module.CHECK_ROBOTS
+        old_respect = source_module.ROBOTS_TXT_RESPECT
+        try:
+            source_module.CHECK_ROBOTS = True
+            source_module.ROBOTS_TXT_RESPECT = "ignore"
+            with mock.patch("jobhunter.sources.validate_safe_url"), mock.patch(
+                "jobhunter.sources.wait_for_host_rate_limit"
+            ), mock.patch("jobhunter.sources.robots_allowed", return_value=False) as robots, mock.patch(
+                "jobhunter.sources.urllib.request.urlopen", return_value=response
+            ):
+                self.assertEqual(fetch_source_text(source), "ok")
+            robots.assert_not_called()
+        finally:
+            source_module.CHECK_ROBOTS = old_check
+            source_module.ROBOTS_TXT_RESPECT = old_respect
+
+    def test_strict_policy_keeps_existing_robots_block(self):
+        source = SourceConfig(
+            id="blocked",
+            name="Blocked",
+            type="rss",
+            url="https://blocked.example/jobs.xml",
+            created_by="agent",
+            risk_level="medium",
+        )
+        old_check = source_module.CHECK_ROBOTS
+        old_respect = source_module.ROBOTS_TXT_RESPECT
+        try:
+            source_module.CHECK_ROBOTS = True
+            source_module.ROBOTS_TXT_RESPECT = "strict"
+            with mock.patch("jobhunter.sources.validate_safe_url"), mock.patch(
+                "jobhunter.sources.wait_for_host_rate_limit"
+            ), mock.patch("jobhunter.sources.robots_allowed", return_value=False):
+                with self.assertRaisesRegex(SourceError, "Robots.txt disallows"):
+                    fetch_source_text(source)
+        finally:
+            source_module.CHECK_ROBOTS = old_check
+            source_module.ROBOTS_TXT_RESPECT = old_respect
 
     def test_collect_link_page_extracts_job_links(self):
         source = SourceConfig(id="community", name="Community", type="community", url="https://example.com/jobs")

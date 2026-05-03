@@ -39,7 +39,7 @@ The bot will DM you a ready message with a persistent reply keyboard.
 | `TELEGRAM_ALLOWED_CHAT_ID` | yes | Your numeric chat ID; restricts the bot to your chat only |
 | `OPENAI_API_KEY` | optional | Enables cover-note generation and the OpenAI-backed L2 relevance pass. Without it, L2 falls back to a coarser local heuristic and cover notes use a generic template. |
 
-All other env vars (model, budget caps, agent quotas, IMAP credentials) have sensible defaults; see `.env.example` if you want to tune them. Source fetches use `JOBHUNTER_ROBOTS_TXT_RESPECT=trust` by default: vetted/user-added low-risk sources can fetch documented feeds, while unknown sources still respect robots.txt unless you explicitly override per source.
+All other env vars (model, budget caps, agent quotas, IMAP credentials) have sensible defaults; see `.env.example` if you want to tune them. Source fetches use `JOBHUNTER_ROBOTS_TXT_RESPECT=ignore` by default because the bot does not crawl, index, or recursively follow links: it fetches one configured public/API/RSS/ATS URL per source on a human-triggered run, usually only a few requests per source per day. Politeness is handled by the per-host rate limiter, 30s timeout, 8MB response cap, SSRF guard, and source approval flow. If you specifically want robots.txt enforcement, set `JOBHUNTER_ROBOTS_TXT_RESPECT=trust` or `strict`.
 
 ## How To Use It
 
@@ -209,6 +209,8 @@ The bot auto-copies `input/profile.example.md` and `input/cv.example.md` into th
 ## Source Lifecycle and Priority
 
 Each source row has a status (`active` / `test` / `disabled`) and a priority (`high` / `medium` / `low`). High-priority sources fetch first per `Get more jobs` click. Agent-discovered sources land as `status: test, created_by: agent` and auto-promote to `active` when you mark a job from them as Applied or request a cover note.
+
+Robots.txt handling is opt-in. The default `ignore` policy is intentional for this narrow bot: it fetches documented public feeds or a single configured page, not a search-engine-scale crawl. `trust` respects robots.txt for unknown/non-low-risk sources while allowing user and low-risk sources; `strict` checks robots.txt for every public source.
 
 ## Python Commands (Development / Debugging)
 
