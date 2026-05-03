@@ -35,7 +35,7 @@ from .models import Job, SourceConfig, utc_now_iso
 from .scoring import load_scoring_rules, score_job
 from . import sources as source_module
 from .sources import SourceError, VALID_SOURCE_TYPES, collect_from_source, normalize_source_type, validate_safe_url
-from .telegram import TelegramClient, TelegramError
+from .telegram import TelegramClient, TelegramError, revert_keyboard
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1000,9 +1000,11 @@ class JobHunter:
                     safe_log_text(reason, 160),
                 )
             )
+        reply_markup = None
         if action_id:
             lines.append("Revert with /revert %s" % action_id)
-        self.telegram.send_message("\n".join(lines))
+            reply_markup = revert_keyboard(action_id)
+        self.telegram.send_message("\n".join(lines), reply_markup=reply_markup)
 
     def source_metrics_markdown(self) -> str:
         rows = self.database.source_feedback_metrics()

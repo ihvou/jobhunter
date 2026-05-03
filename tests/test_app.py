@@ -589,6 +589,18 @@ class AppTests(unittest.TestCase):
             self.assertEqual(rules["version"], 2)
             self.assertTrue((bot.config.scoring_path.parent / "scoring.v0.json").exists())
 
+    def test_ranking_preview_includes_revert_button_when_action_id_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = JobHunter(config_for(tmp))
+            bot.telegram = FakeTelegram()
+            add_scored_job(bot, "preview", score=80)
+
+            bot.send_ranking_preview("Preview", action_id=42)
+
+            text, markup = bot.telegram.messages[-1]
+            self.assertIn("Top 5 indexed jobs", text)
+            self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "bot:revert:42")
+
     def test_invalid_tuning_rules_do_not_overwrite_scoring(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = JobHunter(config_for(tmp))

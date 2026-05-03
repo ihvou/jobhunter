@@ -1,3 +1,5 @@
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -77,6 +79,17 @@ class ScoringTests(unittest.TestCase):
         self.assertFalse(result.hard_reject)
         self.assertEqual(result.score, 50)
         self.assertIn("any", result.breakdown)
+
+    def test_min_show_score_warns_as_deprecated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "scoring.json"
+            path.write_text(json.dumps({"rules": [], "thresholds": {"min_show_score": 90}}), encoding="utf-8")
+
+            with self.assertLogs("jobhunter.scoring", level="WARNING") as captured:
+                rules = load_scoring_rules(path)
+
+            self.assertEqual(rules["thresholds"]["min_show_score"], 90)
+            self.assertTrue(any(record.getMessage() == "deprecated_scoring_threshold_ignored" for record in captured.records))
 
     def test_word_boundary_matching_avoids_false_rejects(self):
         self.assertFalse(word_boundary_search("intern", "international product role"))

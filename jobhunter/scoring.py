@@ -1,16 +1,19 @@
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from .logging_setup import log_context
 from .models import Job, ScoreResult, UserProfile
 
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_RULES = {
     "version": 1,
     "generated_by": "baseline",
     "rules": [],
-    "thresholds": {"min_show_score": 50, "hard_reject_floor": 0},
+    "thresholds": {"hard_reject_floor": 0},
 }
 
 
@@ -18,7 +21,23 @@ def load_scoring_rules(path: Path) -> Dict:
     if not path.exists():
         return DEFAULT_RULES
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        ruleset = json.load(handle)
+    warn_deprecated_thresholds(ruleset, path)
+    return ruleset
+
+
+def warn_deprecated_thresholds(ruleset: Dict, path: Path) -> None:
+    thresholds = ruleset.get("thresholds", {}) if isinstance(ruleset, dict) else {}
+    if isinstance(thresholds, dict) and "min_show_score" in thresholds:
+        log_context(
+            LOGGER,
+            logging.WARNING,
+            "deprecated_scoring_threshold_ignored",
+            path=str(path),
+            threshold="min_show_score",
+            value=thresholds.get("min_show_score"),
+            guidance="Digest ranking ignores min_show_score and falls back to top ranked jobs.",
+        )
 
 
 def score_job(job: Job, profile: UserProfile, ruleset: Optional[Dict] = None) -> ScoreResult:

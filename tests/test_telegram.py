@@ -1,7 +1,7 @@
 import unittest
 from unittest import mock
 
-from jobhunter.telegram import TelegramClient, TelegramError, agent_actions_keyboard, job_keyboard, main_menu_keyboard, parse_callback, parse_message
+from jobhunter.telegram import TelegramClient, TelegramError, agent_actions_keyboard, job_keyboard, main_menu_keyboard, parse_callback, parse_message, revert_keyboard
 
 
 class TelegramTests(unittest.TestCase):
@@ -26,6 +26,9 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(parse_callback("bot:discover_sources").action, "discover_sources")
         self.assertEqual(parse_callback("bot:tune_scoring").action, "tune_scoring")
         self.assertEqual(parse_callback("bot:usage").action, "usage")
+        revert = parse_callback("bot:revert:12")
+        self.assertEqual(revert.action, "revert")
+        self.assertEqual(revert.target_id, "12")
         disc = parse_callback("disc:approve:session1:2")
         self.assertEqual(disc.scope, "disc")
         self.assertEqual(disc.index, 2)
@@ -147,6 +150,7 @@ class TelegramTests(unittest.TestCase):
             labels,
             ["Irrelevant", "Remind me tomorrow", "Give me cover note", "Applied"],
         )
+        self.assertEqual(revert_keyboard(12)["inline_keyboard"][0][0]["callback_data"], "bot:revert:12")
 
     def test_poll_actions_accepts_reply_keyboard_messages(self):
         client = TelegramClient("token", 123)

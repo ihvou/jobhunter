@@ -299,6 +299,8 @@ def parse_callback(data: str) -> Optional[TelegramAction]:
         return None
     if parts[0] == "bot" and len(parts) == 2:
         return TelegramAction(scope="bot", action=parts[1])
+    if parts[0] == "bot" and len(parts) == 3:
+        return TelegramAction(scope="bot", action=parts[1], target_id=parts[2])
     if parts[0] == "job" and len(parts) == 3:
         return TelegramAction(scope="job", action=parts[1], target_id=parts[2])
     if parts[0] == "cover" and len(parts) == 3:
@@ -344,6 +346,10 @@ def job_keyboard(job_id: str) -> Dict:
             ],
         ]
     }
+
+
+def revert_keyboard(action_id: int) -> Dict:
+    return {"inline_keyboard": [[{"text": "Revert", "callback_data": "bot:revert:%s" % action_id}]]}
 
 
 def cover_override_keyboard(job_id: str) -> Dict:

@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 7
+LATEST_SCHEMA_VERSION = 8
 
 
 class Database:
@@ -57,6 +57,9 @@ class Database:
             if current < 7:
                 migrate_v7(conn)
                 set_schema_version(conn, 7)
+            if current < 8:
+                migrate_v8(conn)
+                set_schema_version(conn, 8)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -263,11 +266,10 @@ class Database:
                 """
                 update jobs
                 set l1_score = ?,
-                    l1_rules_fired_json = ?,
-                    total_score = ? + coalesce(l2_score, 0)
+                    l1_rules_fired_json = ?
                 where id = ?
                 """,
-                (l1_score, json.dumps(score.fired_rules), l1_score, job_id),
+                (l1_score, json.dumps(score.fired_rules), job_id),
             )
 
     def jobs_for_digest(self, limit: int, min_score: int = 0, include_l2_rejected: bool = False) -> List[sqlite3.Row]:
@@ -440,11 +442,10 @@ class Database:
                 """
                 update jobs
                 set l2_score = ?,
-                    l2_reason = ?,
-                    total_score = coalesce(l1_score, 0) + ?
+                    l2_reason = ?
                 where id = ?
                 """,
-                (l2_score, reason, l2_score, job_id),
+                (l2_score, reason, job_id),
             )
 
     def latest_l2_verdict(self, job_id: str) -> Optional[sqlite3.Row]:
@@ -1167,6 +1168,61 @@ def migrate_v7(conn) -> None:
             (l1_score, l2_score, l1_score + l2_score, row["l2_reason"], row["fired_rules_json"], row["id"]),
         )
     conn.execute("create index if not exists idx_jobs_total_score on jobs(total_score desc, first_seen_at desc)")
+
+
+def migrate_v8(conn) -> None:
+    conn.execute("drop table if exists jobs_v8")
+    conn.executescript(
+        """
+        create table jobs_v8 (
+            id text primary key,
+            source_id text not null,
+            source_name text not null,
+            external_id text,
+            url text not null,
+            title text not null,
+            company text not null,
+            location text,
+            remote_policy text,
+            salary_min integer,
+            salary_max integer,
+            currency text,
+            description text,
+            posted_at text,
+            first_seen_at text not null,
+            last_seen_at text not null,
+            last_digest_at text,
+            snoozed_until text,
+            status text not null default 'new',
+            normalized_title text not null default '',
+            normalized_company text not null default '',
+            l1_score integer not null default 0,
+            l2_score integer not null default 0,
+            total_score integer generated always as (coalesce(l1_score, 0) + coalesce(l2_score, 0)) stored,
+            l2_reason text not null default '',
+            l1_rules_fired_json text not null default '[]'
+        );
+        insert into jobs_v8 (
+            id, source_id, source_name, external_id, url, title, company,
+            location, remote_policy, salary_min, salary_max, currency,
+            description, posted_at, first_seen_at, last_seen_at, last_digest_at,
+            snoozed_until, status, normalized_title, normalized_company,
+            l1_score, l2_score, l2_reason, l1_rules_fired_json
+        )
+        select
+            id, source_id, source_name, external_id, url, title, company,
+            location, remote_policy, salary_min, salary_max, currency,
+            description, posted_at, first_seen_at, last_seen_at, last_digest_at,
+            snoozed_until, status, normalized_title, normalized_company,
+            coalesce(l1_score, 0), coalesce(l2_score, 0), coalesce(l2_reason, ''),
+            coalesce(l1_rules_fired_json, '[]')
+        from jobs;
+        drop table jobs;
+        alter table jobs_v8 rename to jobs;
+        create index if not exists idx_jobs_normalized_title_company on jobs(normalized_title, normalized_company);
+        create index if not exists idx_jobs_total_score on jobs(total_score desc, first_seen_at desc);
+        """
+    )
 
 
 def set_schema_version(conn, version: int) -> None:

@@ -27,6 +27,27 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
+    def test_total_score_is_generated_from_l1_and_l2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            with db.connection() as conn:
+                total = conn.execute("pragma table_xinfo(jobs)").fetchall()
+                total_column = [row for row in total if row["name"] == "total_score"][0]
+                self.assertGreater(int(total_column["hidden"]), 0)
+            job_id, _ = db.upsert_job(
+                Job(source_id="s", source_name="S", external_id="1", url="https://example.com/generated", title="Generated", company="C")
+            )
+            db.save_score(job_id, ScoreResult(score=100, hard_reject=False))
+            db.save_l2_verdict(job_id, "relevant", "high", "Strong match", [], "test")
+            row = db.get_job(job_id)
+            self.assertEqual(row["l1_score"], 50)
+            self.assertEqual(row["l2_score"], 50)
+            self.assertEqual(row["total_score"], 100)
+            with self.assertRaises(Exception):
+                with db.connection() as conn:
+                    conn.execute("update jobs set total_score = 1 where id = ?", (job_id,))
+
     def test_cross_source_dedupe_and_no_respam(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
