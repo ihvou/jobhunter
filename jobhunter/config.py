@@ -47,6 +47,7 @@ class AppConfig:
     max_llm_jobs_per_run: int = 30
     max_response_bytes: int = 8 * 1024 * 1024
     check_robots: bool = True
+    irrelevant_followup_enabled: bool = False
     rate_limit_collect_seconds: int = 600
     rate_limit_discovery_per_day: int = 3
     rate_limit_tuning_per_day: int = 3
@@ -152,6 +153,9 @@ def load_app_config() -> AppConfig:
         max_llm_jobs_per_run=env_or_setting("JOBHUNTER_MAX_LLM_JOBS_PER_RUN", settings, "max_llm_jobs_per_run", 30, int),
         max_response_bytes=env_or_setting("JOBHUNTER_MAX_RESPONSE_BYTES", settings, "max_response_bytes", 8 * 1024 * 1024, int),
         check_robots=env_or_setting("JOBHUNTER_CHECK_ROBOTS", settings, "check_robots", True, bool_from_value),
+        irrelevant_followup_enabled=env_or_setting(
+            "JOBHUNTER_IRRELEVANT_FOLLOWUP", settings, "irrelevant_followup_enabled", False, bool_from_value
+        ),
         rate_limit_collect_seconds=env_or_setting(
             "JOBHUNTER_RATE_LIMIT_COLLECT_SECONDS", settings, "rate_limit_collect_seconds", 600, int
         ),

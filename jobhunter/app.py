@@ -463,7 +463,8 @@ class JobHunter:
             self.telegram.answer_callback(action.callback_id, "Marked irrelevant")
             if hasattr(self.telegram, "delete_message"):
                 self.telegram.delete_message(action.message_id)
-            self.telegram.send_message("Why was it irrelevant? Reply with a one-line pattern if there is something I should learn.")
+            if self.config.irrelevant_followup_enabled:
+                self.telegram.send_message("Why was it irrelevant? Reply with a one-line pattern if there is something I should learn.")
             self.recalculate_source_scores()
             return
         if action.action == "snooze_1d":
