@@ -142,16 +142,27 @@ process.stdout.write(message);
         output = run_node(
             """
 const worker = require("./openclaw/worker/watcher.js");
-const result = {repo: worker.resolveAllowedPath("jobhunter/database.py"), envBlocked: false, profileBlocked: false};
+const result = {
+  repo: worker.resolveAllowedPath("jobhunter/database.py"),
+  profile: worker.resolveAllowedPath("input/profile.local.md"),
+  cv: worker.resolveAllowedPath("input/cv.local.md"),
+  envBlocked: false,
+  codexHomeBlocked: false,
+  gitBlocked: false,
+};
 try { worker.resolveAllowedPath(".env"); } catch (_error) { result.envBlocked = true; }
-try { worker.resolveAllowedPath("input/profile.local.md"); } catch (_error) { result.profileBlocked = true; }
+try { worker.resolveAllowedPath("/openclaw/codex-home/auth.json"); } catch (_error) { result.codexHomeBlocked = true; }
+try { worker.resolveAllowedPath(".git/config"); } catch (_error) { result.gitBlocked = true; }
 console.log(JSON.stringify(result));
 """
         )
         result = json.loads(output)
         self.assertEqual(result["repo"], "/jobhunter/repo/jobhunter/database.py")
+        self.assertEqual(result["profile"], "/jobhunter/repo/input/profile.local.md")
+        self.assertEqual(result["cv"], "/jobhunter/repo/input/cv.local.md")
         self.assertTrue(result["envBlocked"])
-        self.assertTrue(result["profileBlocked"])
+        self.assertTrue(result["codexHomeBlocked"])
+        self.assertTrue(result["gitBlocked"])
 
     def test_agent_wall_clock_cap_aborts_multi_turn_run(self):
         output = run_node(

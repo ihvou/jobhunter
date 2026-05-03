@@ -478,8 +478,6 @@ function isBlockedPath(absolute) {
     || normalized.includes("/.git/")
     || normalized.endsWith("/.git")
     || normalized.includes("/codex-home/")
-    || /\/profile\.local\.[^/]+$/.test(normalized)
-    || /\/cv\.local\.[^/]+$/.test(normalized)
   );
 }
 
