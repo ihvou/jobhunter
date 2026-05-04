@@ -1,13 +1,34 @@
-# Jobhunter OpenClaw Jobhunter
+# Jobhunter
 
-A safe, low-cost Telegram-driven job-search assistant. Two Docker containers, one chat surface. Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor instructions in [`AGENTS.md`](AGENTS.md). Open work in [`tasks.md`](tasks.md).
+A safe, low-cost Telegram job-search assistant. It collects jobs from approved sources, ranks them against your profile, sends a short digest, and lets you improve the search by replying in plain English.
+
+Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor instructions in [`AGENTS.md`](AGENTS.md). Open work in [`tasks.md`](tasks.md).
+
+## The Problem It Solves
+
+- Good roles are spread across many job boards, ATS pages, RSS feeds, and email alerts.
+- Looking at one or two sources misses too much; checking many sources manually takes too much time.
+- Basic keyword filters are too shallow for specific searches, for example "Product Manager building AI tools" vs "Product Marketing Manager at an AI company".
+- Saved searches drift: wrong language, wrong seniority, wrong timezone, unrelated role family, duplicate postings.
+- Feedback is usually wasted. When you reject a job, normal job boards do not learn your exact reason and adjust the next search.
+
+## How It Works
+
+- You give Jobhunter a detailed profile: target titles, preferred work, exclusions, languages, location/timezone, salary, and examples of what "good" looks like.
+- It indexes jobs from many approved sources in your category: public job boards, RSS/API feeds, ATS pages, and IMAP email alerts.
+- It deduplicates repeated postings across sources.
+- It ranks jobs in two passes: fast local rules first, then an optional LLM pass that checks fit against your full profile description.
+- It sends only the top matches to Telegram, with buttons for `Irrelevant`, `Remind me tomorrow`, `Give me cover note`, and `Applied`.
+- Your feedback changes future results. Button clicks and plain-English comments become training signals for source selection and scoring.
+- You can say things like `skip jobs requiring German`, `deprioritize Product Marketing Manager`, or `prioritize product builder roles using Claude/Codex`.
+- The agent can propose updated sources or scoring rules from that feedback; you approve changes before they are saved.
 
 ## What It Does
 
-- Collects jobs on demand from public RSS, JSON APIs, ATS boards, and IMAP email alerts (LinkedIn / Wellfound / Djinni / company alerts) — no logged-in scraping.
-- Ranks jobs in two layers: free deterministic L1 rules, then a bounded LLM L2 pass that reads your free-form profile and skips obvious mismatches (wrong role family, wrong language, wrong seniority).
-- Sends a Telegram digest of new (not previously shown) jobs with per-job buttons: **Irrelevant**, **Remind me tomorrow**, **Give me cover note**, **Applied**.
-- Refines itself through chat: type `/agent <request>` or any normal free-form message and Codex (via your subscription) investigates, answers, and proposes bounded changes you approve per-action — sources, scoring rules, profile directives, ad-hoc data answers.
+- Collects jobs on demand from public RSS, JSON APIs, ATS boards, and IMAP email alerts (LinkedIn / Wellfound / Djinni / company alerts) with no logged-in scraping.
+- Ranks jobs in two layers: fast local rules, then an optional bounded LLM relevance pass that reads your free-form profile and skips obvious mismatches such as wrong role family, required language, or seniority.
+- Sends a Telegram digest of new jobs with per-job buttons: **Irrelevant**, **Remind me tomorrow**, **Give me cover note**, **Applied**.
+- Refines itself through chat: type `/agent <request>` or any normal free-form message and Codex, via OpenClaw and your subscription, investigates, answers, and proposes bounded changes you approve per action.
 - Generates tailored cover notes via OpenAI (paid, budget-gated).
 - **Never** applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 - Every change the agent proposes is approval-gated, auto-archived, and one-tap reversible via `/revert <id>`.
