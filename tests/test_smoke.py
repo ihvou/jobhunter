@@ -9,7 +9,7 @@ from jobhunter.sources import collect_from_source
 @unittest.skipUnless(os.getenv("JOBHUNTER_RUN_LIVE"), "set JOBHUNTER_RUN_LIVE=1 to hit live sources")
 class LiveSourceSmokeTests(unittest.TestCase):
     def test_default_sources_return_parseable_jobs(self):
-        sources = [source for source in load_sources(Path("config/sources.json")) if source.enabled and source.type != "imap"]
+        sources = [source for source in load_sources(Path("config/sources.example.json")) if source.enabled and source.type != "imap"]
         self.assertGreater(len(sources), 0)
         for source in sources:
             with self.subTest(source=source.id):

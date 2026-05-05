@@ -96,8 +96,8 @@ class ScoringTests(unittest.TestCase):
         self.assertFalse(word_boundary_search("us only", "trust only matters"))
         self.assertFalse(word_boundary_search("weapons", "anti-weapons policy analyst"))
 
-    def test_seniority_rejects_title_only_from_config(self):
-        rules = load_scoring_rules(Path("config/scoring.json"))
+    def test_seniority_rejects_title_only_from_config(self):  # uses scoring.example.json baseline
+        rules = load_scoring_rules(Path("config/scoring.example.json"))
         profile = UserProfile(raw_text="")
         mentor_job = Job(
             source_id="test",

@@ -22,8 +22,8 @@ services:
       JOBHUNTER_PROFILE_PATH: /jobhunter/input/profile.local.md
       JOBHUNTER_CV_PATH: /jobhunter/input/cv.local.md
       JOBHUNTER_PROFILE_SETTINGS_PATH: /jobhunter/config/profile.local.json
-      JOBHUNTER_SOURCES_PATH: /jobhunter/config/sources.json
-      JOBHUNTER_SCORING_PATH: /jobhunter/config/scoring.json
+      JOBHUNTER_SOURCES_PATH: /jobhunter/config/sources.local.json
+      JOBHUNTER_SCORING_PATH: /jobhunter/config/scoring.local.json
       JOBHUNTER_SETTINGS_PATH: /jobhunter/config/jobhunter.json
       JOBHUNTER_CODEX_HANDOFF_MODE: ${JOBHUNTER_CODEX_HANDOFF_MODE:-auto}
       JOBHUNTER_ROBOTS_TXT_RESPECT: ${JOBHUNTER_ROBOTS_TXT_RESPECT:-trust}

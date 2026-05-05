@@ -71,7 +71,7 @@ class ConfigTests(unittest.TestCase):
                 load_sources(path)
 
     def test_baseline_sources_are_low_risk_for_trust_mode(self):
-        sources = load_sources(ROOT / "config" / "sources.json")
+        sources = load_sources(ROOT / "config" / "sources.example.json")
 
         active_public = [source for source in sources if source.status == "active" and source.type != "imap"]
         self.assertTrue(active_public)

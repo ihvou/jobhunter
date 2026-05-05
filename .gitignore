@@ -1,6 +1,8 @@
 .env
 data/
 config/profile.local.json
+config/sources.local.json
+config/scoring.local.json
 config/*.private.json
 config/*.bak
 config/scoring.v*.json

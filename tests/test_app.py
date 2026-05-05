@@ -76,8 +76,8 @@ def config_for(tmp):
     workspace = root / "workspace"
     config_dir.mkdir()
     input_dir.mkdir()
-    (config_dir / "sources.json").write_text("[]", encoding="utf-8")
-    (config_dir / "scoring.json").write_text('{"rules": [], "thresholds": {"hard_reject_floor": 0}}', encoding="utf-8")
+    (config_dir / "sources.local.json").write_text("[]", encoding="utf-8")
+    (config_dir / "scoring.local.json").write_text('{"rules": [], "thresholds": {"hard_reject_floor": 0}}', encoding="utf-8")
     (config_dir / "profile.example.json").write_text("{}", encoding="utf-8")
     return AppConfig(
         data_dir=data_dir,
@@ -87,8 +87,8 @@ def config_for(tmp):
         profile_path=input_dir / "profile.local.md",
         cv_path=input_dir / "cv.local.md",
         profile_settings_path=config_dir / "profile.local.json",
-        sources_path=config_dir / "sources.json",
-        scoring_path=config_dir / "scoring.json",
+        sources_path=config_dir / "sources.local.json",
+        scoring_path=config_dir / "scoring.local.json",
         workspace_dir=workspace,
         heartbeat_path=data_dir / "heartbeat",
         tasks_path=root / "tasks.md",

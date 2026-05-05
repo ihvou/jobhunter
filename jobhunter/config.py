@@ -103,8 +103,8 @@ def load_app_config() -> AppConfig:
     profile_settings_path = Path(
         os.getenv("JOBHUNTER_PROFILE_SETTINGS_PATH", str(config_dir / "profile.local.json"))
     )
-    sources_path = Path(os.getenv("JOBHUNTER_SOURCES_PATH", str(config_dir / "sources.json")))
-    scoring_path = Path(os.getenv("JOBHUNTER_SCORING_PATH", str(config_dir / "scoring.json")))
+    sources_path = Path(os.getenv("JOBHUNTER_SOURCES_PATH", str(config_dir / "sources.local.json")))
+    scoring_path = Path(os.getenv("JOBHUNTER_SCORING_PATH", str(config_dir / "scoring.local.json")))
     workspace_dir = Path(os.getenv("JOBHUNTER_WORKSPACE_DIR", "openclaw/workspace"))
     heartbeat_path = Path(os.getenv("JOBHUNTER_HEARTBEAT_PATH", str(data_dir / "heartbeat")))
     database_path = Path(os.getenv("JOBHUNTER_DATABASE_PATH", str(data_dir / "jobs.sqlite")))
@@ -269,6 +269,9 @@ def ensure_profile_file(config: AppConfig) -> None:
         example_cv = config.input_dir / "cv.example.md"
         if example_cv.exists():
             shutil.copyfile(example_cv, config.cv_path)
+    config.config_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_local_config(config.config_dir / "sources.local.json", config.config_dir / "sources.example.json", config.config_dir / "sources.json")
+    _ensure_local_config(config.config_dir / "scoring.local.json", config.config_dir / "scoring.example.json", config.config_dir / "scoring.json")
     legacy = load_json(config.profile_settings_path, None)
     if legacy:
         raw = config.profile_path.read_text(encoding="utf-8")
@@ -402,6 +405,24 @@ def copy_example_or_empty(example_path: Path, target_path: Path, fallback: str) 
         shutil.copyfile(example_path, target_path)
     else:
         target_path.write_text(fallback, encoding="utf-8")
+
+
+def _ensure_local_config(local_path: Path, example_path: Path, legacy_path: Path) -> None:
+    """Make sure a *.local.json config file exists.
+
+    Preference order:
+    1. If local_path already exists, leave it alone.
+    2. If a legacy non-suffixed path exists (sources.json / scoring.json),
+       move it to local_path — preserves users upgrading from before #133.
+    3. Otherwise, copy from the committed example file.
+    """
+    if local_path.exists():
+        return
+    if legacy_path.exists():
+        shutil.move(str(legacy_path), str(local_path))
+        return
+    if example_path.exists():
+        shutil.copyfile(example_path, local_path)
 
 
 def parse_profile_description(text: str) -> Dict[str, List[str]]:
