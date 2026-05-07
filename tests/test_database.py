@@ -81,7 +81,7 @@ class DatabaseTests(unittest.TestCase):
                 ]
             )
             with db.connection() as conn:
-                conn.execute("delete from schema_version where version = 9")
+                conn.execute("delete from schema_version where version >= 9")
             db.init_schema()
             sources = {row["id"]: row for row in db.source_rows()}
             self.assertEqual(sources["agent-medium"]["risk_level"], "low")

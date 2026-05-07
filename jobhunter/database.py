@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 
 
 class Database:
@@ -63,6 +63,9 @@ class Database:
             if current < 9:
                 migrate_v9(conn)
                 set_schema_version(conn, 9)
+            if current < 10:
+                migrate_v10(conn)
+                set_schema_version(conn, 10)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -680,6 +683,63 @@ class Database:
                 )
             )
 
+    def record_discovery_attempt(
+        self,
+        candidate_url: str,
+        decision: str,
+        candidate_name: str = "",
+        candidate_type: str = "",
+        tier: str = "",
+        reason: str = "",
+        session_id: str = "",
+    ) -> None:
+        now = utc_now_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert or ignore into discovery_attempts
+                  (session_id, candidate_url, candidate_name, candidate_type, tier, decision, reason, proposed_at, decided_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, candidate_url, candidate_name, candidate_type, tier, decision, reason, now, now),
+            )
+
+    def recent_discovery_attempts(self, days: int = 30, limit: int = 80) -> List[Dict[str, str]]:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).replace(microsecond=0).isoformat() + "Z"
+        with self.connection() as conn:
+            rows = list(
+                conn.execute(
+                    """
+                    select candidate_url, candidate_name, candidate_type, tier, decision, reason, proposed_at
+                    from discovery_attempts
+                    where proposed_at >= ?
+                    order by proposed_at desc
+                    limit ?
+                    """,
+                    (cutoff, limit),
+                )
+            )
+        return [dict(row) for row in rows]
+
+    def applied_jobs_sample(self, limit: int = 15) -> List[Dict[str, str]]:
+        with self.connection() as conn:
+            rows = list(
+                conn.execute(
+                    """
+                    select j.title, j.company, j.url, j.source_id, j.location, j.remote_policy,
+                           coalesce(j.l1_score, 0) as l1_score,
+                           coalesce(j.l2_score, 0) as l2_score
+                    from job_feedback f
+                    join jobs j on j.id = f.job_id
+                    where f.action = 'applied'
+                    order by f.created_at desc
+                    limit ?
+                    """,
+                    (limit,),
+                )
+            )
+        return [dict(row) for row in rows]
+
     def feedback_jobs(self, action: str, limit: int = 50) -> List[sqlite3.Row]:
         with self.connection() as conn:
             return list(
@@ -1240,6 +1300,29 @@ def migrate_v9(conn) -> None:
             or lower(trim(risk_level)) = 'medium'
           )
         """
+    )
+
+
+def migrate_v10(conn) -> None:
+    conn.execute(
+        """
+        create table if not exists discovery_attempts (
+            id integer primary key autoincrement,
+            session_id text,
+            candidate_url text not null,
+            candidate_name text,
+            candidate_type text,
+            tier text,
+            decision text not null,
+            reason text,
+            proposed_at text not null,
+            decided_at text,
+            unique(candidate_url, decision)
+        )
+        """
+    )
+    conn.execute(
+        "create index if not exists idx_discovery_attempts_proposed on discovery_attempts(proposed_at desc)"
     )
 
 

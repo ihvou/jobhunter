@@ -139,14 +139,15 @@ function buildPrompt(kind, requestPath) {
     : kind === "agent"
       ? "Use only the explicit read-only tool-call protocol described below. Do not use browser cookies, shell commands, or write files."
       : "Do not use web search for scoring tuning. Treat the request JSON as the only data source.";
-  const toolLine = kind === "agent" ? `
-Agent tool-call protocol:
+  const toolLine = (kind === "agent" || kind === "discovery") ? `
+Tool-call protocol (multi-turn):
 - If you need data, return JSON {"tool_calls":[{"id":"1","name":"query_sql|read_file|list_dir|http_fetch","arguments":{...}}]}.
-- The worker will execute allowed read-only tool calls and append tool_results for another turn.
+- The worker will execute allowed read-only tool calls and append tool_results for another turn (up to ${maxAgentTurns} turns total).
 - query_sql accepts SELECT only and optional params: {"sql":"select ... where name like ?","params":["%term%"]}.
 - read_file accepts optional max_chars, start_line, and max_lines. File content is excerpted; ask for another section if needed.
+- http_fetch is the right tool for validating discovery candidates: it returns status + content_type + body excerpt + is_likely_spa + links_found.
 - read_file/list_dir/http_fetch are allowlisted and capped.
-- When ready, return final JSON {user_intent_summary, answer, evidence_table?, proposed_actions[], usage?}.
+- When ready, return final JSON.${kind === "agent" ? " Agent: {user_intent_summary, answer, evidence_table?, proposed_actions[], usage?}." : " Discovery: {session_id, notes, candidates[], advisories[]?}."}
 ` : "";
   const prompt = `${template}
 
@@ -345,7 +346,7 @@ async function runAgentCodex(kind, sessionId, prompt, requestPayload = {}) {
     const result = await runCodexForAgent(kind, sessionId, workingPrompt, Math.min(timeoutMs, remainingMs));
     const parsed = extractJson(result.finalText);
     if (!Array.isArray(parsed.tool_calls) || parsed.tool_calls.length === 0) {
-      if (turn === 1 && agentRequiresInspection(requestPayload)) {
+      if (kind === "agent" && turn === 1 && agentRequiresInspection(requestPayload)) {
         throw new Error("agent_no_tools_used");
       }
       parsed.usage = { ...(parsed.usage || {}), ...usage, duration_seconds: Math.round((Date.now() - usage.started_at) / 1000) };
@@ -814,7 +815,7 @@ async function processRequest(kind, requestPath) {
     log("INFO", "codex_run_started", { kind, session_id: sessionId, request_path: requestPath });
     const prompt = buildPrompt(kind, requestPath);
     const requestPayload = JSON.parse(fs.readFileSync(requestPath, "utf8"));
-    const parsed = kind === "agent"
+    const parsed = (kind === "agent" || kind === "discovery")
       ? await runAgentCodex(kind, sessionId, prompt, requestPayload)
       : extractJson((await runCodex(kind, sessionId, prompt)).finalText);
     validateResponse(kind, parsed, requestPayload);

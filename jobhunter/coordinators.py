@@ -38,7 +38,6 @@ class DiscoveryCoordinator:
         status_path = self.directory / ("status-%s.json" % session_id)
         payload = {
             "session_id": session_id,
-            "current_version": int(rules.get("version", 0) or 0),
             "profile_summary": {
                 "description": self.profile.raw_text[:6000],
                 "target_titles": self.profile.target_titles,
@@ -50,9 +49,12 @@ class DiscoveryCoordinator:
             },
             "current_sources": [serialize_source_for_agent(source) for source in current_sources],
             "recent_metrics": metrics,
+            "recent_discovery_attempts": self.database.recent_discovery_attempts(days=30, limit=80),
+            "applied_jobs_sample": self.database.applied_jobs_sample(limit=15),
             "instructions": (
-                "Find high-signal public job sources. Validate candidates with HTTP fetch, "
-                "sample parse, and dedupe against current sources. Avoid login/cookies."
+                "Find high-signal public job sources across all four tiers in the prompt. "
+                "Spend most effort on Tier 2/3/4 (niche, creative, pattern-following). "
+                "Skip URLs in recent_discovery_attempts. Validate via http_fetch before returning."
             ),
             "max_candidates": max_candidates,
         }

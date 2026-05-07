@@ -90,7 +90,7 @@ process.stdout.write(prompt);
 """
                 % (json.dumps(str(prompts)), json.dumps(str(request)))
             )
-        self.assertIn("Agent tool-call protocol", output)
+        self.assertIn("Tool-call protocol", output)
         self.assertIn("query_sql|read_file|list_dir|http_fetch", output)
 
     def test_worker_sql_guard_rejects_writes(self):

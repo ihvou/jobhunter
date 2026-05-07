@@ -826,13 +826,18 @@ class JobHunter:
         response = read_json(Path(row["response_path"]))
         candidates = response.get("candidates", [])
         approved = []
+        rejected = []
         if action.action == "approve":
             if action.index is None:
                 approved = candidates
             elif 0 <= action.index < len(candidates):
                 approved = [candidates[action.index]]
+                rejected = [c for i, c in enumerate(candidates) if i != action.index]
             result = self.append_sources(approved)
             self.database.update_discovery_run(action.target_id, status="approved", approved_count=result["appended"])
+            self._record_discovery_outcomes(action.target_id, approved, "approved")
+            if rejected:
+                self._record_discovery_outcomes(action.target_id, rejected, "rejected", reason="not selected from this batch")
             log_context(
                 LOGGER,
                 logging.INFO,
@@ -846,8 +851,24 @@ class JobHunter:
             self.telegram.answer_callback(action.callback_id, "Approved %s, skipped %s" % (result["appended"], skipped))
         elif action.action == "reject":
             self.database.update_discovery_run(action.target_id, status="rejected")
+            self._record_discovery_outcomes(action.target_id, candidates, "rejected", reason="user rejected the batch")
             log_context(LOGGER, logging.INFO, "discovery_rejected", session_id=action.target_id)
             self.telegram.answer_callback(action.callback_id, "Rejected discovery")
+
+    def _record_discovery_outcomes(self, session_id: str, candidates: List[dict], decision: str, reason: str = "") -> None:
+        for candidate in candidates:
+            url = (candidate.get("url") or "").strip()
+            if not url:
+                continue
+            self.database.record_discovery_attempt(
+                candidate_url=url,
+                decision=decision,
+                candidate_name=(candidate.get("name") or "")[:120],
+                candidate_type=(candidate.get("type") or "")[:32],
+                tier=(candidate.get("tier") or "")[:16],
+                reason=(reason or candidate.get("why_it_matches") or "")[:300],
+                session_id=session_id,
+            )
 
     def append_sources(self, candidates: List[dict]) -> dict:
         path = self.config.sources_path
