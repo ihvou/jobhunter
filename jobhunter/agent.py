@@ -18,6 +18,7 @@ AVAILABLE_FILES = [
     "config/sources.json",
     "config/scoring.json",
     "config/jobhunter.json",
+    "data/email_samples",
     "jobhunter/database.py",
     "jobhunter/agent_actions.py",
     "jobhunter/sources.py",

@@ -112,6 +112,38 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(numeric_apply, ["Apply 2"])
         self.assertNotIn("Apply 1", labels)
 
+    def test_agent_response_previews_email_parser_template(self):
+        text, keyboard, _parse_mode = self.capture_agent_response(
+            {
+                "answer": "Parser ready.",
+                "proposed_actions": [
+                    {
+                        "kind": "email_parser_proposal",
+                        "summary": "Parse Djinni alert cards",
+                        "payload": {
+                            "template": {
+                                "id": "djinni-alerts",
+                                "source_id": "djinni-alerts",
+                                "sender_pattern": "no-reply@djinni.co",
+                                "subject_pattern": "job alert",
+                                "parser_config": {
+                                    "max_jobs": 5,
+                                    "title_pattern": "(?P<title>[^\\n]+)",
+                                    "url_pattern": "(?P<url>https://djinni.co/jobs/\\d+)",
+                                },
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+        labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+        self.assertIn("source=djinni-alerts", text)
+        self.assertIn("sender=no-reply@djinni.co", text)
+        self.assertIn("max_jobs=5", text)
+        self.assertIn("patterns=title_pattern,url_pattern", text)
+        self.assertIn("Apply 1", labels)
+
     def test_agent_response_with_only_data_answers_uses_main_menu(self):
         text, keyboard, _parse_mode = self.capture_agent_response(
             {

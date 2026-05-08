@@ -13,8 +13,9 @@ import urllib.request
 import urllib.robotparser
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -25,6 +26,8 @@ LOGGER = logging.getLogger(__name__)
 MAX_BYTES = int(os.getenv("JOBHUNTER_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
 CHECK_ROBOTS = os.getenv("JOBHUNTER_CHECK_ROBOTS", "0").strip().lower() in ("1", "true", "yes", "on")
 ROBOTS_TXT_RESPECT = os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", "ignore").strip().lower()
+EMAIL_SAMPLE_MAX_BYTES = int(os.getenv("JOBHUNTER_EMAIL_SAMPLE_MAX_BYTES", str(256 * 1024)))
+EMAIL_SAMPLE_KEEP_PER_SENDER = int(os.getenv("JOBHUNTER_EMAIL_SAMPLE_KEEP_PER_SENDER", "20"))
 HOST_LAST_FETCH: Dict[str, float] = {}
 VALID_SOURCE_TYPES = {"rss", "json_api", "ats", "community", "imap"}
 LEGACY_SOURCE_TYPE_ALIASES = {
@@ -495,6 +498,7 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
             if status != "OK" or not data:
                 continue
             message = email.message_from_bytes(data[0][1])
+            persist_email_sample(source, message, str(message_id.decode("utf-8", errors="ignore")))
             jobs.extend(jobs_from_email(source, message))
         source.last_seen_uid = max_uid
         return jobs
@@ -516,6 +520,50 @@ def jobs_from_email(source: SourceConfig, message) -> List[Job]:
             if jobs:
                 return jobs
     return generic_jobs_from_email(source, message, subject, sender, body)
+
+
+def persist_email_sample(source: SourceConfig, message, sample_id: str = "") -> Optional[Path]:
+    try:
+        subject = str(email.header.make_header(email.header.decode_header(message.get("Subject", ""))))
+        sender = str(email.header.make_header(email.header.decode_header(message.get("From", ""))))
+        body = email_body(message)
+        if not body.strip():
+            return None
+        sender_address = parseaddr(sender)[1] or sender or source.id
+        message_id = message.get("Message-ID") or sample_id or datetime.utcnow().isoformat()
+        directory = email_samples_dir() / slug_for_path(sender_address, "unknown-sender")
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = "%s-%s.html" % (
+            slug_for_path(subject, "no-subject")[:80],
+            slug_for_path(message_id, sample_id or "message")[:48],
+        )
+        path = directory / filename
+        path.write_text(body[:EMAIL_SAMPLE_MAX_BYTES], encoding="utf-8")
+        trim_email_samples(directory)
+        log_context(LOGGER, logging.DEBUG, "email_sample_saved", source_id=source.id, path=str(path))
+        return path
+    except Exception as exc:
+        log_context(LOGGER, logging.WARNING, "email_sample_save_failed", source_id=source.id, error=str(exc))
+        return None
+
+
+def email_samples_dir() -> Path:
+    return Path(os.getenv("JOBHUNTER_EMAIL_SAMPLES_DIR", str(Path(os.getenv("JOBHUNTER_DATA_DIR", "data")) / "email_samples")))
+
+
+def trim_email_samples(directory: Path) -> None:
+    keep = max(1, EMAIL_SAMPLE_KEEP_PER_SENDER)
+    files = sorted((path for path in directory.glob("*.html") if path.is_file()), key=lambda path: path.stat().st_mtime, reverse=True)
+    for old_path in files[keep:]:
+        try:
+            old_path.unlink()
+        except OSError:
+            pass
+
+
+def slug_for_path(value: str, fallback: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return text[:120] or fallback
 
 
 def generic_jobs_from_email(source: SourceConfig, message, subject: str, sender: str, body: str) -> List[Job]:

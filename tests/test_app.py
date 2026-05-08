@@ -363,6 +363,17 @@ class AppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bot = JobHunter(config_for(tmp))
             bot.telegram = FakeTelegram()
+            bot.database.upsert_email_template(
+                {
+                    "id": "scoped-job-alert-mailbox-generic",
+                    "source_id": "email-job-alerts",
+                    "sender_pattern": ".*",
+                    "subject_pattern": ".*",
+                    "parser_config": {"title_pattern": "^title:\\s*(.+?)$"},
+                    "status": "test",
+                    "priority": "low",
+                }
+            )
             session_id = "email1"
             agent_dir = bot.config.workspace_dir / "agent"
             agent_dir.mkdir(parents=True, exist_ok=True)
@@ -394,7 +405,7 @@ class AppTests(unittest.TestCase):
             bot.handle_action(TelegramAction(scope="agent", action="apply", target_id=session_id, callback_id="cb"))
 
             templates = bot.database.email_templates_for_source("email-job-alerts")
-            self.assertEqual(templates[0]["id"], "linkedin-alerts")
+            self.assertEqual([template["id"] for template in templates], ["linkedin-alerts"])
             self.assertEqual(templates[0]["parser_config"]["max_jobs"], 5)
 
     def test_agent_apply_acknowledges_callback_before_work(self):

@@ -426,7 +426,9 @@ def format_agent_response(session_id: str, response: Dict):
         for idx, action in enumerate(actions):
             if action.get("kind") == "data_answer":
                 continue
-            lines.append("%s. %s: %s" % (idx + 1, action.get("kind"), action.get("summary", "")))
+            preview = action_preview(action)
+            suffix = " · %s" % preview if preview else ""
+            lines.append("%s. %s: %s%s" % (idx + 1, action.get("kind"), action.get("summary", ""), suffix))
     usage = response.get("usage") or {}
     footer = "Audit: session %s" % session_id
     if usage:
@@ -439,6 +441,28 @@ def format_agent_response(session_id: str, response: Dict):
     lines.extend(["", footer])
     keyboard = agent_actions_keyboard(session_id, actions)
     return "\n".join(lines), keyboard or main_menu_keyboard()
+
+
+def action_preview(action: Dict) -> str:
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    if action.get("kind") == "email_parser_proposal":
+        template = payload.get("template") if isinstance(payload.get("template"), dict) else {}
+        config = template.get("parser_config") if isinstance(template.get("parser_config"), dict) else {}
+        parts = [
+            "source=%s" % safe_inline(template.get("source_id")),
+            "sender=%s" % safe_inline(template.get("sender_pattern")),
+            "subject=%s" % safe_inline(template.get("subject_pattern")),
+            "max_jobs=%s" % safe_inline(config.get("max_jobs", 10)),
+        ]
+        configured = [key for key in ("title_pattern", "company_pattern", "url_pattern") if config.get(key)]
+        if configured:
+            parts.append("patterns=%s" % ",".join(configured))
+        return "; ".join(parts)
+    return ""
+
+
+def safe_inline(value) -> str:
+    return str(value or "").replace("\n", " ").replace("|", "/")[:80]
 
 
 def render_data_answer(action: Dict) -> List[str]:

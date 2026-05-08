@@ -268,6 +268,7 @@ docker compose --profile openclaw config --quiet
 |---|---|---|
 | `data/jobs.sqlite` | Jobs, L1 scores, L2 verdicts, feedback, digests, drafts, usage, agent_actions audit | yes |
 | `data/backup/` | Archives produced by `/agent backup ...` and your manual SQLite snapshots | yes |
+| `data/email_samples/` | Recent IMAP alert bodies that the agent can inspect to propose better email parsers | yes |
 | `config/sources.json`, `config/scoring.json`, `config/jobhunter.json` | Source registry, scoring rules, runtime config | committed |
 | `config/scoring.v<n>.json` | Auto-archived previous scoring versions (used by `/revert`) | committed |
 | `input/profile.local.md`, `input/cv.local.md` | Your private profile + optional CV | yes |

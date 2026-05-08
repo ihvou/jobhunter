@@ -23,6 +23,7 @@ Common starting tool calls:
 - "show me my sources / what sources do I have" → `query_sql({"sql":"select id, name, type, status, priority, created_by from sources order by id"})`.
 - "show me applied jobs / recent activity" → `query_sql({"sql":"select j.id, j.title, j.company, j.source_id, jf.action, jf.created_at from job_feedback jf join jobs j on j.id = jf.job_id order by jf.created_at desc limit 20"})`.
 - "why did you miss X / why is X scoring low" → `query_sql({"sql":"select * from jobs where url = ?", "params":["X"]})` then `query_sql` against `job_scores` and `digest_log` for the same job_id; possibly `read_file({"path":"jobhunter/scoring.py"})`.
+- "email alert is parsed as one fake job / add a parser for latest Djinni/LinkedIn/Indeed email" → `list_dir({"path":"data/email_samples"})`, then list the relevant sender directory and `read_file` one recent sample.
 - "what action kinds exist / what can the agent do" → `read_file({"path":"jobhunter/agent_actions.py"})`.
 - "what's the schema / how does X work" → `read_file({"path":"jobhunter/database.py"})` or `read_file({"path":"jobhunter/sources.py"})`.
 - "discover modules" → `list_dir({"path":"jobhunter"})`.
@@ -75,6 +76,13 @@ For source strategy, prefer:
 4. Company career pages only as curated exceptions, not the default discovery strategy.
 
 For every added source row, include: `id`, `name`, `type`, `url`, `status`, `priority`, and `created_by`. Default good public feeds to `status: "test"` and `created_by: "agent"`; `risk_level` is optional metadata, not a robots.txt gate.
+
+For email parser work:
+1. Use `list_dir({"path":"data/email_samples"})` to find recent sender folders.
+2. Use `read_file` on a sample `.html` file for the sender the user mentions, or inspect recent `jobs` rows with descriptions containing `[needs template config]`.
+3. Propose exactly one `email_parser_proposal` for the sender first. Use `sender_pattern` and `subject_pattern` narrowly enough to avoid matching unrelated alerts.
+4. In `parser_config`, prefer named regex groups `(?P<title>...)`, `(?P<company>...)`, and `(?P<url>https?://...)`; include `max_jobs`.
+5. Do not propose code changes for normal email parser tuning; jobhunter can apply approved templates directly.
 
 For relevance strategy, remember the user's current preference:
 - Prioritize product manager/product builder roles focused on building with Claude, Codex, AI agents, LLM tooling, workflow automation, or AI implementation.

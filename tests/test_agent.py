@@ -41,6 +41,7 @@ class AgentCoordinatorTests(unittest.TestCase):
             self.assertNotIn("sources_summary", payload)
             self.assertNotIn("recent_feedback_summary", payload)
             self.assertIn("input/profile.local.md", payload["available_files"])
+            self.assertIn("data/email_samples", payload["available_files"])
             self.assertIn("jobhunter/database.py", payload["available_files"])
             self.assertIn("jobs", payload["db_tables"])
             self.assertIn("sources", payload["db_tables"])

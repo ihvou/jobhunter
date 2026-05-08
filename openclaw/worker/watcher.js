@@ -682,6 +682,9 @@ function resolveAllowedPath(inputPath) {
 }
 
 function defaultRelativePath(requested) {
+  if (/^data(\/|$)/.test(requested)) {
+    return path.join("/jobhunter", requested);
+  }
   if (/^(jobhunter|tests|config|input|openclaw|docs|bin)(\/|$)/.test(requested) || /^(README\.md|ARCHITECTURE\.md|AGENTS\.md|CLAUDE\.md|tasks\.md|docker-compose\.yml|Dockerfile)$/.test(requested)) {
     return path.join("/jobhunter/repo", requested);
   }

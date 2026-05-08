@@ -352,9 +352,10 @@ def email_parser_proposal(payload: Dict, context: AgentActionContext) -> ActionR
     if missing:
         return ActionResult(False, "email_parser_proposal missing template key(s): %s" % ", ".join(missing))
     archive = ""
+    template_id = sanitize_id(template.get("id"))
     context.database.upsert_email_template(
         {
-            "id": sanitize_id(template.get("id")),
+            "id": template_id,
             "source_id": sanitize_id(template.get("source_id")),
             "sender_pattern": sanitize_text(template.get("sender_pattern"), 300),
             "subject_pattern": sanitize_text(template.get("subject_pattern"), 300),
@@ -363,7 +364,9 @@ def email_parser_proposal(payload: Dict, context: AgentActionContext) -> ActionR
             "priority": template.get("priority") if template.get("priority") in ("high", "medium", "low") else "medium",
         }
     )
-    return ActionResult(True, "Email parser template saved: %s" % sanitize_id(template.get("id")), archive, "email_templates")
+    if template_id != "scoped-job-alert-mailbox-generic":
+        context.database.delete_email_template("scoped-job-alert-mailbox-generic")
+    return ActionResult(True, "Email parser template saved: %s" % template_id, archive, "email_templates")
 
 
 KIND_HANDLERS = {

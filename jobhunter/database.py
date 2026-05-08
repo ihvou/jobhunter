@@ -928,6 +928,22 @@ class Database:
             )
         return templates
 
+    def delete_email_template(self, template_id: str) -> None:
+        with self.connection() as conn:
+            row = conn.execute("select parser_config_id from email_templates where id = ?", (template_id,)).fetchone()
+            conn.execute("delete from email_templates where id = ?", (template_id,))
+            if row:
+                conn.execute(
+                    """
+                    delete from email_parser_configs
+                    where id = ?
+                      and not exists (
+                        select 1 from email_templates where parser_config_id = ?
+                      )
+                    """,
+                    (row["parser_config_id"], row["parser_config_id"]),
+                )
+
 
 def migrate_v1(conn) -> None:
     conn.executescript(

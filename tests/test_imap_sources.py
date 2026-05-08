@@ -1,6 +1,8 @@
 import os
+import tempfile
 import unittest
 from email.message import EmailMessage
+from pathlib import Path
 from unittest import mock
 
 from jobhunter.models import SourceConfig
@@ -75,39 +77,46 @@ class ImapSourceTests(unittest.TestCase):
             ),
         }
         mailbox = FakeIMAP(messages)
-        env = {
-            "EMAIL_IMAP_HOST": "imap.example.com",
-            "EMAIL_IMAP_USERNAME": "user",
-            "EMAIL_IMAP_PASSWORD": "password",
-            "EMAIL_IMAP_FOLDER": "job-alerts",
-        }
-        with mock.patch.dict(os.environ, env, clear=False), mock.patch("imaplib.IMAP4_SSL", return_value=mailbox):
-            djinni = SourceConfig(
-                id="djinni",
-                name="Djinni",
-                type="imap",
-                url="imap://job-alerts",
-                query='FROM "no-reply@djinni.co"',
-            )
-            wellfound = SourceConfig(
-                id="wellfound",
-                name="Wellfound",
-                type="imap",
-                url="imap://job-alerts",
-                query='FROM "alerts@wellfound.com"',
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            sample_dir = Path(tmp) / "email_samples"
+            env = {
+                "EMAIL_IMAP_HOST": "imap.example.com",
+                "EMAIL_IMAP_USERNAME": "user",
+                "EMAIL_IMAP_PASSWORD": "password",
+                "EMAIL_IMAP_FOLDER": "job-alerts",
+                "JOBHUNTER_EMAIL_SAMPLES_DIR": str(sample_dir),
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch("imaplib.IMAP4_SSL", return_value=mailbox):
+                djinni = SourceConfig(
+                    id="djinni",
+                    name="Djinni",
+                    type="imap",
+                    url="imap://job-alerts",
+                    query='FROM "no-reply@djinni.co"',
+                )
+                wellfound = SourceConfig(
+                    id="wellfound",
+                    name="Wellfound",
+                    type="imap",
+                    url="imap://job-alerts",
+                    query='FROM "alerts@wellfound.com"',
+                )
 
-            djinni_jobs = collect_imap_alerts(djinni)
-            wellfound_jobs = collect_imap_alerts(wellfound)
+                djinni_jobs = collect_imap_alerts(djinni)
+                wellfound_jobs = collect_imap_alerts(wellfound)
 
-            self.assertEqual([job.url for job in djinni_jobs], ["https://djinni.co/jobs/1"])
-            self.assertEqual([job.url for job in wellfound_jobs], ["https://wellfound.com/jobs/2"])
-            self.assertEqual(djinni.last_seen_uid, 1)
-            self.assertEqual(wellfound.last_seen_uid, 2)
-            self.assertIn((None, "UID", "1:*", "FROM", '"no-reply@djinni.co"'), mailbox.searches)
+                self.assertEqual([job.url for job in djinni_jobs], ["https://djinni.co/jobs/1"])
+                self.assertEqual([job.url for job in wellfound_jobs], ["https://wellfound.com/jobs/2"])
+                self.assertEqual(djinni.last_seen_uid, 1)
+                self.assertEqual(wellfound.last_seen_uid, 2)
+                self.assertIn((None, "UID", "1:*", "FROM", '"no-reply@djinni.co"'), mailbox.searches)
 
-            djinni.imap_last_uid = djinni.last_seen_uid
-            self.assertEqual(collect_imap_alerts(djinni), [])
+                samples = sorted(sample_dir.glob("*/*.html"))
+                self.assertEqual(len(samples), 2)
+                self.assertIn("Apply: https://djinni.co/jobs/1", samples[0].read_text(encoding="utf-8") + samples[1].read_text(encoding="utf-8"))
+
+                djinni.imap_last_uid = djinni.last_seen_uid
+                self.assertEqual(collect_imap_alerts(djinni), [])
 
 
 if __name__ == "__main__":

@@ -197,6 +197,7 @@ const result = {
   repo: worker.resolveAllowedPath("jobhunter/database.py"),
   profile: worker.resolveAllowedPath("input/profile.local.md"),
   cv: worker.resolveAllowedPath("input/cv.local.md"),
+  emailSample: worker.resolveAllowedPath("data/email_samples/djinni/sample.html"),
   envBlocked: false,
   codexHomeBlocked: false,
   gitBlocked: false,
@@ -211,6 +212,7 @@ console.log(JSON.stringify(result));
         self.assertEqual(result["repo"], "/jobhunter/repo/jobhunter/database.py")
         self.assertEqual(result["profile"], "/jobhunter/repo/input/profile.local.md")
         self.assertEqual(result["cv"], "/jobhunter/repo/input/cv.local.md")
+        self.assertEqual(result["emailSample"], "/jobhunter/data/email_samples/djinni/sample.html")
         self.assertTrue(result["envBlocked"])
         self.assertTrue(result["codexHomeBlocked"])
         self.assertTrue(result["gitBlocked"])
