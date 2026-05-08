@@ -5,6 +5,7 @@ import logging
 import re
 import signal
 import shutil
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -420,14 +421,20 @@ class JobHunter:
                 if len(text) <= 4000:
                     self.telegram.edit_message_text(message_id, text)
                     return
-            except TelegramError as exc:
+            except (TelegramError, OSError, socket.timeout) as exc:
                 log_context(LOGGER, logging.WARNING, "telegram_status_edit_failed", message_id=message_id, error=str(exc))
                 if hasattr(self.telegram, "delete_message"):
-                    self.telegram.delete_message(message_id)
-        if hasattr(self.telegram, "send_long_message"):
-            self.telegram.send_long_message(text)
-        else:
-            self.telegram.send_message(text)
+                    try:
+                        self.telegram.delete_message(message_id)
+                    except (TelegramError, OSError, socket.timeout):
+                        pass
+        try:
+            if hasattr(self.telegram, "send_long_message"):
+                self.telegram.send_long_message(text)
+            else:
+                self.telegram.send_message(text)
+        except (TelegramError, OSError, socket.timeout) as exc:
+            log_context(LOGGER, logging.ERROR, "telegram_status_send_failed", error=str(exc))
 
     def collect_and_digest(self) -> None:
         try:
