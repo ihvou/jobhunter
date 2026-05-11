@@ -92,6 +92,7 @@ def config_for(tmp):
         workspace_dir=workspace,
         heartbeat_path=data_dir / "heartbeat",
         tasks_path=root / "tasks.md",
+        taskcandidates_path=data_dir / "taskcandidates.md",
         cost=CostConfig(),
     )
 

@@ -16,7 +16,7 @@ from typing import List
 
 from .budget import BudgetGate
 from .agent import AgentCoordinator, read_agent_response
-from .agent_actions import AgentActionContext, apply_agent_action
+from .agent_actions import ActionResult, AgentActionContext, apply_agent_action
 from .config import (
     AppConfig,
     compose_profile,
@@ -645,7 +645,20 @@ class JobHunter:
         user_intent = run["user_text"] if run else response.get("user_intent_summary", "")
         try:
             for proposed in pending_selected:
-                result = apply_agent_action(proposed, context)
+                try:
+                    result = apply_agent_action(proposed, context)
+                except Exception as exc:
+                    log_context(
+                        LOGGER,
+                        logging.ERROR,
+                        "agent_action_exception",
+                        kind=proposed.get("kind"),
+                        error=str(exc),
+                    )
+                    result = ActionResult(
+                        applied=False,
+                        message="%s: %s" % (exc.__class__.__name__, str(exc)[:160]),
+                    )
                 status = "pending_confirm" if result.requires_confirm else "applied" if result.applied else "failed"
                 row_id = self.database.record_agent_action(
                     action.target_id,

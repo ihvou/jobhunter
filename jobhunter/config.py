@@ -37,6 +37,7 @@ class AppConfig:
     workspace_dir: Path
     heartbeat_path: Path
     tasks_path: Path
+    taskcandidates_path: Path
     telegram_bot_token: str = ""
     telegram_allowed_chat_id: Optional[int] = None
     openai_api_key: str = ""
@@ -110,6 +111,7 @@ def load_app_config() -> AppConfig:
     database_path = Path(os.getenv("JOBHUNTER_DATABASE_PATH", str(data_dir / "jobs.sqlite")))
     tasks_default = "/jobhunter/repo/tasks.md" if Path("/jobhunter/repo").exists() else str(_cwd() / "tasks.md")
     tasks_path = Path(os.getenv("JOBHUNTER_TASKS_PATH", tasks_default))
+    taskcandidates_path = Path(os.getenv("JOBHUNTER_TASKCANDIDATES_PATH", str(data_dir / "taskcandidates.md")))
 
     settings_path = Path(os.getenv("JOBHUNTER_SETTINGS_PATH", str(config_dir / "jobhunter.json")))
     settings = load_json(settings_path, {})
@@ -139,6 +141,7 @@ def load_app_config() -> AppConfig:
         workspace_dir=workspace_dir,
         heartbeat_path=heartbeat_path,
         tasks_path=tasks_path,
+        taskcandidates_path=taskcandidates_path,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_id=parse_optional_int(os.getenv("TELEGRAM_ALLOWED_CHAT_ID")),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),

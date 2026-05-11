@@ -226,21 +226,51 @@ def human_followup(payload: Dict, _context: AgentActionContext) -> ActionResult:
     )
     if validation:
         return validation
-    tasks_path = _context.config.tasks_path
-    if not tasks_path.exists():
-        return ActionResult(False, "tasks.md not found")
+    candidates_path = _context.config.taskcandidates_path
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    if not candidates_path.exists():
+        candidates_path.write_text(
+            "# Task candidates\n\n"
+            "> Filed by `/agent human_followup` actions. Review and promote to `tasks.md` manually.\n\n"
+            "| # | Filed at | Urgency | Title | Summary |\n"
+            "|---:|---|---|---|---|\n",
+            encoding="utf-8",
+        )
     title = sanitize_text(payload.get("title") or "Agent follow-up", 120)
     summary = sanitize_text(payload.get("summary") or payload.get("suggested_approach") or "", 700)
-    archive = archive_file(tasks_path)
-    next_id = next_task_id(tasks_path)
-    row = "| %s | P3 | %s | %s | Pending agent-filed follow-up. | Filed from /agent for later implementation. |\n" % (
-        next_id,
+    urgency = sanitize_text(payload.get("urgency") or "low", 16)
+    candidate_id = next_candidate_id(candidates_path)
+    row = "| %s | %s | %s | %s | %s |\n" % (
+        candidate_id,
+        utc_now_iso(),
+        urgency.replace("|", "/"),
         title.replace("|", "/"),
         summary.replace("|", "/"),
     )
-    with tasks_path.open("a", encoding="utf-8") as handle:
+    with candidates_path.open("a", encoding="utf-8") as handle:
         handle.write(row)
-    return ActionResult(True, "Filed task #%s: %s" % (next_id, title), str(archive), str(tasks_path))
+    return ActionResult(True, "Filed candidate #%s: %s" % (candidate_id, title), None, str(candidates_path))
+
+
+def next_candidate_id(candidates_path: Path) -> int:
+    try:
+        text = candidates_path.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return 1
+    ids = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("| "):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells:
+            continue
+        head = cells[0]
+        try:
+            ids.append(int(head))
+        except ValueError:
+            continue
+    return max(ids) + 1 if ids else 1
 
 
 def rescore_jobs(payload: Dict, context: AgentActionContext) -> ActionResult:
