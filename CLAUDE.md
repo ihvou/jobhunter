@@ -2,6 +2,18 @@
 
 Orientation for AI coding agents (Claude Code, Codex, Cursor, etc.) and human contributors. Read this before the README. The README describes user setup; this file is the implementation contract.
 
+## ⚠️ Active migration — read MIGRATION.md first
+
+This project is **mid-migration to the OpenClaw platform** ([github.com/openclaw/openclaw](https://github.com/openclaw/openclaw)). The custom Node.js worker + custom Python Telegram client are being retired in favor of OpenClaw's gateway + skill model. Codex execution plan: [`MIGRATION.md`](MIGRATION.md).
+
+While migration is active:
+- Domain logic in `jobhunter/` (scoring, sources, DB, agent actions) **survives** as a microservice.
+- `openclaw/worker/`, `jobhunter/telegram.py`, file-based workspace IPC will be **retired**.
+- New skills live under `skills/<skill-name>/` with declarative `SKILL.md` manifests (NOT the volatile Plugin SDK).
+- Future hunters (leads, contractors, etc.) become additional skills under multi-agent routing.
+
+If you are doing post-migration work, the architecture below describes the **pre-migration** system. Replace mentions of `openclaw-gateway`, `openclaw/workspace/`, `jobhunter/telegram.py` with their OpenClaw equivalents once `MIGRATION.md` is marked Done.
+
 ## What This Project Is
 
 A safe, low-cost job-search assistant that runs as two cooperating Docker containers:
