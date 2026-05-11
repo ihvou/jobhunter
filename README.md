@@ -37,6 +37,8 @@ Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 You need: a Telegram bot token, your Telegram chat ID, and a Codex CLI subscription (ChatGPT Pro or equivalent). Optionally, an OpenAI API key for cover notes and the L2 relevance pass.
 
+This repo is migrating from the legacy custom Codex worker to real OpenClaw. The stable legacy bot still runs through `./bin/jobhunter`; the migration bridge runs `jobhunter-service` plus an OpenClaw MCP skill through `./bin/openclaw`.
+
 ```bash
 # 1. Configure secrets
 cp .env.example .env
@@ -97,6 +99,17 @@ After `./bin/jobhunter start`:
 ```
 
 `./bin/jobhunter start` and `./bin/jobhunter restart` refuse to run if `.env` is missing required vars and tell you which ones.
+
+### OpenClaw migration bridge
+
+```bash
+./bin/openclaw start      # start localhost jobhunter-service for real OpenClaw
+./bin/openclaw config     # print the MCP + skill config snippet for OpenClaw
+./bin/openclaw status     # check service health and OpenClaw gateway status
+./bin/openclaw logs       # follow jobhunter-service logs
+```
+
+The bridge exposes Jobhunter to OpenClaw through `python -m jobhunter.openclaw_mcp`. See [`MIGRATION_DISCOVERY.md`](MIGRATION_DISCOVERY.md) and [`skills/jobhunter/README.md`](skills/jobhunter/README.md).
 
 ### Telegram commands cheatsheet
 

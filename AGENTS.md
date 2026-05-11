@@ -9,7 +9,8 @@ This project is **mid-migration to the OpenClaw platform** ([github.com/openclaw
 While migration is active:
 - Domain logic in `jobhunter/` (scoring, sources, DB, agent actions) **survives** as a microservice.
 - `openclaw/worker/`, `jobhunter/telegram.py`, file-based workspace IPC will be **retired**.
-- New skills live under `skills/<skill-name>/` with declarative `SKILL.md` manifests (NOT the volatile Plugin SDK).
+- Phase-1 bridge code lives in `jobhunter/service.py`, `jobhunter/openclaw_mcp.py`, `skills/jobhunter/`, and `bin/openclaw`.
+- New skills live under `skills/<skill-name>/` with `SKILL.md` manifests. Skills are instructions; executable Jobhunter tools are exposed through MCP, not declarative YAML tool files.
 - Future hunters (leads, contractors, etc.) become additional skills under multi-agent routing.
 
 If you are doing post-migration work, the architecture below describes the **pre-migration** system. Replace mentions of `openclaw-gateway`, `openclaw/workspace/`, `jobhunter/telegram.py` with their OpenClaw equivalents once `MIGRATION.md` is marked Done.

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+COMPOSE=(docker compose --project-directory "$ROOT" --file "$ROOT/docker-compose.yml")
+SERVICE_URL="${JOBHUNTER_SERVICE_URL:-http://127.0.0.1:8765}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./bin/openclaw <command>
+
+Commands:
+  start     Build and start jobhunter-service, then print OpenClaw setup hints
+  stop      Stop jobhunter-service
+  restart   Recreate jobhunter-service
+  logs      Follow jobhunter-service logs
+  status    Show service and OpenClaw gateway status
+  shell     Open a shell in jobhunter-service
+  config    Print suggested OpenClaw config snippet
+  help      Show this help
+EOF
+}
+
+has_openclaw() {
+  command -v openclaw >/dev/null 2>&1
+}
+
+service_health() {
+  python3 - "$SERVICE_URL" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+try:
+    with urllib.request.urlopen(sys.argv[1].rstrip("/") + "/health", timeout=2) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    print("ok" if payload.get("ok") else "bad")
+except Exception:
+    print("down")
+PY
+}
+
+print_config() {
+  cat <<EOF
+{
+  mcp: {
+    servers: {
+      jobhunter: {
+        command: "python3",
+        args: ["-m", "jobhunter.openclaw_mcp"],
+        cwd: "$ROOT",
+        env: {
+          JOBHUNTER_SERVICE_URL: "$SERVICE_URL"
+        }
+      }
+    }
+  },
+  skills: {
+    load: {
+      extraDirs: ["$ROOT/skills"]
+    }
+  },
+  agents: {
+    defaults: {
+      skills: ["jobhunter"],
+      sandbox: {
+        mode: "non-main",
+        scope: "agent"
+      }
+    }
+  }
+}
+EOF
+}
+
+case "${1:-help}" in
+  help|-h|--help)
+    usage
+    ;;
+  start)
+    "${COMPOSE[@]}" build jobhunter-service
+    "${COMPOSE[@]}" up -d jobhunter-service
+    printf "jobhunter-service: %s\n" "$(service_health)"
+    if has_openclaw; then
+      openclaw gateway status || true
+      printf "\nOpenClaw is installed. Add ./skills and the MCP server with:\n\n"
+      print_config
+    else
+      printf "\nOpenClaw CLI not found. Approval-required setup remains:\n"
+      printf "  npm install -g openclaw@latest\n"
+      printf "  openclaw onboard --install-daemon\n"
+    fi
+    ;;
+  stop)
+    "${COMPOSE[@]}" stop jobhunter-service
+    ;;
+  restart)
+    "${COMPOSE[@]}" up -d --force-recreate --build jobhunter-service
+    printf "jobhunter-service: %s\n" "$(service_health)"
+    ;;
+  logs)
+    "${COMPOSE[@]}" logs -f --tail="${TAIL:-100}" jobhunter-service
+    ;;
+  status)
+    state="$(docker inspect -f '{{.State.Status}}' jobhunter-service 2>/dev/null || printf missing)"
+    printf "jobhunter-service:%s health:%s\n" "$state" "$(service_health)"
+    if has_openclaw; then
+      openclaw gateway status || true
+    else
+      printf "openclaw:missing\n"
+    fi
+    ;;
+  shell)
+    "${COMPOSE[@]}" exec jobhunter-service sh
+    ;;
+  config)
+    print_config
+    ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

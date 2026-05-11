@@ -1,0 +1,56 @@
+// Copy relevant sections into ~/.openclaw/openclaw.json after running:
+//   openclaw onboard --install-daemon
+// Validate with:
+//   openclaw config validate
+{
+  channels: {
+    telegram: {
+      enabled: true,
+      botToken: "${TELEGRAM_BOT_TOKEN}",
+      dmPolicy: "allowlist",
+      allowFrom: ["tg:${TELEGRAM_ALLOWED_CHAT_ID}"],
+    },
+  },
+  mcp: {
+    servers: {
+      jobhunter: {
+        command: "python3",
+        args: ["-m", "jobhunter.openclaw_mcp"],
+        cwd: "/Users/bobdean/Projects/jobhunter",
+        env: {
+          JOBHUNTER_SERVICE_URL: "http://127.0.0.1:8765",
+        },
+      },
+    },
+  },
+  skills: {
+    load: {
+      extraDirs: ["/Users/bobdean/Projects/jobhunter/skills"],
+    },
+  },
+  agents: {
+    defaults: {
+      model: "openai/gpt-5.5",
+      skills: ["jobhunter"],
+      sandbox: {
+        mode: "non-main",
+        scope: "agent",
+      },
+      tools: {
+        profile: "messaging",
+        deny: ["group:runtime", "group:fs", "group:automation"],
+        allow: ["group:messaging", "bundle-mcp", "web_search", "web_fetch"],
+      },
+    },
+    list: [
+      {
+        id: "jobs",
+        skills: ["jobhunter"],
+      },
+      {
+        id: "leads",
+        skills: ["leadhunter"],
+      },
+    ],
+  },
+}

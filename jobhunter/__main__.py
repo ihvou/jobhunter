@@ -14,11 +14,17 @@ def main() -> None:
     subparsers.add_parser("discover-sources", help="Write a source-discovery request to the shared workspace")
     subparsers.add_parser("tune-scoring", help="Write a scoring tuning request to the shared workspace")
     subparsers.add_parser("serve", help="Run Telegram and workspace polling loop")
+    subparsers.add_parser("service", help="Run the localhost HTTP service for OpenClaw/MCP tools")
     subparsers.add_parser("usage", help="Print local usage summary")
     args = parser.parse_args()
 
     if args.command == "run-once":
         run_once()
+        return
+    if args.command == "service":
+        from .service import run
+
+        run()
         return
 
     bot = JobHunter.from_environment()
