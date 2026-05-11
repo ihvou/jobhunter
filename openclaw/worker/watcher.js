@@ -514,7 +514,19 @@ function agentRequiresInspection(requestPayload) {
   if (/^(hi|hello|hey|thanks?|thank you|ok|okay|cool|nice)[!.\s]*$/i.test(text)) {
     return false;
   }
+  if (agentCanAnswerFromMemory(requestPayload, text)) {
+    return false;
+  }
   return true;
+}
+
+function agentCanAnswerFromMemory(requestPayload, text) {
+  const runs = Array.isArray(requestPayload && requestPayload.recent_agent_runs) ? requestPayload.recent_agent_runs : [];
+  const actions = Array.isArray(requestPayload && requestPayload.recent_actions_summary) ? requestPayload.recent_actions_summary : [];
+  if (runs.length === 0 && actions.length === 0) {
+    return false;
+  }
+  return /\b(last|previous|earlier|before|that|those|it|session|action|actions|applied|finished|finish|done|did you|what happened|how many did you find)\b/i.test(text);
 }
 
 function setRunCodexForTests(fn) {

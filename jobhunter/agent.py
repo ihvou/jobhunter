@@ -12,6 +12,10 @@ from .models import UserProfile, utc_now_iso
 LOGGER = logging.getLogger(__name__)
 
 
+RECENT_AGENT_RUN_LIMIT = 5
+RECENT_AGENT_ACTION_LIMIT = 10
+
+
 AVAILABLE_FILES = [
     "input/profile.local.md",
     "input/cv.local.md",
@@ -73,8 +77,10 @@ class AgentCoordinator:
             "available_files": AVAILABLE_FILES,
             "db_tables": DB_TABLES,
             "counts": agent_counts(self.database),
+            "recent_agent_runs": recent_agent_runs_summary(self.database, RECENT_AGENT_RUN_LIMIT),
+            "recent_actions_summary": recent_actions_summary(self.database, RECENT_AGENT_ACTION_LIMIT),
             "scoring_version": current_scoring_version(self.config.scoring_path),
-            "note": "This payload is metadata only. All real data lives in the files above and the SQLite DB at /jobhunter/data/jobs.sqlite. Use read_file / list_dir / query_sql / http_fetch on turn 1 to fetch what you need; do not answer from training memory.",
+            "note": "This payload is metadata only. recent_agent_runs/recent_actions_summary are compact memory hints, not source data. All real data lives in the files above and the SQLite DB at /jobhunter/data/jobs.sqlite. Use read_file / list_dir / query_sql / http_fetch on turn 1 to fetch what you need; do not answer from training memory.",
             "response_contract": {
                 "user_intent_summary": "short text",
                 "answer": "plain text shown to the user",
@@ -179,6 +185,56 @@ def agent_counts(database: Database) -> Dict:
             return counts
     except Exception as exc:
         LOGGER.warning("agent_counts_failed: %s", exc)
+        return {}
+
+
+def recent_agent_runs_summary(database: Database, limit: int = RECENT_AGENT_RUN_LIMIT) -> List[Dict]:
+    rows = database.recent_agent_runs(limit)
+    summaries = []
+    for row in rows:
+        response = read_optional_json(row["response_path"]) if row["response_path"] else {}
+        proposed = response.get("proposed_actions") if isinstance(response.get("proposed_actions"), list) else []
+        proposed_kinds = []
+        for action in proposed:
+            if isinstance(action, dict) and action.get("kind"):
+                proposed_kinds.append(str(action.get("kind"))[:80])
+        summaries.append(
+            {
+                "session_id": row["session_id"],
+                "asked_at": row["requested_at"],
+                "status": row["status"],
+                "user_text": safe_log_text(row["user_text"], 220),
+                "answer_excerpt": safe_log_text(response.get("answer") or row["message"], 300),
+                "proposed_action_kinds": proposed_kinds[:10],
+                "applied_action_count": int(row["applied_action_count"] or 0),
+            }
+        )
+    return summaries
+
+
+def recent_actions_summary(database: Database, limit: int = RECENT_AGENT_ACTION_LIMIT) -> List[Dict]:
+    summaries = []
+    for row in database.recent_agent_actions(limit):
+        summaries.append(
+            {
+                "id": row["id"],
+                "session_id": row["session_id"],
+                "kind": row["kind"],
+                "applied_at": row["applied_at"],
+                "status": row["status"],
+                "result_message_excerpt": safe_log_text(row["result_message"], 220),
+            }
+        )
+    return summaries
+
+
+def read_optional_json(path: str) -> Dict:
+    try:
+        if not path:
+            return {}
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.warning("agent_response_memory_read_failed: %s", exc)
         return {}
 
 

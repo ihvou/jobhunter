@@ -564,6 +564,27 @@ class Database:
         with self.connection() as conn:
             return list(conn.execute("select * from agent_runs where status in ('pending', 'running') order by requested_at asc"))
 
+    def recent_agent_runs(self, limit: int = 5) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """
+                    select ar.*,
+                           (
+                               select count(*)
+                               from agent_actions aa
+                               where aa.session_id = ar.session_id
+                                 and aa.status = 'applied'
+                           ) as applied_action_count
+                    from agent_runs ar
+                    where ar.status not in ('pending', 'running')
+                    order by ar.requested_at desc, ar.session_id desc
+                    limit ?
+                    """,
+                    (limit,),
+                )
+            )
+
     def active_agent_run(self) -> Optional[sqlite3.Row]:
         with self.connection() as conn:
             return conn.execute(

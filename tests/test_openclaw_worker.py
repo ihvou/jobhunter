@@ -282,6 +282,29 @@ worker.setRunCodexForTests(async () => ({
         self.assertIn("Hi!", output)
         self.assertNotIn("ERROR:", output)
 
+    def test_agent_first_turn_allows_memory_followup_without_tools(self):
+        output = run_node(
+            """
+const worker = require("./openclaw/worker/watcher.js");
+worker.setRunCodexForTests(async () => ({
+  finalText: JSON.stringify({user_intent_summary: "followup", answer: "The previous run found 3.", proposed_actions: []})
+}));
+(async () => {
+  try {
+    const r = await worker.runAgentCodex("agent", "memory", "prompt", {
+      user_text: "how many did you find?",
+      recent_agent_runs: [{session_id: "s1", answer_excerpt: "Found 3 Harvey jobs."}]
+    });
+    process.stdout.write(JSON.stringify(r));
+  } catch (error) {
+    process.stdout.write("ERROR: " + error.message);
+  }
+})();
+"""
+        )
+        self.assertIn("The previous run found 3.", output)
+        self.assertNotIn("ERROR:", output)
+
 
 if __name__ == "__main__":
     unittest.main()
