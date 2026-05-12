@@ -2,13 +2,13 @@
 
 This skill teaches OpenClaw how to operate the local Jobhunter service. It assumes:
 
-- `jobhunter-service` is running on `http://127.0.0.1:8765`.
+- `jobhunter-service` is running on the Compose network at `http://jobhunter-service:8765`.
 - The OpenClaw agent has an MCP server named `jobhunter`.
-- The skill directory is visible to OpenClaw via workspace skills or `skills.load.extraDirs`.
+- The skill directory is visible to OpenClaw at `/openclaw/skills`.
 
 ## MCP Server Config
 
-Validate exact paths with `openclaw config schema` before editing live config.
+Validate exact paths with `./bin/openclaw doctor` before editing live config.
 
 ```json5
 {
@@ -17,16 +17,16 @@ Validate exact paths with `openclaw config schema` before editing live config.
       jobhunter: {
         command: "python3",
         args: ["-m", "jobhunter.openclaw_mcp"],
-        cwd: "/Users/bobdean/Projects/jobhunter",
+        cwd: "/opt/jobhunter",
         env: {
-          JOBHUNTER_SERVICE_URL: "http://127.0.0.1:8765"
+          JOBHUNTER_SERVICE_URL: "http://jobhunter-service:8765"
         }
       }
     }
   },
   skills: {
     load: {
-      extraDirs: ["/Users/bobdean/Projects/jobhunter/skills"]
+      extraDirs: ["/openclaw/skills"]
     }
   },
   agents: {
@@ -40,9 +40,10 @@ Validate exact paths with `openclaw config schema` before editing live config.
 ## Quick Smoke
 
 ```bash
+./bin/openclaw onboard
 ./bin/openclaw start
-openclaw doctor
-openclaw mcp list
+./bin/openclaw doctor
+./bin/openclaw config
 ```
 
 Then ask OpenClaw:

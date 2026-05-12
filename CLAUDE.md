@@ -9,7 +9,7 @@ This project is **mid-migration to the OpenClaw platform** ([github.com/openclaw
 While migration is active:
 - Domain logic in `jobhunter/` (scoring, sources, DB, agent actions) **survives** as a microservice.
 - `openclaw/worker/`, `jobhunter/telegram.py`, file-based workspace IPC will be **retired**.
-- Phase-1 bridge code lives in `jobhunter/service.py`, `jobhunter/openclaw_mcp.py`, `skills/jobhunter/`, and `bin/openclaw`.
+- Phase-1.5 bridge code lives in `jobhunter/service.py`, `jobhunter/openclaw_mcp.py`, `skills/jobhunter/`, `docker/openclaw-gateway/`, and `bin/openclaw`.
 - New skills live under `skills/<skill-name>/` with `SKILL.md` manifests. Skills are instructions; executable Jobhunter tools are exposed through MCP, not declarative YAML tool files.
 - Future hunters (leads, contractors, etc.) become additional skills under multi-agent routing.
 
@@ -20,7 +20,7 @@ If you are doing post-migration work, the architecture below describes the **pre
 A safe, low-cost job-search assistant that runs as two cooperating Docker containers:
 
 1. **`jobhunter`** — deterministic Python service plus bounded OpenAI API calls for cover notes and L2 relevance. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
-2. **`openclaw-gateway`** — isolated Codex CLI worker container. Handles `/agent` strategy/data/source/filter work through the shared workspace. Codex auth lives in gitignored `openclaw/codex-home/`, not the host home directory.
+2. **`openclaw-gateway`** — Dockerized real OpenClaw gateway. It uses a pinned OpenClaw image plus a tiny Python overlay for the stdio MCP bridge. Codex auth is mounted read-only from `~/.codex`; no Docker socket is mounted.
 
 The user interacts through Telegram. There is no web UI in `jobhunter`. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 

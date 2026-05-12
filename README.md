@@ -37,7 +37,7 @@ Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 You need: a Telegram bot token, your Telegram chat ID, and a Codex CLI subscription (ChatGPT Pro or equivalent). Optionally, an OpenAI API key for cover notes and the L2 relevance pass.
 
-This repo is migrating from the legacy custom Codex worker to real OpenClaw. The stable legacy bot still runs through `./bin/jobhunter`; the migration bridge runs `jobhunter-service` plus an OpenClaw MCP skill through `./bin/openclaw`.
+This repo is migrating from the legacy custom Codex worker to real OpenClaw. The stable legacy bot still runs through `./bin/jobhunter`; the migration bridge runs `jobhunter-service` plus a Dockerized OpenClaw gateway through `./bin/openclaw`.
 
 ```bash
 # 1. Configure secrets
@@ -103,13 +103,14 @@ After `./bin/jobhunter start`:
 ### OpenClaw migration bridge
 
 ```bash
-./bin/openclaw start      # start localhost jobhunter-service for real OpenClaw
-./bin/openclaw config     # print the MCP + skill config snippet for OpenClaw
-./bin/openclaw status     # check service health and OpenClaw gateway status
-./bin/openclaw logs       # follow jobhunter-service logs
+./bin/openclaw onboard    # one-time Dockerized OpenClaw onboarding, no host daemon install
+./bin/openclaw start      # start jobhunter-service + openclaw-gateway
+./bin/openclaw config     # print the container-relative MCP + skill config snippet
+./bin/openclaw status     # check service and gateway health
+./bin/openclaw logs       # follow both logs; use "logs gateway" or "logs service"
 ```
 
-The bridge exposes Jobhunter to OpenClaw through `python -m jobhunter.openclaw_mcp`. See [`MIGRATION_DISCOVERY.md`](MIGRATION_DISCOVERY.md) and [`skills/jobhunter/README.md`](skills/jobhunter/README.md).
+The bridge exposes Jobhunter to OpenClaw through `python -m jobhunter.openclaw_mcp` running inside the gateway container, with this repo mounted read-only at `/opt/jobhunter`. See [`MIGRATION_DISCOVERY.md`](MIGRATION_DISCOVERY.md), [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md), and [`skills/jobhunter/README.md`](skills/jobhunter/README.md).
 
 ### Telegram commands cheatsheet
 

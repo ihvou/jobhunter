@@ -183,6 +183,8 @@ Stop and review with user before Phase 1.5.
 
 ## Phase 1.5 — Dockerize the OpenClaw gateway (mandatory before Phase 2) (0.5-1 day)
 
+**Status**: Done at `9605d2e` for the implementation commit. User-run parity verification is still required before Phase 2 destructive deletions.
+
 **Why this exists**: Phase 1 (commit `aa71239`) installed OpenClaw on the host (`npm install -g openclaw@latest` + `openclaw onboard --install-daemon`). The original `ARCHITECTURE.md` listed *"Run the full OpenClaw Gateway inside Docker with narrow mounted volumes and scoped secrets"* as **P0**. Host install was a Phase 1 shortcut that we are now correcting before any destructive deletion in Phase 2 lands.
 
 **Why Docker-in-Docker for the gateway is the right call** for this user's threat model: the gateway process itself is the most-attackable surface (channel adapters, plugins, agent runtime). On host it can read `~/.codex`, `~/.ssh`, `~/.aws`, all user files. In a container with narrow mounts, it sees only what we explicitly grant. The per-session Docker sandbox (which would require mounting `/var/run/docker.sock` into the gateway — the spec's hard line) is **off** for this configuration; it does not block any tool we actually use (firecrawl, exa, browser-via-image, agenticmail, apollo, MCP-bridged jobhunter tools, Codex CLI multi-turn, all channels work identically with sandbox off). The marginal value of nested sandboxing is small when the gateway itself is already containerized with limited mounts.
