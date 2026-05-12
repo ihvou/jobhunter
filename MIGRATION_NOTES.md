@@ -30,3 +30,12 @@ Then configure OpenClaw with:
 - `skills.load.extraDirs` pointing at this repo's `skills/` directory, or copy `skills/jobhunter` into the active OpenClaw workspace `skills/`.
 - An MCP server named `jobhunter` running `python3 -m jobhunter.openclaw_mcp` from this repo root.
 - Telegram channel pairing or allowlist using the existing bot token and chat id.
+
+## Phase 1.5: Dockerize gateway
+
+- Image tag: pinned to `ghcr.io/openclaw/openclaw:2026.5.7-slim`, derived from latest stable release `v2026.5.7` published at `2026-05-07T20:57:43Z`. The GHCR package page lists `2026.5.7-slim` alongside `latest` for that release; using the slim tag keeps the image stable without tracking `latest`.
+- Overlay image: `docker/openclaw-gateway/Dockerfile` starts from the pinned OpenClaw image and installs only `python3` plus `ca-certificates`. This is needed because the chosen MCP transport is stdio and the Jobhunter MCP bridge is a Python module.
+- MCP transport: stdio with this repository mounted read-only at `/opt/jobhunter`. Config uses `command: "python3"`, `args: ["-m", "jobhunter.openclaw_mcp"]`, `cwd: "/opt/jobhunter"`, and `JOBHUNTER_SERVICE_URL=http://jobhunter-service:8765`. I chose stdio because OpenClaw documents stdio as the native local MCP server transport and our bridge already implements it; implementing a new Streamable HTTP MCP server would add protocol surface area without improving the trust boundary.
+- Codex auth: host `~/.codex` exists and is mounted read-only at `/home/node/.codex`. No `openclaw migrate codex` command is baked into startup because the mounted Codex OAuth profile should be readable directly by the Dockerized runtime. If `openclaw doctor` later reports stale Codex model routes, run `./bin/openclaw migrate-codex` and then `./bin/openclaw doctor`.
+- Sandbox mode: `agents.defaults.sandbox.mode` is `off`. This avoids mounting `/var/run/docker.sock` into the gateway. Protection comes from the gateway container boundary, read-only rootfs, narrow read-only repo/skills/Codex mounts, `cap_drop: ALL`, `no-new-privileges`, tool deny-lists, `exec.security: deny`, and bounded Jobhunter MCP tools.
+- Docker onboarding: `./bin/openclaw onboard` runs OpenClaw's Docker manual flow with `node dist/index.js onboard --mode local --no-install-daemon`, then applies local gateway bind settings. The actual Telegram pairing and parity checks remain user-run acceptance steps.
