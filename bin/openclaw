@@ -5,25 +5,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 COMPOSE=(docker compose --project-directory "$ROOT" --file "$ROOT/docker-compose.yml")
 SERVICE_URL="${JOBHUNTER_SERVICE_URL:-http://127.0.0.1:8765}"
+GATEWAY_URL="${OPENCLAW_GATEWAY_URL:-http://127.0.0.1:18789}"
+DRY_RUN="${OPENCLAW_DRY_RUN:-0}"
 
 usage() {
   cat <<'EOF'
 Usage: ./bin/openclaw <command>
 
 Commands:
-  start     Build and start jobhunter-service, then print OpenClaw setup hints
-  stop      Stop jobhunter-service
-  restart   Recreate jobhunter-service
-  logs      Follow jobhunter-service logs
-  status    Show service and OpenClaw gateway status
-  shell     Open a shell in jobhunter-service
+  start     Build and start jobhunter-service + openclaw-gateway
+  stop      Stop jobhunter-service + openclaw-gateway
+  restart   Recreate jobhunter-service + openclaw-gateway
+  logs      Follow both logs; use "logs gateway" or "logs service"
+  status    Show service and gateway status
+  shell     Open a shell; use "shell gateway" or "shell service"
+  onboard   Run Dockerized OpenClaw onboarding without host daemon install
+  doctor    Run OpenClaw doctor inside the gateway image
+  migrate-codex  Run OpenClaw Codex auth migration inside the gateway image
   config    Print suggested OpenClaw config snippet
   help      Show this help
 EOF
 }
 
-has_openclaw() {
-  command -v openclaw >/dev/null 2>&1
+run_cmd() {
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
 }
 
 service_health() {
@@ -42,32 +53,62 @@ except Exception:
 PY
 }
 
+gateway_health() {
+  python3 - "$GATEWAY_URL" <<'PY'
+import sys
+import urllib.request
+
+try:
+    with urllib.request.urlopen(sys.argv[1].rstrip("/") + "/healthz", timeout=2) as response:
+        print("ok" if 200 <= response.status < 300 else "bad")
+except Exception:
+    print("down")
+PY
+}
+
+container_state() {
+  docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || printf missing
+}
+
+gateway_node() {
+  run_cmd "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js "$@"
+}
+
 print_config() {
   cat <<EOF
 {
+  // Dockerized Phase 1.5 config. Gateway runs in container, so paths are
+  // container-relative and the Jobhunter service is reached over Compose DNS.
   mcp: {
     servers: {
       jobhunter: {
         command: "python3",
         args: ["-m", "jobhunter.openclaw_mcp"],
-        cwd: "$ROOT",
+        cwd: "/opt/jobhunter",
         env: {
-          JOBHUNTER_SERVICE_URL: "$SERVICE_URL"
+          JOBHUNTER_SERVICE_URL: "http://jobhunter-service:8765"
         }
       }
     }
   },
   skills: {
     load: {
-      extraDirs: ["$ROOT/skills"]
+      extraDirs: ["/openclaw/skills"]
     }
   },
   agents: {
     defaults: {
       skills: ["jobhunter"],
       sandbox: {
-        mode: "non-main",
-        scope: "agent"
+        mode: "off"
+      },
+      tools: {
+        profile: "messaging",
+        deny: ["group:runtime", "group:fs", "group:automation"],
+        allow: ["group:messaging", "bundle-mcp", "web_search", "web_fetch"],
+        fs: { workspaceOnly: true },
+        exec: { security: "deny", ask: "always" },
+        elevated: { enabled: false }
       }
     }
   }
@@ -80,40 +121,66 @@ case "${1:-help}" in
     usage
     ;;
   start)
-    "${COMPOSE[@]}" build jobhunter-service
-    "${COMPOSE[@]}" up -d jobhunter-service
+    run_cmd "${COMPOSE[@]}" build jobhunter-service openclaw-gateway
+    run_cmd "${COMPOSE[@]}" up -d jobhunter-service openclaw-gateway
     printf "jobhunter-service: %s\n" "$(service_health)"
-    if has_openclaw; then
-      openclaw gateway status || true
-      printf "\nOpenClaw is installed. Add ./skills and the MCP server with:\n\n"
-      print_config
-    else
-      printf "\nOpenClaw CLI not found. Approval-required setup remains:\n"
-      printf "  npm install -g openclaw@latest\n"
-      printf "  openclaw onboard --install-daemon\n"
-    fi
+    printf "openclaw-gateway: %s\n" "$(gateway_health)"
+    printf "\nRun './bin/openclaw onboard' once before first Telegram pairing.\n"
     ;;
   stop)
-    "${COMPOSE[@]}" stop jobhunter-service
+    run_cmd "${COMPOSE[@]}" stop openclaw-gateway jobhunter-service
     ;;
   restart)
-    "${COMPOSE[@]}" up -d --force-recreate --build jobhunter-service
+    run_cmd "${COMPOSE[@]}" up -d --force-recreate --build jobhunter-service openclaw-gateway
     printf "jobhunter-service: %s\n" "$(service_health)"
+    printf "openclaw-gateway: %s\n" "$(gateway_health)"
     ;;
   logs)
-    "${COMPOSE[@]}" logs -f --tail="${TAIL:-100}" jobhunter-service
+    case "${2:-all}" in
+      gateway)
+        run_cmd "${COMPOSE[@]}" logs -f --tail="${TAIL:-100}" openclaw-gateway
+        ;;
+      service)
+        run_cmd "${COMPOSE[@]}" logs -f --tail="${TAIL:-100}" jobhunter-service
+        ;;
+      all)
+        run_cmd "${COMPOSE[@]}" logs -f --tail="${TAIL:-100}" jobhunter-service openclaw-gateway
+        ;;
+      *)
+        usage >&2
+        exit 1
+        ;;
+    esac
     ;;
   status)
-    state="$(docker inspect -f '{{.State.Status}}' jobhunter-service 2>/dev/null || printf missing)"
-    printf "jobhunter-service:%s health:%s\n" "$state" "$(service_health)"
-    if has_openclaw; then
-      openclaw gateway status || true
-    else
-      printf "openclaw:missing\n"
-    fi
+    printf "jobhunter-service:%s health:%s\n" "$(container_state jobhunter-service)" "$(service_health)"
+    printf "openclaw-gateway:%s health:%s\n" "$(container_state openclaw-gateway)" "$(gateway_health)"
     ;;
   shell)
-    "${COMPOSE[@]}" exec jobhunter-service sh
+    case "${2:-service}" in
+      gateway)
+        run_cmd "${COMPOSE[@]}" exec openclaw-gateway sh
+        ;;
+      service)
+        run_cmd "${COMPOSE[@]}" exec jobhunter-service sh
+        ;;
+      *)
+        usage >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  onboard)
+    gateway_node onboard --mode local --no-install-daemon
+    gateway_node config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
+    printf "\nOnboarding finished. Merge the Jobhunter MCP/skills snippet from './bin/openclaw config' into the OpenClaw config if it is not already present.\n"
+    ;;
+  doctor)
+    shift
+    gateway_node doctor "$@"
+    ;;
+  migrate-codex)
+    gateway_node migrate codex
     ;;
   config)
     print_config
