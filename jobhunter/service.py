@@ -346,7 +346,7 @@ def create_handler(app: JobHunterService):
             self.wfile.write(data)
 
         def log_message(self, fmt, *args):
-            log_context(LOGGER, logging.INFO, "service_http_access", client=self.client_address[0], message=fmt % args)
+            log_context(LOGGER, logging.INFO, "service_http_access", client=self.client_address[0], request_line=fmt % args)
 
     return Handler
 
