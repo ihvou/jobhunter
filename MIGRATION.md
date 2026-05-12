@@ -179,7 +179,115 @@ Configure reply keyboard via OpenClaw's channel-specific reply markup if support
 - Send `/agent show me applied jobs` → Codex receives, calls `query_sql` (via OpenClaw's bridge) or `apply_action` to the service, returns a structured answer.
 - `data/jobs.sqlite` is untouched (still readable, history preserved).
 
-Stop and review with user before Phase 2.
+Stop and review with user before Phase 1.5.
+
+## Phase 1.5 — Dockerize the OpenClaw gateway (mandatory before Phase 2) (0.5-1 day)
+
+**Why this exists**: Phase 1 (commit `aa71239`) installed OpenClaw on the host (`npm install -g openclaw@latest` + `openclaw onboard --install-daemon`). The original `ARCHITECTURE.md` listed *"Run the full OpenClaw Gateway inside Docker with narrow mounted volumes and scoped secrets"* as **P0**. Host install was a Phase 1 shortcut that we are now correcting before any destructive deletion in Phase 2 lands.
+
+**Why Docker-in-Docker for the gateway is the right call** for this user's threat model: the gateway process itself is the most-attackable surface (channel adapters, plugins, agent runtime). On host it can read `~/.codex`, `~/.ssh`, `~/.aws`, all user files. In a container with narrow mounts, it sees only what we explicitly grant. The per-session Docker sandbox (which would require mounting `/var/run/docker.sock` into the gateway — the spec's hard line) is **off** for this configuration; it does not block any tool we actually use (firecrawl, exa, browser-via-image, agenticmail, apollo, MCP-bridged jobhunter tools, Codex CLI multi-turn, all channels work identically with sandbox off). The marginal value of nested sandboxing is small when the gateway itself is already containerized with limited mounts.
+
+OpenClaw officially supports Docker install per `docs/install/docker.md`. Pre-built image: `ghcr.io/openclaw/openclaw:latest`. Setup script `./scripts/docker/setup.sh` exists upstream but **we drive Compose ourselves** to keep our hardening (read-only rootfs, capability drops, no-new-privileges) consistent with `jobhunter-service`.
+
+### 1.5a. Add `openclaw-gateway` service to `docker-compose.yml`
+
+Concrete spec:
+
+```yaml
+  openclaw-gateway:
+    image: ghcr.io/openclaw/openclaw:latest    # pin to a specific tag, not :latest
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    depends_on:
+      jobhunter-service:
+        condition: service_healthy
+    environment:
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      JOBHUNTER_SERVICE_URL: "http://jobhunter-service:8765"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:-}
+    volumes:
+      - openclaw_home:/home/node             # persistent state (config, prompt cache, etc.)
+      - ./skills:/openclaw/skills:ro          # our skill manifests
+      - ./config/openclaw.json:/openclaw/config.json:ro  # gateway config
+      - ~/.codex:/home/node/.codex:ro         # Codex CLI auth carried over
+    ports:
+      - "127.0.0.1:18789:18789"               # Control UI / channel callbacks, loopback only
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 1g
+    cpus: 1.5
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  openclaw_home:
+    driver: local
+```
+
+**Pin the image tag** to a specific date-based release (e.g., `ghcr.io/openclaw/openclaw:2026.5.10`) rather than `:latest`. The Dependabot/Renovate workflow can bump it later. Document the chosen tag in `MIGRATION_NOTES.md`.
+
+The `openclaw-gateway` and `jobhunter-service` containers share Docker's default bridge network, so `http://jobhunter-service:8765` resolves between them. The MCP bridge changes from stdio over a host-side spawn to **HTTP-over-bridge-network** if OpenClaw can launch our Python MCP server inside its own container — investigate during this phase. If stdio is preferred, copy `jobhunter/openclaw_mcp.py` into the gateway image at build time via an overlay layer, OR mount the repo at `/opt/jobhunter:ro` and let the gateway spawn `python3 -m jobhunter.openclaw_mcp` against it. Document the chosen approach in `MIGRATION_NOTES.md`.
+
+### 1.5b. Drop the `openclaw onboard --install-daemon` step
+
+Replace with the Docker-equivalent onboarding flow. Per upstream `docs/install/docker.md`:
+
+```bash
+docker compose run --rm --no-deps --entrypoint node openclaw-gateway \
+  dist/index.js onboard --mode local --no-install-daemon
+```
+
+The setup writes config to the `openclaw_home` volume (mounted at `/home/node`). Codex captures the final command sequence in `bin/openclaw` (`./bin/openclaw onboard` invokes it).
+
+### 1.5c. Update `bin/openclaw`
+
+- `start` now `docker compose up -d jobhunter-service openclaw-gateway` (both).
+- `stop` brings both down.
+- `restart` recreates both.
+- `logs` defaults to following both services; `logs gateway` and `logs service` for targeted.
+- `status` reports both containers' state.
+- `shell gateway` and `shell service` (default service).
+- `onboard` invokes the Docker-equivalent onboarding (1.5b).
+- `config` still prints the MCP server snippet but adjusts paths to be container-relative (e.g., `command: "python3"`, `args: ["-m", "jobhunter.openclaw_mcp"]`, `cwd: "/opt/jobhunter"` if we mounted that, or via HTTP MCP if we go that route).
+
+### 1.5d. Update `config/openclaw.example.json5`
+
+- Set `agents.defaults.sandbox.mode: "off"` (was `"non-main"` — pointless when gateway is itself containerized).
+- Keep all `tools.deny` lists (group:automation, group:runtime, group:fs) — these are independent of sandbox and still apply.
+- Keep `tools.fs.workspaceOnly: true`, `tools.exec.security: "deny"`, `tools.exec.ask: "always"`.
+- Add comment explaining the choice and pointing at this section of MIGRATION.md.
+- Telegram allowlist unchanged.
+
+### 1.5e. Update `MIGRATION_NOTES.md`
+
+Add a section "Phase 1.5: Dockerize gateway" with:
+- The image tag pinned and rationale
+- The chosen MCP transport (stdio with mounted repo vs HTTP-over-bridge)
+- The Codex auth migration approach (read-only mount of `~/.codex`)
+- The sandbox=off decision and which tools are protected by what (deny-lists, mount discipline)
+- Any surprises Codex finds during the Docker onboarding flow
+
+### 1.5f. Update `MIGRATION.md` itself
+
+After Phase 1.5 lands, update this section's status to "Done at <commit>".
+
+### Phase 1.5 acceptance
+
+- [ ] `docker compose ps` shows TWO running containers: `jobhunter-service` and `openclaw-gateway`. Both healthy.
+- [ ] `docker exec openclaw-gateway env` shows it cannot see host home dir secrets (only what we mounted).
+- [ ] `openclaw_home` volume contains the gateway's persistent state (config, prompt cache, channel pairings).
+- [ ] Codex CLI auth works (gateway can run agent loops using subscription auth from the mounted `~/.codex`).
+- [ ] Telegram message round-trip works end-to-end via the Dockerized gateway.
+- [ ] `/agent` request from Telegram hits Codex via gateway → MCP → service → response back through Telegram.
+- [ ] `./bin/openclaw config` outputs the working snippet for the chosen MCP transport.
+- [ ] `MIGRATION_NOTES.md` has the Phase 1.5 section filled in.
+- [ ] All existing tests pass.
+
+**Stop and review with user before Phase 2.** After user confirms parity on the Dockerized setup, proceed to Phase 2 destructive deletions.
 
 ## Phase 2 — Retire custom Telegram + worker code (2-3 days)
 
