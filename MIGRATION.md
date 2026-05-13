@@ -336,6 +336,122 @@ The legacy Python Telegram bot (`jobhunter/telegram.py`) and the file-based agen
 
 Git history alone preserves the pre-migration baseline at `58efc80` (the commit before `540ff80 File OpenClaw migration epic`). That is the fully-pre-OpenClaw world — useful for reference, not as a daily rollback target since it predates the Python service refactor.
 
+## Phase 1.5b — Wire OpenClaw inline-keyboard rendering (MANDATORY before Phase 2)
+
+**Why this exists**: Phase 1.5 verified Codex/MCP/Telegram round-trips work, but the digest sent by `Get more jobs` arrives as plain text with no per-job action buttons. The pre-migration `[Applied]`/`[Irrelevant]`/`[Snooze]`/`[Cover note]` buttons were built by `jobhunter/telegram.py`'s custom Python keyboard code. Phase 2 deletes that file. If we run Phase 2 before wiring OpenClaw's native inline-keyboard path, those buttons disappear — UX regression.
+
+OpenClaw 2026.5.7 has native support for this. We just need to enable it and teach the agent to use it.
+
+### 1.5b.1. Enable the channel capability
+
+Apply via `openclaw config patch --stdin`:
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "capabilities": { "inlineButtons": "dm" },
+      "actions": { "sendMessage": true }
+    }
+  }
+}
+```
+
+Restart gateway. This exposes the generic `message` action tool to the agent with inline-button support, and gates callbacks to DMs only (matches our chat allowlist).
+
+### 1.5b.2. Agent emit contract (the `message` tool)
+
+When `actions.sendMessage: true` is set, the agent gets a `message` tool. Documented in OpenClaw's stock system prompt (`/app/dist/system-prompt-BIKbdIsV.js:303`):
+
+```
+action=send  target=<telegram_target>  message=<text>  buttons=[[{text,callback_data,style?}]]
+```
+
+- `buttons` is a 2D array: outer = rows, inner = buttons in row
+- `style` (optional) is one of `primary` | `success` | `danger`
+- `callback_data` must be ≤ 64 bytes (Telegram limit)
+- Standard MarkdownV2/HTML rendering rules apply to `message`
+
+### 1.5b.3. Callback dispatch (button taps → agent)
+
+`/app/dist/bot-Ce301bOE.js:2450-2457` (verified): when the user taps a button, OpenClaw's bot handler:
+
+1. Calls `answerCallbackQuery` to dismiss the spinner
+2. Tries registered plugin handlers (none for us)
+3. For unmatched callbacks, **injects `callback_data` as a synthetic user-text message into the same conversation** with `messageIdOverride: callback.id` and `forceWasMentioned: true`
+
+So a tap on `[Applied]` with `callback_data: "applied:abc123"` arrives at the agent as if the user just typed `applied:abc123`. The agent does NOT receive a separate "callback event" — it sees a normal turn.
+
+This means the SKILL.md must teach the agent to recognize the `<action>:<job_id>` text format and route to the corresponding MCP tool.
+
+### 1.5b.4. callback_data scheme
+
+Standardize on:
+
+```
+applied:<job_id_first_12>     → jobhunter_mark_job(id, status="applied")
+irrelevant:<job_id_first_12>  → jobhunter_mark_job(id, status="irrelevant")
+snooze:<job_id_first_12>      → jobhunter_mark_job(id, status="snoozed", snooze_days=1)
+cover:<job_id_first_12>       → jobhunter_cover_note(id)
+```
+
+`<job_id_first_12>` is the first 12 chars of the SHA-256 `jobs.id` — fits comfortably under 64 bytes and is unique enough at our scale (1771 jobs → ~10⁻¹² collision). The MCP server resolves the 12-char prefix to the full job id via SQL LIKE.
+
+### 1.5b.5. SKILL.md additions
+
+Append to `skills/jobhunter/SKILL.md`:
+
+```markdown
+## Digest rendering with inline buttons
+
+When the user asks for fresh jobs (e.g., "Get more jobs"), after calling
+`jobhunter_get_more_jobs` you MUST emit the response via the OpenClaw `message`
+tool with per-job inline buttons. Do NOT just return a text reply.
+
+For each job in the returned shortlist, emit one `message` action with:
+
+  target = "telegram:<chat_id_from_conversation_metadata>"
+  message = "<rank>. <title> — <company> — score <total_score>\n<url>"
+  buttons = [[
+    { text: "Applied",    callback_data: "applied:<job_id_first_12>",    style: "success" },
+    { text: "Irrelevant", callback_data: "irrelevant:<job_id_first_12>", style: "danger" },
+    { text: "Snooze",     callback_data: "snooze:<job_id_first_12>" },
+    { text: "Cover",      callback_data: "cover:<job_id_first_12>",      style: "primary" }
+  ]]
+
+### Callback dispatch (button taps)
+
+When a user message arrives matching one of these patterns, treat it as a
+button-tap callback (NOT free-form text) and route immediately:
+
+  applied:<12_hex>     → call `jobhunter_mark_job(id_prefix=<12_hex>, status="applied")`
+  irrelevant:<12_hex>  → call `jobhunter_mark_job(id_prefix=<12_hex>, status="irrelevant")`
+  snooze:<12_hex>      → call `jobhunter_mark_job(id_prefix=<12_hex>, status="snoozed", snooze_days=1)`
+  cover:<12_hex>       → call `jobhunter_cover_note(id_prefix=<12_hex>)` then reply with the draft
+
+After successful action, do NOT post a verbose confirmation message; the user
+already sees the button tap was acknowledged in Telegram. A one-line ack
+("Marked as applied" / "Snoozed 24h") is fine.
+```
+
+### 1.5b.6. MCP server changes (`jobhunter/openclaw_mcp.py`)
+
+`jobhunter_mark_job` already exists but currently takes a full job_id. Extend it to also accept `id_prefix` (first 12 hex), resolving via `WHERE id LIKE ?||'%'` against `jobs`. Same for `jobhunter_cover_note`. No new tools needed.
+
+Add a small helper in `jobhunter/service.py` POST `/jobs/resolve_prefix` that maps a 12-char prefix to a full id (used by both MCP tools) — defensively reject if the prefix matches >1 row.
+
+### 1.5b.7. Phase 1.5b acceptance
+
+- [ ] `Get more jobs` returns a digest where each job has 4 inline buttons.
+- [ ] Tapping `Applied` on a job inserts an `agent_actions` row with `kind='mark_job'`, `status='applied'`, the resolved full job_id, and an audit timestamp.
+- [ ] Tapping `Irrelevant` marks the job irrelevant in `jobs.status`.
+- [ ] Tapping `Snooze` sets `jobs.snoozed_until` 24h ahead.
+- [ ] Tapping `Cover` returns a generated cover-note draft in chat.
+- [ ] After any tap, the original digest message either keeps its buttons (Telegram only allows one mutation per callback; document the behavior) OR shows a brief "✓ <action>" inline acknowledgment.
+- [ ] `docker compose --profile openclaw config --quiet` still passes.
+
+**Stop and verify with operator before Phase 2.** Phase 2 deletes `jobhunter/telegram.py`. If any 1.5b acceptance test fails, Phase 2 must NOT proceed.
+
 ## Phase 2 — Retire custom Telegram + worker code (2-3 days)
 
 After Phase 1 parity is proven:
