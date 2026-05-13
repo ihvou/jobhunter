@@ -99,25 +99,30 @@ TOOLS = [
     },
     {
         "name": "jobhunter_mark_job",
-        "description": "Mark a job as irrelevant, applied, or snoozed. Never use without explicit user intent.",
+        "description": "Mark a job as irrelevant, applied, or snoozed. Use job_id or the 12-char id_prefix from an inline button.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "job_id": {"type": "string"},
-                "action": {"type": "string", "enum": ["irrelevant", "applied", "snooze"]},
+                "id_prefix": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+                "action": {"type": "string", "enum": ["irrelevant", "applied", "snooze", "snoozed"]},
+                "status": {"type": "string", "enum": ["irrelevant", "applied", "snoozed"]},
                 "details": {"type": "string"},
+                "snooze_days": {"type": "integer", "minimum": 1, "maximum": 7},
             },
-            "required": ["job_id", "action"],
             "additionalProperties": False,
         },
     },
     {
         "name": "jobhunter_cover_note",
-        "description": "Draft a cover note for one job.",
+        "description": "Draft a cover note for one job. Use job_id or the 12-char id_prefix from an inline button.",
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "override_budget": {"type": "boolean"}},
-            "required": ["job_id"],
+            "properties": {
+                "job_id": {"type": "string"},
+                "id_prefix": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+                "override_budget": {"type": "boolean"},
+            },
             "additionalProperties": False,
         },
     },
@@ -205,18 +210,30 @@ def call_tool(name: str, args: Dict) -> Dict:
     if name == "jobhunter_agent_poll":
         return post("/agent/poll", {"session_id": args.get("session_id") or ""})
     if name == "jobhunter_mark_job":
-        action = args.get("action")
+        job_id = resolve_job_id(args)
+        action = args.get("status") or args.get("action")
         if action == "irrelevant":
-            return post("/irrelevant", {"job_id": args.get("job_id"), "details": args.get("details", "")})
+            return post("/irrelevant", {"job_id": job_id, "details": args.get("details", "")})
         if action == "applied":
-            return post("/applied", {"job_id": args.get("job_id"), "details": args.get("details", "")})
-        if action == "snooze":
-            return post("/snooze", {"job_id": args.get("job_id")})
+            return post("/applied", {"job_id": job_id, "details": args.get("details", "")})
+        if action in ("snooze", "snoozed"):
+            return post("/snooze", {"job_id": job_id, "snooze_days": args.get("snooze_days") or 1})
+        raise ValueError("Unsupported job action/status: %s" % action)
     if name == "jobhunter_cover_note":
-        return post("/cover-note", {"job_id": args.get("job_id"), "override_budget": bool(args.get("override_budget", False))})
+        return post("/cover-note", {"job_id": resolve_job_id(args), "override_budget": bool(args.get("override_budget", False))})
     if name == "jobhunter_query_sql":
         return post("/query-sql", {"sql": args.get("sql"), "params": args.get("params") or [], "limit": args.get("limit") or 50})
     raise ValueError("Unknown tool: %s" % name)
+
+
+def resolve_job_id(args: Dict) -> str:
+    job_id = str(args.get("job_id") or "").strip()
+    if job_id:
+        return job_id
+    prefix = str(args.get("id_prefix") or "").strip().lower()
+    if not prefix:
+        raise ValueError("job_id or id_prefix is required")
+    return post("/jobs/resolve_prefix", {"id_prefix": prefix})["job_id"]
 
 
 def get(path: str) -> Dict:

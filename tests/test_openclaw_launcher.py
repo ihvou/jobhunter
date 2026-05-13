@@ -28,12 +28,17 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("/opt/jobhunter", result.stdout)
         self.assertIn("/openclaw/skills", result.stdout)
         self.assertIn('mode: "off"', result.stdout)
+        self.assertIn('inlineButtons: "dm"', result.stdout)
+        self.assertIn("sendMessage: true", result.stdout)
 
     def test_onboard_dry_run_uses_docker_gateway(self):
         result = self.run_launcher("onboard", env={"OPENCLAW_DRY_RUN": "1"})
         self.assertEqual(result.returncode, 0)
         self.assertIn("openclaw-gateway dist/index.js onboard --mode local --no-install-daemon", result.stdout)
         self.assertIn("openclaw-gateway dist/index.js config set --batch-json", result.stdout)
+        self.assertIn("openclaw-gateway dist/index.js config patch --stdin", result.stdout)
+        self.assertIn("inlineButtons", result.stdout)
+        self.assertIn("sendMessage", result.stdout)
 
 
 if __name__ == "__main__":

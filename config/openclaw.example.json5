@@ -15,6 +15,12 @@
       botToken: "${TELEGRAM_BOT_TOKEN}",
       dmPolicy: "allowlist",
       allowFrom: ["tg:${TELEGRAM_ALLOWED_CHAT_ID}"],
+      capabilities: {
+        inlineButtons: "dm",
+      },
+      actions: {
+        sendMessage: true,
+      },
     },
   },
   mcp: {

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,33 @@ class ServiceTests(unittest.TestCase):
             applied = service.mark_applied(job_id)
             self.assertTrue(applied["ok"])
             self.assertEqual(bot.database.get_job(job_id)["status"], "applied")
+            action = bot.database.recent_agent_actions(1)[0]
+            self.assertEqual(action["kind"], "mark_job")
+            self.assertEqual(action["status"], "applied")
+            payload = json.loads(action["payload_json"])
+            self.assertEqual(payload["job_id"], job_id)
+            self.assertEqual(payload["status"], "applied")
+
+    def test_resolve_job_prefix_and_snooze_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, job_id = self.seeded_bot(tmp)
+            service = JobHunterService(bot)
+
+            resolved = service.resolve_job_prefix(job_id[:12])
+            self.assertEqual(resolved["job_id"], job_id)
+
+            with self.assertRaises(ServiceError) as raised:
+                service.resolve_job_prefix("not-a-prefix")
+            self.assertEqual(raised.exception.status, 400)
+
+            snoozed = service.snooze(job_id)
+            self.assertTrue(snoozed["ok"])
+            job = bot.database.get_job(job_id)
+            self.assertEqual(job["status"], "snoozed")
+            self.assertTrue(job["snoozed_until"])
+            action = bot.database.recent_agent_actions(1)[0]
+            self.assertEqual(action["kind"], "mark_job")
+            self.assertEqual(json.loads(action["payload_json"])["job_id"], job_id)
 
     def test_query_sql_is_select_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,6 +157,58 @@ class ServiceTests(unittest.TestCase):
             )
             text = called["result"]["content"][0]["text"]
             self.assertIn("AI Product Manager", text)
+
+    def test_mcp_mark_job_and_cover_note_accept_id_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, job_id = self.seeded_bot(tmp)
+            service = JobHunterService(bot)
+            import jobhunter.openclaw_mcp as mcp
+
+            old_post = mcp.post
+            calls = []
+
+            def fake_post(path, payload):
+                calls.append((path, payload))
+                if path == "/jobs/resolve_prefix":
+                    return service.resolve_job_prefix(payload["id_prefix"])
+                if path == "/applied":
+                    return service.mark_applied(payload["job_id"])
+                if path == "/cover-note":
+                    return {"ok": True, "job_id": payload["job_id"], "draft": "Cover draft"}
+                raise AssertionError("unexpected POST %s" % path)
+
+            mcp.post = fake_post
+            self.addCleanup(setattr, mcp, "post", old_post)
+
+            marked = handle_rpc(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jobhunter_mark_job",
+                        "arguments": {"id_prefix": job_id[:12], "status": "applied"},
+                    },
+                }
+            )
+            marked_payload = json.loads(marked["result"]["content"][0]["text"])
+            self.assertEqual(marked_payload["status"], "applied")
+            self.assertEqual(bot.database.get_job(job_id)["status"], "applied")
+
+            cover = handle_rpc(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jobhunter_cover_note",
+                        "arguments": {"id_prefix": job_id[:12]},
+                    },
+                }
+            )
+            cover_payload = json.loads(cover["result"]["content"][0]["text"])
+            self.assertEqual(cover_payload["draft"], "Cover draft")
+            self.assertIn(("/cover-note", {"job_id": job_id, "override_budget": False}), calls)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -17,6 +18,7 @@ from .database import tomorrow_iso
 from .logging_setup import configure_logging, log_context, safe_log_text
 
 LOGGER = logging.getLogger(__name__)
+JOB_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 class JobHunterService:
@@ -67,6 +69,7 @@ class JobHunterService:
         self.ensure_job(job_id)
         self.bot.database.update_job_status(job_id, "snoozed", snoozed_until=tomorrow_iso())
         self.bot.database.add_feedback(job_id, "snooze_1d")
+        self.audit_mark_job(job_id, "snoozed", "snooze_1d")
         return {"ok": True, "job_id": job_id, "status": "snoozed"}
 
     def cover_note(self, job_id: str, override_budget: bool = False) -> Dict:
@@ -210,7 +213,31 @@ class JobHunterService:
         self.ensure_job(job_id)
         self.bot.database.update_job_status(job_id, status)
         self.bot.database.add_feedback(job_id, feedback, details=details or None)
+        self.audit_mark_job(job_id, status, feedback, details)
         return {"ok": True, "job_id": job_id, "status": status, "feedback": feedback}
+
+    def resolve_job_prefix(self, id_prefix: str) -> Dict:
+        prefix = str(id_prefix or "").strip().lower()
+        if not JOB_ID_PREFIX_RE.match(prefix):
+            raise ServiceError(400, "Job id prefix must be exactly 12 lowercase hex characters")
+        with self.bot.database.connection() as conn:
+            rows = list(conn.execute("select id from jobs where id like ? order by id asc limit 2", (prefix + "%",)))
+        if not rows:
+            raise ServiceError(404, "No job matched prefix: %s" % prefix)
+        if len(rows) > 1:
+            raise ServiceError(409, "Job id prefix is ambiguous: %s" % prefix)
+        return {"ok": True, "id_prefix": prefix, "job_id": rows[0]["id"]}
+
+    def audit_mark_job(self, job_id: str, status: str, feedback: str, details: str = "") -> int:
+        return self.bot.database.record_agent_action(
+            "openclaw-inline-button",
+            "mark_job",
+            "inline job action",
+            "Marked job %s as %s" % (job_id[:12], status),
+            {"job_id": job_id, "status": status, "feedback": feedback, "details": details or ""},
+            "applied",
+            result_message="Job %s marked as %s" % (job_id[:12], status),
+        )
 
     def ensure_job(self, job_id: str):
         job = self.bot.database.get_job(job_id)
@@ -301,6 +328,8 @@ def create_handler(app: JobHunterService):
                     payload = app.snooze(required(body, "job_id"))
                 elif method == "POST" and path == "/cover-note":
                     payload = app.cover_note(required(body, "job_id"), bool(body.get("override_budget", False)))
+                elif method == "POST" and path == "/jobs/resolve_prefix":
+                    payload = app.resolve_job_prefix(required(body, "id_prefix"))
                 elif method == "POST" and path == "/agent/request":
                     payload = app.agent_request(required(body, "user_text"))
                 elif method == "POST" and path == "/agent/poll":

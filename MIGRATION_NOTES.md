@@ -39,3 +39,12 @@ Then configure OpenClaw with:
 - Codex auth: host `~/.codex` exists and is mounted read-only at `/home/node/.codex`. No `openclaw migrate codex` command is baked into startup because the mounted Codex OAuth profile should be readable directly by the Dockerized runtime. If `openclaw doctor` later reports stale Codex model routes, run `./bin/openclaw migrate-codex` and then `./bin/openclaw doctor`.
 - Sandbox mode: `agents.defaults.sandbox.mode` is `off`. This avoids mounting `/var/run/docker.sock` into the gateway. Protection comes from the gateway container boundary, read-only rootfs, narrow read-only repo/skills/Codex mounts, `cap_drop: ALL`, `no-new-privileges`, tool deny-lists, `exec.security: deny`, and bounded Jobhunter MCP tools.
 - Docker onboarding: `./bin/openclaw onboard` runs OpenClaw's Docker manual flow with `node dist/index.js onboard --mode local --no-install-daemon`, then applies local gateway bind settings. The actual Telegram pairing and parity checks remain user-run acceptance steps.
+
+## Phase 1.5b: OpenClaw inline keyboards
+
+- Telegram channel capability: `./bin/openclaw onboard` now applies `channels.telegram.capabilities.inlineButtons=dm` and `channels.telegram.actions.sendMessage=true`. The printable config snippet includes the same settings for manual inspection or patching.
+- Agent contract: the `jobhunter` skill instructs OpenClaw agents to send each digest item through the native `message` tool with four inline buttons: `Applied`, `Irrelevant`, `Snooze`, and `Cover`.
+- Callback contract: OpenClaw injects unmatched `callback_data` as a synthetic user message. The skill treats `applied:<12_hex>`, `irrelevant:<12_hex>`, `snooze:<12_hex>`, and `cover:<12_hex>` as button callbacks and routes directly to Jobhunter MCP tools.
+- Prefix resolution: `jobhunter-service` exposes `POST /jobs/resolve_prefix`, and MCP tools accept either `job_id` or `id_prefix`. Ambiguous or missing 12-character prefixes are rejected before any mutation.
+- Audit behavior: inline job mutations write `agent_actions.kind='mark_job'` rows with the resolved full job id in `payload_json`, an applied status, and an applied timestamp.
+- Original digest behavior: Phase 1.5b does not mutate the original digest card after a tap. Buttons remain visible; OpenClaw acknowledges the callback spinner and the agent should send only a short one-line confirmation or the cover draft.

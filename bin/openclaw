@@ -74,11 +74,32 @@ gateway_node() {
   run_cmd "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js "$@"
 }
 
+patch_inline_buttons() {
+  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}}}'
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+'
+    printf ' %q' "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config patch --stdin
+    printf ' <<< %q\n' "$payload"
+  else
+    printf '%s\n' "$payload" | "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config patch --stdin
+  fi
+}
+
 print_config() {
   cat <<EOF
 {
   // Dockerized Phase 1.5 config. Gateway runs in container, so paths are
   // container-relative and the Jobhunter service is reached over Compose DNS.
+  channels: {
+    telegram: {
+      capabilities: {
+        inlineButtons: "dm"
+      },
+      actions: {
+        sendMessage: true
+      }
+    }
+  },
   mcp: {
     servers: {
       jobhunter: {
@@ -173,6 +194,7 @@ case "${1:-help}" in
   onboard)
     gateway_node onboard --mode local --no-install-daemon
     gateway_node config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
+    patch_inline_buttons
     printf "\nOnboarding finished. Merge the Jobhunter MCP/skills snippet from './bin/openclaw config' into the OpenClaw config if it is not already present.\n"
     ;;
   doctor)

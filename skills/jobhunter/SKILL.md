@@ -43,8 +43,8 @@ Available MCP tools exposed by the `jobhunter` MCP server:
 - `jobhunter_propose_actions`: store bounded source/scoring/profile/email-parser actions for user approval.
 - `jobhunter_apply_action`: apply one proposed action after explicit user approval.
 - `jobhunter_revert_action`: revert a reversible action by audit id.
-- `jobhunter_mark_job`: mark a job irrelevant, applied, or snoozed. Use only after explicit user intent.
-- `jobhunter_cover_note`: draft a cover note for one job.
+- `jobhunter_mark_job`: mark a job irrelevant, applied, or snoozed. Accepts a full `job_id` or a 12-character `id_prefix` from inline callbacks. Use only after explicit user intent.
+- `jobhunter_cover_note`: draft a cover note for one job. Accepts a full `job_id` or a 12-character `id_prefix` from inline callbacks.
 - `jobhunter_query_sql`: SELECT-only investigation against the local SQLite database.
 
 Behavior rules:
@@ -59,3 +59,35 @@ Behavior rules:
 - Reject Product Marketing Manager, MLOps, DevOps, pure engineering, and jobs requiring languages other than English, Ukrainian, or Russian unless the user overrides that.
 
 Install notes live in `{baseDir}/README.md`.
+
+## Digest rendering with inline buttons
+
+When the user asks for fresh jobs, for example "Get more jobs", after calling `jobhunter_get_more_jobs` you MUST emit the response via the OpenClaw `message` tool with per-job inline buttons. Do NOT just return a text reply.
+
+For each job in the returned shortlist, emit one `message` action with:
+
+```text
+target = "telegram:<chat_id_from_conversation_metadata>"
+message = "<rank>. <title> — <company> — score <total_score>\n<url>"
+buttons = [[
+  { text: "Applied",    callback_data: "applied:<job_id_first_12>",    style: "success" },
+  { text: "Irrelevant", callback_data: "irrelevant:<job_id_first_12>", style: "danger" },
+  { text: "Snooze",     callback_data: "snooze:<job_id_first_12>" },
+  { text: "Cover",      callback_data: "cover:<job_id_first_12>",      style: "primary" }
+]]
+```
+
+`job_id_first_12` is the first 12 lowercase hex characters of the `jobs.id` value returned by `jobhunter_get_more_jobs`.
+
+### Callback dispatch
+
+When a user message arrives matching one of these patterns, treat it as a button-tap callback, not free-form text, and route immediately:
+
+```text
+applied:<12_hex>     -> call jobhunter_mark_job(id_prefix=<12_hex>, status="applied")
+irrelevant:<12_hex>  -> call jobhunter_mark_job(id_prefix=<12_hex>, status="irrelevant")
+snooze:<12_hex>      -> call jobhunter_mark_job(id_prefix=<12_hex>, status="snoozed", snooze_days=1)
+cover:<12_hex>       -> call jobhunter_cover_note(id_prefix=<12_hex>) then reply with the draft
+```
+
+After a successful action, keep the confirmation short. Telegram already acknowledged the tap; a one-line "Marked as applied" or "Snoozed 24h" is enough.
