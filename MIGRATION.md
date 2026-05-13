@@ -291,6 +291,51 @@ After Phase 1.5 lands, update this section's status to "Done at <commit>".
 
 **Stop and review with user before Phase 2.** After user confirms parity on the Dockerized setup, proceed to Phase 2 destructive deletions.
 
+## Rollback safety net (before any Phase 2 work)
+
+Phase 2 is destructive: it deletes `openclaw/worker/`, `jobhunter/telegram.py`, and `openclaw/workspace/` file-based IPC. Once those are gone, the *fast* rollback path is the previously-validated "both worlds coexist" commit, not git archaeology.
+
+Before Phase 2 lands, the operator (or the migration runner) **must**:
+
+1. Confirm the latest commit on the migration branch is the verified Phase 1.5 state (Telegram round-trip + MCP smoke test green).
+2. Create an immutable tag at that commit:
+
+   ```bash
+   git tag -a pre-phase-2-YYYY-MM-DD -m "Phase 1.5 verified; both old + new stacks coexist"
+   ```
+
+3. Create an archive branch pointing at the same SHA, for ergonomic checkout:
+
+   ```bash
+   git branch archive/pre-phase-2 pre-phase-2-YYYY-MM-DD
+   ```
+
+4. Push tag + branch to `origin` so the rollback target survives local-machine loss:
+
+   ```bash
+   git push origin pre-phase-2-YYYY-MM-DD
+   git push origin archive/pre-phase-2
+   ```
+
+5. Run Phase 2 on a *new* branch (`phase-2-cleanup`) cut from the migration branch — not directly on the migration branch. Merge only after Phase 2 acceptance.
+
+### Rollback recipe
+
+If Phase 2 introduces a regression that cannot be hotfixed inside its own branch:
+
+```bash
+git checkout archive/pre-phase-2
+docker compose down
+docker compose up -d jobhunter-service openclaw-gateway
+
+# If the Python Telegram bot is also needed (legacy path):
+#   docker compose up -d jobhunter        # the legacy container in pre-1.5 compose
+```
+
+The legacy Python Telegram bot (`jobhunter/telegram.py`) and the file-based agent IPC in `openclaw/workspace/` are still present in this archive. The OpenClaw gateway in this commit is the same Dockerized Phase 1.5 build, so Codex/MCP keeps working while the legacy path acts as a fallback.
+
+Git history alone preserves the pre-migration baseline at `58efc80` (the commit before `540ff80 File OpenClaw migration epic`). That is the fully-pre-OpenClaw world — useful for reference, not as a daily rollback target since it predates the Python service refactor.
+
 ## Phase 2 — Retire custom Telegram + worker code (2-3 days)
 
 After Phase 1 parity is proven:
