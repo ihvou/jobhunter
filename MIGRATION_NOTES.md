@@ -72,3 +72,13 @@ Then configure OpenClaw with:
 
 - Security note: approving this MCP server is narrower than relaxing shell execution. Jobhunter MCP tools are bounded Python service endpoints; shell/runtime/fs OpenClaw tools remain denied, native Codex shell is approval-gated, Codex app-server sandbox is forced to `read-only`, and the gateway still has no Docker socket.
 - Verification: a fresh native Codex app-server session `phase15c-native-tools-check-approve` searched for `jobhunter_get_more_jobs`, called `mcp__jobhunter__.jobhunter_get_more_jobs`, and received 3 real job rows. After the shell/tool-description cleanup, session `phase15c-soft-contract-check` used only `jobhunter.jobhunter_get_more_jobs` in `toolSummary` and returned one real row with `mark_sent=false`.
+
+## Phase 2: Retire legacy Telegram/worker/IPC path
+
+- Python is now a headless domain service. OpenClaw owns Telegram, Codex sessions, inline buttons, and the user-facing turn loop.
+- Removed tracked legacy runtime files: `openclaw/worker/`, `openclaw/prompts/`, `jobhunter/telegram.py`, `jobhunter/agent.py`, and their dedicated tests.
+- Removed ignored local legacy state directories: `openclaw/workspace/` and `openclaw/codex-home/`. The Dockerized gateway uses the named `openclaw_home` volume and the read-only host `~/.codex` mount instead.
+- Kept `openclaw-gateway` in `docker-compose.yml`. It is the real OpenClaw runtime from Phase 1.5, not the retired custom worker.
+- Kept the three-part MCP registration in `./bin/openclaw onboard`: OpenClaw config patch, Codex `config.toml` server entry with `default_tools_approval_mode = "approve"`, and `codex mcp add jobhunter -- python3 -m jobhunter.openclaw_mcp`.
+- `jobhunter-service` no longer publishes a host port. The OpenClaw gateway reaches it on the Compose network as `http://jobhunter-service:8765`.
+- `./bin/jobhunter` remains for one release as a deprecated wrapper that delegates to `./bin/openclaw`.

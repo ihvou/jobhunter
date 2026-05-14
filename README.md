@@ -37,7 +37,7 @@ Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 You need: a Telegram bot token, your Telegram chat ID, and a Codex CLI subscription (ChatGPT Pro or equivalent). Optionally, an OpenAI API key for cover notes and the L2 relevance pass.
 
-This repo is migrating from the legacy custom Codex worker to real OpenClaw. The stable legacy bot still runs through `./bin/jobhunter`; the migration bridge runs `jobhunter-service` plus a Dockerized OpenClaw gateway through `./bin/openclaw`.
+The runtime is real OpenClaw plus the local `jobhunter-service`. Use `./bin/openclaw` for normal operation. `./bin/jobhunter` remains only as a temporary deprecated wrapper.
 
 ```bash
 # 1. Configure secrets
@@ -46,13 +46,14 @@ cp .env.example .env
 # (optional) set OPENAI_API_KEY for cover notes + better L2 relevance
 
 # 2. Authorize Codex (one-time device login)
-./bin/jobhunter login
+./bin/openclaw start
+./bin/openclaw onboard
 
 # 3. Start both containers
-./bin/jobhunter start
+./bin/openclaw status
 ```
 
-The bot will DM you a ready message with a persistent reply keyboard.
+OpenClaw owns the Telegram connection. After onboarding, send `Get more jobs` or `/jobs` to the Telegram bot.
 
 ### Required environment variables
 
@@ -68,7 +69,7 @@ All other env vars (model, budget caps, agent quotas, IMAP credentials) have sen
 
 ### From Telegram (everything you need day-to-day)
 
-After `./bin/jobhunter start`:
+After `./bin/openclaw start` and `./bin/openclaw onboard`:
 
 1. **Set your profile** — type a normal message such as `please replace my about-me profile with: ...`, or use `/agent <same request>`. Example:
     ```
@@ -78,39 +79,25 @@ After `./bin/jobhunter start`:
     AI tooling. Strengths: discovery, product analytics, fast prototyping. Avoid:
     internships, junior-only roles.
     ```
-2. **Get your first digest** — tap `Get more jobs`. The bot instantly serves the best indexed jobs, then refreshes sources in the background if the last successful collection is older than `JOBHUNTER_COLLECT_STALE_MINUTES` (default 30). Use `/refresh` to force a source refresh.
-3. **React to each card** — tap `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied`. The card disappears from chat after the action.
+2. **Get your first digest** — type `Get more jobs` or `/jobs`. OpenClaw calls `jobhunter_get_more_jobs`; if the source queue is stale, it runs collection first, then renders fresh jobs.
+3. **React to each card** — tap `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied`.
 4. **Teach the system in plain English** — type `skip jobs that mention German required` or `prioritize Product Builder roles building with Claude or Codex`. The agent proposes a directive change; you approve; the next `Get more jobs` reflects it.
 5. **Refine sources and scoring when needed** — tap `Update sources` or `Tune scoring`. The agent proposes changes; you approve per-candidate or per-rule.
 
 ### Operator commands
 
 ```bash
-./bin/jobhunter start         # start both containers (idempotent — re-runs are safe)
-./bin/jobhunter stop          # stop both containers
-./bin/jobhunter restart       # rebuild and recreate
-./bin/jobhunter status        # one-line health summary
-./bin/jobhunter logs          # tail both services
-./bin/jobhunter logs worker   # tail only the OpenClaw worker
-./bin/jobhunter login         # re-authorize Codex (when token expires)
-./bin/jobhunter reset         # nuke local SQLite + workspace files (asks for confirmation)
-./bin/jobhunter shell jobhunter  # open a shell in a running container
-./bin/jobhunter help          # see all subcommands
-```
-
-`./bin/jobhunter start` and `./bin/jobhunter restart` refuse to run if `.env` is missing required vars and tell you which ones.
-
-### OpenClaw migration bridge
-
-```bash
 ./bin/openclaw onboard    # one-time Dockerized OpenClaw onboarding, no host daemon install
 ./bin/openclaw start      # start jobhunter-service + openclaw-gateway
+./bin/openclaw stop       # stop both containers
+./bin/openclaw restart    # rebuild and recreate both containers
 ./bin/openclaw config     # print the container-relative MCP + skill config snippet
 ./bin/openclaw status     # check service and gateway health
 ./bin/openclaw logs       # follow both logs; use "logs gateway" or "logs service"
+./bin/openclaw shell      # shell into jobhunter-service; use "shell gateway" for OpenClaw
 ```
 
-The bridge exposes Jobhunter to OpenClaw through `python -m jobhunter.openclaw_mcp` running inside the gateway container, with this repo mounted read-only at `/opt/jobhunter`. See [`MIGRATION_DISCOVERY.md`](MIGRATION_DISCOVERY.md), [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md), and [`skills/jobhunter/README.md`](skills/jobhunter/README.md).
+The gateway exposes Jobhunter through `python -m jobhunter.openclaw_mcp` running inside the gateway container, with this repo mounted read-only at `/opt/jobhunter`. See [`MIGRATION_DISCOVERY.md`](MIGRATION_DISCOVERY.md), [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md), and [`skills/jobhunter/README.md`](skills/jobhunter/README.md).
 
 ### Telegram commands cheatsheet
 
@@ -156,7 +143,7 @@ Every write action is gated behind `[Apply 1] [Apply 2] [Apply all] [Reject all]
 | Bulk write actions | Approval tap PLUS typed `CONFIRM <id>` reply within 60s |
 | Collection | 1 / 10 minutes per `Get more jobs` |
 
-Check current spend any time via the `Usage` button, `/usage` command, or `./bin/jobhunter status`.
+Check current spend any time via `Usage`, `/usage`, or `./bin/openclaw status`.
 
 ## Email Alerts (Optional)
 
@@ -191,16 +178,16 @@ The IMAP collector tracks per-source UID high-water marks, so old messages are n
 
 | Symptom | Check |
 |---|---|
-| No Telegram messages | Verify bot token + chat ID; `./bin/jobhunter logs jobhunter` |
+| No Telegram messages | Verify bot token + chat ID; `./bin/openclaw logs gateway` |
 | `Get more jobs` says wait | Collection rate limit kicked in; try after the shown wait |
 | Digest is empty | `/agent please tune scoring to be more permissive`, or add sources |
 | Bad jobs reach the digest | Type the pattern to skip; approve the resulting `directive_edit` |
 | Good jobs are hidden | Ask `why was [URL] not in my last digest?`, then teach the fix in plain English |
 | Same job repeats | Snoozed-due jobs are allowed to reappear once; otherwise check `digest_log` |
 | Cover note denied | Use `Usage` to see budget; approve the one-time override only if intended |
-| Agent proposal never appears | `./bin/jobhunter logs worker` and inspect `openclaw/workspace/agent/status-*.json` for `state=failed` |
+| Agent proposal never appears | `./bin/openclaw logs gateway`, then verify trajectories contain `jobhunter_*` tool calls |
 | `Daily agent quota reached` | Default 20/day; raise `JOBHUNTER_RATE_LIMIT_AGENT_PER_DAY` in `.env` |
-| Codex login expired | `./bin/jobhunter login` re-runs device auth |
+| Codex login expired | Run `./bin/openclaw onboard` and follow OpenClaw/Codex auth prompts if needed |
 | `/revert` says "no reversible archive" | Some action kinds (data_answer, human_followup, bulk_update_jobs, rescore_jobs) don't archive a file; not reversible by `/revert` today |
 
 ## Safety Notes
@@ -216,7 +203,7 @@ The IMAP collector tracks per-source UID high-water marks, so old messages are n
 
 # Reference
 
-The rest of this file is reference material. You won't need any of it for normal use — Telegram and `./bin/jobhunter` cover the daily workflow.
+The rest of this file is reference material. You won't need most of it for normal use — Telegram and `./bin/openclaw` cover the daily workflow.
 
 ## Configuration Files
 
@@ -249,18 +236,15 @@ Robots.txt handling is opt-in. The default `ignore` policy is intentional for th
 
 ## Python Commands (Development / Debugging)
 
-For day-to-day use, prefer Telegram + `./bin/jobhunter`. The Python CLI is for development and smoke testing.
+For day-to-day use, prefer Telegram + `./bin/openclaw`. The Python CLI is for development and smoke testing.
 
 ```bash
-python3 -m jobhunter init           # init schema, sources, workspace dirs; migrate legacy profile
+python3 -m jobhunter init           # init schema, sources, local profile files
 python3 -m jobhunter collect        # fetch from enabled sources, L1-score, and index capped L2 relevance
-python3 -m jobhunter digest         # pure indexed SELECT and send/print top matches
-python3 -m jobhunter run-once       # init + collect + digest
-python3 -m jobhunter telegram-poll  # one tick of serve's poll loop
-python3 -m jobhunter discover-sources  # legacy discovery request file (kept for debugging)
-python3 -m jobhunter tune-scoring      # legacy tuning request file (kept for debugging)
+python3 -m jobhunter digest         # print current ranked digest rows as JSON
+python3 -m jobhunter run-once       # init + collect once
+python3 -m jobhunter service        # local HTTP service used by OpenClaw MCP
 python3 -m jobhunter usage          # local OpenAI usage summary
-python3 -m jobhunter serve          # Telegram + workspace polling loop; no scheduled collection
 ```
 
 There's no CLI for `/agent` itself — the agent surface is Telegram-only by design (every action is approval-gated and the chat is the audit log).
@@ -270,8 +254,8 @@ There's no CLI for `/agent` itself — the agent surface is Telegram-only by des
 The launcher above is recommended. Raw Compose is useful for debugging:
 
 ```bash
-docker compose --profile openclaw up -d jobhunter openclaw-gateway
-docker compose logs -f jobhunter
+docker compose --profile openclaw up -d jobhunter-service openclaw-gateway
+docker compose logs -f jobhunter-service
 docker compose --profile openclaw logs -f openclaw-gateway
 docker compose --profile openclaw config --quiet
 ```
@@ -287,8 +271,8 @@ docker compose --profile openclaw config --quiet
 | `config/scoring.v<n>.json` | Auto-archived previous scoring versions (used by `/revert`) | committed |
 | `input/profile.local.md`, `input/cv.local.md` | Your private profile + optional CV | yes |
 | `input/profile.<ts>.md.bak` | Auto-archived previous profile versions | yes |
-| `openclaw/workspace/` | Transient `discovery/`, `tuning/`, `agent/` JSON | yes |
-| `openclaw/codex-home/` | Codex CLI auth token after `./bin/jobhunter login` | yes |
+| Docker volume `openclaw_home` | OpenClaw state, sessions, trajectories, and per-agent Codex config | docker-managed |
+| `~/.codex` | Codex auth mounted read-only into the gateway | outside repo |
 
 Manual SQLite backup:
 
@@ -301,4 +285,4 @@ Or via the agent: `/agent backup my config and profile`.
 
 ## Mental Model and Architecture
 
-For how the two containers talk to each other, the bounded action set, the L1/L2 split, the worker tool surface, and the audit-and-revert chain, see [`ARCHITECTURE.md`](ARCHITECTURE.md). The README intentionally does not duplicate that material.
+For how the two containers talk to each other, the bounded action set, the L1/L2 split, the MCP tool surface, and the audit-and-revert chain, see [`ARCHITECTURE.md`](ARCHITECTURE.md). The README intentionally does not duplicate that material.

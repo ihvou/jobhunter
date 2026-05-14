@@ -1,91 +1,80 @@
 # OpenClaw Docker Approval Steps
 
-The code in this repository is ready to run without secrets, but these steps require your explicit
-approval because they involve tokens, accounts, or external services.
+These steps involve accounts, tokens, or external services and should stay under explicit human control.
 
 ## 1. Telegram Bot
 
 | Step | Why Approval Is Needed |
 |---|---|
 | Create bot with BotFather | Creates a real Telegram bot identity |
-| Add `TELEGRAM_BOT_TOKEN` to `.env` | Gives the service permission to send/poll bot messages |
-| Add `TELEGRAM_ALLOWED_CHAT_ID` to `.env` | Restricts delivery to your chat |
+| Add `TELEGRAM_BOT_TOKEN` to `.env` | Lets OpenClaw receive and send Telegram bot messages |
+| Add `TELEGRAM_ALLOWED_CHAT_ID` to `.env` | Restricts bot access to your chat |
 
-## 2. OpenAI API Key
+## 2. OpenClaw Gateway In Docker
+
+OpenClaw owns Telegram routing, Codex sessions, inline buttons, and calls into Jobhunter through MCP.
+
+| Requirement | Current Setting |
+|---|---|
+| Gateway container | `openclaw-gateway` |
+| Service container | `jobhunter-service` |
+| Control UI | `127.0.0.1:18789` only |
+| Jobhunter tool bridge | stdio MCP: `python3 -m jobhunter.openclaw_mcp` |
+| Jobhunter service URL | `http://jobhunter-service:8765` on the Compose network |
+| Persistent OpenClaw state | Docker volume `openclaw_home` |
+| Codex auth | `~/.codex` mounted read-only |
+| Docker socket | not mounted |
+
+Run:
+
+```bash
+./bin/openclaw start
+./bin/openclaw onboard
+```
+
+`./bin/openclaw onboard` must keep three registration steps:
+
+1. Patch OpenClaw config with `mcp.servers.jobhunter`.
+2. Write Codex per-agent `[mcp_servers.jobhunter]` with `default_tools_approval_mode = "approve"`.
+3. Run `codex mcp add jobhunter -- python3 -m jobhunter.openclaw_mcp`.
+
+## 3. OpenAI API Key
 
 | Step | Why Approval Is Needed |
 |---|---|
-| Create dedicated OpenAI project/key | Enables paid cover-note calls |
+| Create dedicated OpenAI project/key | Enables paid cover-note calls and higher-quality L2 relevance |
 | Set project budget/alerts | Provider-side visibility |
-| Add `OPENAI_API_KEY` to `.env` | Lets `jobhunter` generate cover notes only |
+| Add `OPENAI_API_KEY` to `.env` | Lets `jobhunter-service` call OpenAI within local budget caps |
 
-The bot also enforces its own budget with:
+The service also enforces:
 
 ```text
 JOBHUNTER_DAILY_BUDGET_USD=0.50
 JOBHUNTER_MONTHLY_BUDGET_USD=10.00
 ```
 
-## 3. OpenClaw Gateway In Docker
-
-OpenClaw handles source discovery and scoring tuning through the shared workspace. `jobhunter` writes
-request files; the OpenClaw/Codex side writes response/status files; `jobhunter` then asks for Telegram
-approval before changing sources or scoring.
-
-OpenClaw's Docker docs describe a setup/onboarding flow for the full Gateway. The important points
-for this project:
-
-| Requirement | Setting |
-|---|---|
-| Use prebuilt image | `ghcr.io/openclaw/openclaw:latest` |
-| Bind locally | `127.0.0.1:18789:18789` |
-| Persist only OpenClaw config/workspace | `./openclaw/config`, `./openclaw/workspace` |
-| Shared jobhunter contract | `./openclaw/workspace` is also mounted at `/jobhunter/workspace` |
-| Do not mount browser cookies | Not needed and unsafe |
-| Do not expose publicly | Use localhost or private network only |
-
-After you approve OpenClaw onboarding:
-
-```bash
-docker compose --profile openclaw up -d openclaw-gateway
-```
-
-Then open:
-
-```text
-http://127.0.0.1:18789/
-```
-
 ## 4. Email Alerts
 
-For LinkedIn job alerts, use email parsing only.
-
-Recommended pattern:
+For LinkedIn or other logged-in job boards, use email alerts only.
 
 | Step | Why |
 |---|---|
-| Create a Gmail/IMAP label or dedicated mailbox named `job-alerts` | Limits what the bot can read |
-| Forward LinkedIn/Wellfound/job-board alerts there | Avoids logged-in scraping |
-| Add IMAP read-only credentials/app password to `.env` | Lets the bot parse alerts |
+| Create an IMAP folder/label named `job-alerts` | Limits what the bot can read |
+| Forward job alerts there | Avoids logged-in scraping |
+| Add IMAP app password to `.env` | Lets the collector parse alerts |
 
-The bot does not send email and does not log into LinkedIn.
+The bot reads only the configured IMAP folder. It does not send email.
 
-## 5. Codex Subscription Boundary
-
-Source discovery and scoring tuning are designed to use Codex through the OpenClaw side of the
-workflow, not the paid OpenAI API key used by `jobhunter`. Do not wire a fake Codex loop or reuse the
-cover-note API key for per-job reasoning. Pick the concrete Codex runtime/auth mechanism before
-enabling the worker that consumes `openclaw/workspace/{discovery,tuning}`.
-
-## 6. Final Human Approval Boundary
+## 5. Final Human Approval Boundary
 
 The bot may:
 
 - collect jobs
 - rank jobs
-- send Telegram digests
+- send Telegram digests through OpenClaw
 - generate cover-note drafts
 - mark user feedback
+- propose source/scoring/profile/parser changes
 
 The bot may not:
 
@@ -93,4 +82,5 @@ The bot may not:
 - send recruiter messages
 - automate logged-in LinkedIn/Wellfound sessions
 - mount browser profiles or cookies
-- access files outside this project volume
+- mount `/var/run/docker.sock`
+- apply config changes without explicit user approval

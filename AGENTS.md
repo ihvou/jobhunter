@@ -1,96 +1,69 @@
 # Agents Guide
 
-Orientation for AI coding agents (Claude Code, Codex, Cursor, etc.) and human contributors. Read this before the README. The README describes user setup; this file is the implementation contract.
+Orientation for AI coding agents and human contributors. Read this before the README. The README is user setup; this file is the implementation contract.
 
-## ⚠️ Active migration — read MIGRATION.md first
+## Active OpenClaw Migration
 
-This project is **mid-migration to the OpenClaw platform** ([github.com/openclaw/openclaw](https://github.com/openclaw/openclaw)). The custom Node.js worker + custom Python Telegram client are being retired in favor of OpenClaw's gateway + skill model. Codex execution plan: [`MIGRATION.md`](MIGRATION.md).
+This project has moved the user-facing bot runtime to real OpenClaw. See [`MIGRATION.md`](MIGRATION.md) for the phased migration record.
 
-While migration is active:
-- Domain logic in `jobhunter/` (scoring, sources, DB, agent actions) **survives** as a microservice.
-- `openclaw/worker/`, `jobhunter/telegram.py`, file-based workspace IPC will be **retired**.
-- Phase-1.5 bridge code lives in `jobhunter/service.py`, `jobhunter/openclaw_mcp.py`, `skills/jobhunter/`, `docker/openclaw-gateway/`, and `bin/openclaw`.
-- New skills live under `skills/<skill-name>/` with `SKILL.md` manifests. Skills are instructions; executable Jobhunter tools are exposed through MCP, not declarative YAML tool files.
-- Future hunters (leads, contractors, etc.) become additional skills under multi-agent routing.
+Current Phase 2 shape:
 
-If you are doing post-migration work, the architecture below describes the **pre-migration** system. Replace mentions of `openclaw-gateway`, `openclaw/workspace/`, `jobhunter/telegram.py` with their OpenClaw equivalents once `MIGRATION.md` is marked Done.
+- `jobhunter-service` is the headless Python domain service.
+- `openclaw-gateway` is the Dockerized real OpenClaw runtime and owns Telegram, Codex sessions, buttons, and channel I/O.
+- Jobhunter tools are exposed through stdio MCP in [`jobhunter/openclaw_mcp.py`](jobhunter/openclaw_mcp.py).
+- Skills live under [`skills/`](skills/); rendering and routing rules that must always work belong in MCP tool descriptions first, with `SKILL.md` as duplicate guidance.
+- The custom Node worker, Python Telegram client, and workspace file IPC are retired. Do not reintroduce `openclaw/worker/`, `jobhunter/telegram.py`, `jobhunter/agent.py`, or `openclaw/workspace/`.
 
 ## What This Project Is
 
-A safe, low-cost job-search assistant that runs as two cooperating Docker containers:
+A safe, low-cost job-search assistant that runs as two Docker containers:
 
-1. **`jobhunter`** — deterministic Python service plus bounded OpenAI API calls for cover notes and L2 relevance. Collects public/API/RSS/email-alert jobs, scores them with `config/scoring.json`, sends Telegram digests, handles approval buttons, and stores local audit data. Stdlib-only.
-2. **`openclaw-gateway`** — Dockerized real OpenClaw gateway. It uses a pinned OpenClaw image plus a tiny Python overlay for the stdio MCP bridge. Codex auth is mounted read-only from `~/.codex`; no Docker socket is mounted.
+1. **`jobhunter-service`**: stdlib Python service. Collects public/API/RSS/ATS/IMAP jobs, dedupes, scores, runs capped L2 relevance and cover-note calls, persists audits, and applies approved bounded actions.
+2. **`openclaw-gateway`**: Dockerized OpenClaw gateway. Uses Codex via the user's subscription and reaches Jobhunter only through MCP. Codex auth is mounted read-only from `~/.codex`; no Docker socket is mounted.
 
-The user interacts through Telegram. There is no web UI in `jobhunter`. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
+The user interacts through Telegram via OpenClaw. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 
-## Mental Model
+## Runtime Model
 
-Everything is on-demand. There is no cron-driven collection.
-
-| Entry Point | Behavior |
+| Entry Point | Expected Tool Path |
 |---|---|
-| `Get more jobs` | Instant ranked digest from indexed jobs; if sources are stale, queue background collection + L1/L2 indexing for next time |
-| `Update sources` | Routes a canned `/agent` request; OpenClaw/Codex proposes `sources_proposal` actions; user approves in Telegram |
-| `Tune scoring` | Routes a canned `/agent` request; OpenClaw/Codex proposes `scoring_rule_proposal` actions; user approves in Telegram |
-| `Usage` | Replies with local spend/quota/recent-activity counters; does not queue Codex |
-| `/agent <text>` | Writes an agent request into `/jobhunter/workspace/agent`; response may include `data_answer` plus bounded proposed actions |
+| `Get more jobs` | `jobhunter_get_more_jobs`; if stale, `jobhunter_collect_all_sources`, then `jobhunter_get_more_jobs` again; render each job with `message` + `presentation.blocks[].buttons` |
+| `Update sources` | OpenClaw/Codex investigates, calls `jobhunter_propose_actions` with `sources_proposal`; user approval calls `jobhunter_apply_action` |
+| `Tune scoring` | Same as sources, using `scoring_rule_proposal` |
+| `Usage` | `jobhunter_usage` |
+| Inline `Applied` / `Irrelevant` / `Snooze` / `Cover` | Synthetic callback text routes to `jobhunter_mark_job` or `jobhunter_cover_note` using the 12-char `id_prefix` |
+| `/history`, `/revert` | `jobhunter_history`, `jobhunter_revert_action` |
 
 Two LLM tiers stay separate:
 
 | Tier | Location | Use |
 |---|---|---|
-| Codex subscription | OpenClaw side | Source discovery, strategy analysis, read-only data answers, and scoring/filter tuning |
-| OpenAI API | `jobhunter` | Cover notes and capped L2 relevance only, behind local budget gates and per-day count caps |
+| Codex subscription | OpenClaw | Source discovery, strategy analysis, read-only data answers, scoring/filter tuning |
+| OpenAI API | `jobhunter-service` | Cover notes and capped L2 relevance only, behind local budget gates |
 
-L1 scoring is deterministic and free. L2 relevance is an optional, cached, budget-gated OpenAI API pass at indexing time for top L1 candidates; Codex is not used to score every job.
-
-## Source Of Truth
-
-| Document | Use |
-|---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Intended product behavior |
-| [`tasks.md`](tasks.md) | Priority list and acceptance criteria |
-| [`README.md`](README.md) | User setup and daily operation |
-| `git log` | Recent implementation history |
+L1 scoring is deterministic and free. L2 relevance is cached, budget-gated, and optional.
 
 ## Repository Layout
 
 ```text
-.
-├── jobhunter/
-│   ├── __main__.py          # CLI entry
-│   ├── agent.py             # /agent request/response workspace contract
-│   ├── agent_actions.py     # Bounded proposed-action registry and handlers
-│   ├── app.py               # Thin-ish orchestration for Telegram/workspace/actions
-│   ├── budget.py            # OpenAI spend gate
-│   ├── config.py            # Settings, source/profile loading, safe path defaults
-│   ├── coordinators.py      # Discovery/tuning file-contract writers and approval helpers
-│   ├── database.py          # SQLite schema, migrations, dedupe, audit tables
-│   ├── llm.py               # OpenAI cover-note + L2 relevance client
-│   ├── logging_setup.py     # JSON logging + secret masking
-│   ├── models.py            # Dataclasses
-│   ├── scoring.py           # Deterministic rule interpreter
-│   ├── sources.py           # Collectors + safe fetch/IMAP UID handling
-│   └── telegram.py          # Telegram client, keyboards, callback parser
-├── config/
-│   ├── jobhunter.json          # Budgets, model, rate limits
-│   ├── profile.example.json # Safe structured profile template
-│   ├── scoring.json         # Active scoring DSL
-│   └── sources.json         # Source registry
-├── input/
-│   ├── profile.example.md   # Safe profile-description template
-│   └── cv.example.md        # Safe CV-context template
-├── openclaw/
-│   └── JOB_SEARCH_AGENT_PROMPT.md
-├── tests/
-├── Dockerfile
-├── docker-compose.yml
-├── ARCHITECTURE.md
-├── tasks.md
-├── README.md
-├── AGENTS.md
-└── CLAUDE.md
+jobhunter/
+  __main__.py          # CLI entry
+  agent_actions.py     # Bounded approval-gated action registry
+  app.py               # Headless domain service core
+  budget.py            # OpenAI spend gate
+  config.py            # Settings, source/profile loading
+  coordinators.py      # Scoring shadow-test helpers
+  database.py          # SQLite schema, migrations, queries
+  llm.py               # OpenAI cover-note + L2 relevance client
+  openclaw_mcp.py      # MCP bridge used by OpenClaw/Codex
+  scoring.py           # Deterministic scoring DSL interpreter
+  service.py           # HTTP service for MCP tools
+  sources.py           # Collectors + IMAP/email parser DSL
+skills/
+  jobhunter/
+  leadhunter/
+docker/openclaw-gateway/
+bin/openclaw
 ```
 
 Private local files are ignored:
@@ -99,125 +72,63 @@ Private local files are ignored:
 .env
 data/
 config/profile.local.json
+config/sources.local.json
+config/scoring.local.json
 input/profile.local.md
 input/cv.local.md
 openclaw/config/
-openclaw/workspace/
+openclaw/codex-home/
 ```
 
 ## Conventions
 
-- **Python >= 3.9. Stdlib only.** Do not add dependencies without an explicit ask.
+- Python >= 3.9. Stdlib only. Do not add dependencies without an explicit ask.
 - Use `rg` for searching.
 - Use `apply_patch` for manual edits.
-- No comments unless the WHY is non-obvious.
-- Telegram messages are plain text; do not introduce Markdown/HTML parsing casually.
+- Keep comments scarce and useful.
 - Word-boundary matching only for job-text rules.
 - Never put secrets in URLs or logs.
-- All cross-container IO is file-based in `/jobhunter/workspace/{agent,discovery,tuning}/`. No HTTP between containers.
-- `/agent` write actions must go through `jobhunter/agent_actions.py`; never add an action kind that executes code or shell commands.
-- The OpenClaw worker tool surface is read-only: `query_sql`, `read_file`, `list_dir`, `http_fetch`, with caps and allowlists.
+- OpenClaw/Codex must use MCP tools for Jobhunter data, not direct DB/file reads.
+- `/agent` write actions must go through [`jobhunter/agent_actions.py`](jobhunter/agent_actions.py); never add an action kind that executes code or shell commands.
+- Config-changing actions must be approval-gated and audited in `agent_actions`.
 
 ## Build / Test / Run
 
 ```bash
-python3 -m unittest discover -s tests
-python3 -m pytest tests/ -q
+PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest discover -s tests
 python3 -m jobhunter init
 python3 -m jobhunter collect
 python3 -m jobhunter digest
 docker compose --profile openclaw config --quiet
 ```
 
-If bytecode writes hit the sandbox:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest discover -s tests
-```
-
 Docker:
 
 ```bash
-docker compose build jobhunter
-docker compose run --rm jobhunter python -m jobhunter init
-docker compose up -d jobhunter
-docker compose --profile openclaw up -d openclaw-gateway
+./bin/openclaw start
+./bin/openclaw onboard
+./bin/openclaw status
+./bin/openclaw logs
 ```
 
-## Implemented Vs. Spec
+`./bin/jobhunter` is a deprecated wrapper for one release and delegates to `./bin/openclaw`.
 
-| Area | Current State |
-|---|---|
-| Shared workspace | Implemented in compose and created by `jobhunter` startup |
-| On-demand collection | Implemented; `serve` polls Telegram/workspace only |
-| Reply keyboard controls | Implemented: `Get more jobs`, `Update sources`, `Tune scoring`, `Usage` |
-| Per-job buttons | Implemented: `Irrelevant`, `Remind me tomorrow`, `Give me cover note`, `Applied` |
-| Cross-source dedupe | Implemented via canonical URL + normalized company/title |
-| No re-spam | Implemented with `digest_log`, except snoozed jobs due for resend |
-| Scoring DSL | Implemented in `config/scoring.json` + `jobhunter/scoring.py` |
-| Word-boundary matching | Implemented with tests for known false positives |
-| Discovery request/approval | Implemented; automated worker writes OpenClaw/Codex response file |
-| Tuning request/shadow/apply | Implemented; automated worker writes OpenClaw/Codex response file |
-| OpenClaw worker runtime | Implemented in `openclaw/worker/` with Codex CLI |
-| Agentic free-form loop | Implemented: `/agent` plus normal free-form text, shared `agent/` workspace, multi-action response schema |
-| Agent action registry | Implemented with bounded handlers and audit/revert rows |
-| L2 relevance pass | Implemented: cached OpenAI/API-or-local-fallback verdicts persisted into `jobs.l2_score`; digest is a pure ranked SELECT |
-| Single profile file | Implemented: `input/profile.local.md` with `# About me` and `# Directives`; legacy JSON folds into it |
-| Worker read-only tools | Implemented for agent loop with SELECT/file/path/http caps |
-| IMAP source filters | Implemented via per-source `query` and UID high-water |
-| Source lifecycle | Implemented: `active`, `test`, `disabled`; `test` promotes on cover note/applied |
-| Budget override | Implemented for cover notes |
-| Structured logging | Implemented as JSON logs with secret masking |
-| Docker hardening | Implemented for jobhunter; OpenClaw has resource caps and dropped net admin/raw caps |
+## MCP / OpenClaw Non-Negotiables
 
-## Source And Scoring Files
-
-Manual source schema:
-
-```json
-{
-  "id": "unique-id",
-  "name": "Display Name",
-  "type": "rss",
-  "url": "https://example.com/jobs.rss",
-  "status": "active",
-  "created_by": "user",
-  "risk_level": "low",
-  "headers": {},
-  "query": null
-}
-```
-
-Scoring rules belong in `config/scoring.json`, not hardcoded Python. The interpreter supports:
-
-- `match_any_word`
-- `match_all_word`
-- `hard_reject_word`
-- `field_equals`
-- `numeric_at_least`
-- `feedback_similarity`
-
-## Non-Negotiables
-
-- No logged-in LinkedIn/Wellfound browser automation. Email alerts only.
-- No auto-apply, recruiter messaging, or outbound email.
-- No browser profiles, host home, SSH keys, or `/var/run/docker.sock` mounts.
-- No silent edits to `config/sources.json` or `config/scoring.json`; agent proposals require Telegram approval.
-- No per-job Codex scoring. OpenAI L2 relevance is capped, cached, budget-gated, and optional.
-- No cron/scheduler unless the user explicitly asks for the opt-in future mode.
-- Do not commit `.env`, `data/`, local profile/CV files, generated drafts, API keys, or workspace request/response files.
-
-## Ask Before Doing
-
-- Adding any Python dependency.
-- Implementing PDF/DOCX CV ingestion, because it conflicts with stdlib-only.
-- Changing Codex worker auth or mounting strategy, because it can leak subscription credentials if done casually.
-- Adding browser automation, even for public pages.
+- Do not remove `openclaw-gateway` from `docker-compose.yml`.
+- `bin/openclaw onboard` must keep all three MCP registration steps:
+  - OpenClaw config patch for `mcp.servers.jobhunter`
+  - Codex home `[mcp_servers.jobhunter]` with `default_tools_approval_mode = "approve"`
+  - `codex mcp add jobhunter -- python3 -m jobhunter.openclaw_mcp`
+- OpenClaw tool policy is top-level `tools.*`, not `agents.defaults.tools.*`.
+- Keep Codex app-server `approvalPolicy = "on-request"` and `sandbox = "read-only"`.
+- Inline buttons render via `presentation.blocks[].buttons`.
+- Verify agent behavior by trajectory/logs, not chat text.
 
 ## Validation Before Declaring Done
 
 ```bash
-python3 -m unittest discover -s tests
+PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest discover -s tests
 docker compose --profile openclaw config --quiet
 git diff --check
 git status -sb

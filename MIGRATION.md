@@ -604,6 +604,14 @@ Keep the old `bin/jobhunter` as a deprecated wrapper for one release that points
 - No unexpected gateway self-restarts triggered by `rateLimits/updated` notifications.
 - At least one successful background staleness self-heal: a "Get more jobs" hit with stale queue → automatic `collect_all_sources` → re-rendered digest with higher scores.
 
+### Phase 2 implementation notes
+
+- `jobhunter-service` is the only Python runtime container. It exposes HTTP endpoints for health, digest, collection, action proposals/apply/revert/history, usage, and bounded job mutations.
+- Telegram polling, message rendering, callback routing, and Codex sessions are owned by `openclaw-gateway`.
+- The old file-based `openclaw/workspace/` IPC and `AgentCoordinator` loop are gone. Agent requests now flow through OpenClaw's Codex runtime into Jobhunter MCP tools.
+- `./bin/jobhunter` is a compatibility wrapper for `./bin/openclaw` for one release.
+- Done at `5844bd0`.
+
 ## Phase 3 — Plug in OpenClaw's tool ecosystem (1 week)
 
 Use OpenClaw's existing plugins to replace our custom collectors and improve quality.
