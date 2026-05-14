@@ -70,6 +70,12 @@
     ],
   },
   plugins: {
+    load: {
+      // Dynamic Jobhunter tools are OpenClaw trajectory-visible. Keep the
+      // top-level mcp.servers and codex mcp add registration too;
+      // Codex-native MCP logs depend on them.
+      paths: ["/opt/jobhunter/plugins/jobhunter-tools"],
+    },
     entries: {
       codex: {
         enabled: true,
@@ -83,11 +89,14 @@
           },
         },
       },
+      "jobhunter-tools": {
+        enabled: true,
+      },
     },
   },
   tools: {
     profile: "messaging",
-    alsoAllow: ["web_search", "web_fetch"],
+    alsoAllow: ["web_search", "web_fetch", "jobhunter-tools"],
     deny: ["group:runtime", "group:fs", "group:automation"],
     fs: {
       workspaceOnly: true,

@@ -37,7 +37,7 @@ Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 You need: a Telegram bot token, your Telegram chat ID, and a Codex CLI subscription (ChatGPT Pro or equivalent). Optionally, an OpenAI API key for cover notes and the L2 relevance pass.
 
-The runtime is real OpenClaw plus the local `jobhunter-service`. Use `./bin/openclaw` for normal operation. `./bin/jobhunter` remains only as a temporary deprecated wrapper.
+The runtime is real OpenClaw plus the local `jobhunter-service`. A small local OpenClaw tool plugin exposes Jobhunter actions in OpenClaw trajectories, while the native Codex MCP registration stays in place for Codex-side tool calls and logs. Use `./bin/openclaw` for normal operation. `./bin/jobhunter` remains only as a temporary deprecated wrapper.
 
 ```bash
 # 1. Configure secrets

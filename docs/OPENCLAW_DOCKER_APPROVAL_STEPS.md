@@ -12,7 +12,9 @@ These steps involve accounts, tokens, or external services and should stay under
 
 ## 2. OpenClaw Gateway In Docker
 
-OpenClaw owns Telegram routing, Codex sessions, inline buttons, and calls into Jobhunter through MCP.
+OpenClaw owns Telegram routing, Codex sessions, inline buttons, and calls into Jobhunter through bounded tools.
+
+The repo also ships `plugins/jobhunter-tools/`, a minimal OpenClaw dynamic tool plugin. It calls the same `jobhunter-service` API as the MCP bridge and is loaded so Jobhunter actions appear as OpenClaw trajectory `tool.call` events during acceptance checks. The native Codex MCP registration remains in place for Codex-side tool access and `mcp_tool_call_*` logs.
 
 | Requirement | Current Setting |
 |---|---|

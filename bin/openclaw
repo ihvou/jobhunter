@@ -69,19 +69,23 @@ gateway_node() {
   run_cmd "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js "$@"
 }
 
+gateway_node_live() {
+  run_cmd "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js "$@"
+}
+
 config_patch() {
   local payload="$1"
   if [ "$DRY_RUN" = "1" ]; then
     printf '+'
-    printf ' %q' "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config patch --stdin
+    printf ' %q' "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js config patch --stdin
     printf ' <<< %q\n' "$payload"
   else
-    printf '%s\n' "$payload" | "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config patch --stdin
+    printf '%s\n' "$payload" | "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js config patch --stdin
   fi
 }
 
 patch_jobhunter_openclaw_config() {
-  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}},"mcp":{"servers":{"jobhunter":{"command":"python3","args":["-m","jobhunter.openclaw_mcp"],"cwd":"/opt/jobhunter","env":{"JOBHUNTER_SERVICE_URL":"http://jobhunter-service:8765"}}}},"skills":{"load":{"extraDirs":["/openclaw/skills"]}},"agents":{"defaults":{"agentRuntime":{"id":"codex"},"model":{"primary":"openai-codex/gpt-5.5"},"models":{"openai-codex/gpt-5.5":{}},"skills":["jobhunter"],"sandbox":{"mode":"off"}}},"plugins":{"entries":{"codex":{"enabled":true,"config":{"codexDynamicToolsProfile":"native-first","codexDynamicToolsExclude":[],"appServer":{"approvalPolicy":"on-request","sandbox":"read-only","serviceTier":"fast"}}}}},"tools":{"profile":"messaging","alsoAllow":["web_search","web_fetch"],"deny":["group:runtime","group:fs","group:automation"],"fs":{"workspaceOnly":true},"exec":{"security":"deny","ask":"always"},"elevated":{"enabled":false}}}'
+  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}},"mcp":{"servers":{"jobhunter":{"command":"python3","args":["-m","jobhunter.openclaw_mcp"],"cwd":"/opt/jobhunter","env":{"JOBHUNTER_SERVICE_URL":"http://jobhunter-service:8765"}}}},"skills":{"load":{"extraDirs":["/openclaw/skills"]}},"agents":{"defaults":{"agentRuntime":{"id":"codex"},"model":{"primary":"openai-codex/gpt-5.5"},"models":{"openai-codex/gpt-5.5":{}},"skills":["jobhunter"],"sandbox":{"mode":"off"}}},"plugins":{"allow":null,"load":{"paths":["/opt/jobhunter/plugins/jobhunter-tools"]},"entries":{"codex":{"enabled":true,"config":{"codexDynamicToolsProfile":"native-first","codexDynamicToolsExclude":[],"appServer":{"approvalPolicy":"on-request","sandbox":"read-only","serviceTier":"fast"}}},"jobhunter-tools":{"enabled":true},"jobhunter-mcp":null}},"tools":{"profile":"messaging","alsoAllow":["web_search","web_fetch","jobhunter-tools"],"deny":["group:runtime","group:fs","group:automation"],"fs":{"workspaceOnly":true},"exec":{"security":"deny","ask":"always"},"elevated":{"enabled":false}}}'
   config_patch "$payload"
 }
 
@@ -192,6 +196,9 @@ print_config() {
     }
   },
   plugins: {
+    load: {
+      paths: ["/opt/jobhunter/plugins/jobhunter-tools"]
+    },
     entries: {
       codex: {
         enabled: true,
@@ -204,12 +211,15 @@ print_config() {
             serviceTier: "fast"
           }
         }
+      },
+      "jobhunter-tools": {
+        enabled: true
       }
     }
   },
   tools: {
     profile: "messaging",
-    alsoAllow: ["web_search", "web_fetch"],
+    alsoAllow: ["web_search", "web_fetch", "jobhunter-tools"],
     deny: ["group:runtime", "group:fs", "group:automation"],
     fs: { workspaceOnly: true },
     exec: { security: "deny", ask: "always" },
@@ -275,7 +285,7 @@ case "${1:-help}" in
     ;;
   onboard)
     gateway_node onboard --mode local --no-install-daemon
-    gateway_node config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
+    gateway_node_live config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
     patch_jobhunter_openclaw_config
     patch_codex_mcp_approval
     register_codex_mcp_jobhunter

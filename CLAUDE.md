@@ -10,7 +10,8 @@ Current Phase 2 shape:
 
 - `jobhunter-service` is the headless Python domain service.
 - `openclaw-gateway` is the Dockerized real OpenClaw runtime and owns Telegram, Codex sessions, buttons, and channel I/O.
-- Jobhunter tools are exposed through stdio MCP in [`jobhunter/openclaw_mcp.py`](jobhunter/openclaw_mcp.py).
+- Jobhunter tools are exposed through stdio MCP in [`jobhunter/openclaw_mcp.py`](jobhunter/openclaw_mcp.py) for Codex-native access and `mcp_tool_call_*` logs.
+- [`plugins/jobhunter-tools/`](plugins/jobhunter-tools/) is an OpenClaw dynamic tool plugin that calls the same headless service over the Compose network so Jobhunter calls are trajectory-visible.
 - Skills live under [`skills/`](skills/); rendering and routing rules that must always work belong in MCP tool descriptions first, with `SKILL.md` as duplicate guidance.
 - The custom Node worker, Python Telegram client, and workspace file IPC are retired. Do not reintroduce `openclaw/worker/`, `jobhunter/telegram.py`, `jobhunter/agent.py`, or `openclaw/workspace/`.
 
@@ -62,6 +63,8 @@ jobhunter/
 skills/
   jobhunter/
   leadhunter/
+plugins/
+  jobhunter-tools/
 docker/openclaw-gateway/
 bin/openclaw
 ```
@@ -121,9 +124,10 @@ Docker:
   - Codex home `[mcp_servers.jobhunter]` with `default_tools_approval_mode = "approve"`
   - `codex mcp add jobhunter -- python3 -m jobhunter.openclaw_mcp`
 - OpenClaw tool policy is top-level `tools.*`, not `agents.defaults.tools.*`.
+- `tools.alsoAllow` must include `jobhunter-tools`; do not use broad `group:plugins` for this bridge.
 - Keep Codex app-server `approvalPolicy = "on-request"` and `sandbox = "read-only"`.
 - Inline buttons render via `presentation.blocks[].buttons`.
-- Verify agent behavior by trajectory/logs, not chat text.
+- Verify agent behavior by trajectory/logs, not chat text. OpenClaw dynamic tools must appear as `tool.call` trajectory events; Codex-native MCP calls must appear as `mcp_tool_call_begin` / `mcp_tool_call_end` rows.
 
 ## Validation Before Declaring Done
 

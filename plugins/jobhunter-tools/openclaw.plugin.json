@@ -1,0 +1,27 @@
+{
+  "id": "jobhunter-tools",
+  "name": "Jobhunter Tools",
+  "description": "OpenClaw dynamic tool bridge for the local Jobhunter service.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "jobhunter_get_more_jobs",
+      "jobhunter_collect_all_sources",
+      "jobhunter_usage",
+      "jobhunter_history",
+      "jobhunter_propose_actions",
+      "jobhunter_apply_action",
+      "jobhunter_revert_action",
+      "jobhunter_mark_job",
+      "jobhunter_cover_note",
+      "jobhunter_query_sql"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

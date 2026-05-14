@@ -80,5 +80,14 @@ Then configure OpenClaw with:
 - Removed ignored local legacy state directories: `openclaw/workspace/` and `openclaw/codex-home/`. The Dockerized gateway uses the named `openclaw_home` volume and the read-only host `~/.codex` mount instead.
 - Kept `openclaw-gateway` in `docker-compose.yml`. It is the real OpenClaw runtime from Phase 1.5, not the retired custom worker.
 - Kept the three-part MCP registration in `./bin/openclaw onboard`: OpenClaw config patch, Codex `config.toml` server entry with `default_tools_approval_mode = "approve"`, and `codex mcp add jobhunter -- python3 -m jobhunter.openclaw_mcp`.
+- Added `plugins/jobhunter-tools/` as an OpenClaw dynamic tool plugin. This is separate from top-level `mcp.servers`: top-level config plus `codex mcp add` makes Codex-native MCP work and emits `mcp_tool_call_*` logs, while the OpenClaw plugin makes Jobhunter actions appear as trajectory-visible `tool.call` events.
+- Investigated a Codex bundle MCP plugin first and rejected it for Phase 2 acceptance: OpenClaw loads bundle MCP config for other runtime paths, but Codex app-server dynamic tools did not include bundle MCP tools in `session.started`, so no Jobhunter `tool.call` events appeared in trajectories.
+- `tools.alsoAllow` now includes the narrow plugin id `jobhunter-tools`. Without that allowlist entry, the plugin loaded correctly but Codex sessions still started with only the default messaging/web/session tools.
+- Verification sessions:
+  - `phase2-openclaw-tool-diagnostic-3`: `session.started.toolCount=17`; trajectory includes `tool.call name=jobhunter_get_more_jobs` and successful `tool.result`.
+  - Telegram session `8abb337f-8676-4f98-a6cf-f79565aedafc`, run `7e885563-aa10-4c50-ab81-a2fef158f08e`: current run starts with 17 tools, calls `jobhunter_get_more_jobs`, `jobhunter_collect_all_sources`, `jobhunter_get_more_jobs`, then five `message` calls with `presentation.blocks[].buttons`; no `bash` tool calls in that run.
+  - `phase2-collect-soft-timeout`: `jobhunter_collect_all_sources` returns successful `status=running` instead of an OpenClaw `tool.timeout` while the background collection continues.
+  - `phase2-usage-check-2` and `phase2-history-check`: trajectory-visible `jobhunter_usage` / `jobhunter_history` calls succeed.
+- Codex 0.128.0 logs do not contain literal `mcp_tool_call_begin` / `mcp_tool_call_end` strings. Native Codex MCP evidence appears as `mcp__jobhunter__...` tool names with `mcp_tool=true` in `logs_2.sqlite`, plus `rmcp::service ... CallToolRequest ... name: "jobhunter_get_more_jobs"` rows. OpenClaw dynamic tool calls show `mcp_tool=false`, as expected, because they are OpenClaw plugin tools rather than native Codex MCP calls.
 - `jobhunter-service` no longer publishes a host port. The OpenClaw gateway reaches it on the Compose network as `http://jobhunter-service:8765`.
 - `./bin/jobhunter` remains for one release as a deprecated wrapper that delegates to `./bin/openclaw`.

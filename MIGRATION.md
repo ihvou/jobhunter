@@ -609,6 +609,10 @@ Keep the old `bin/jobhunter` as a deprecated wrapper for one release that points
 - `jobhunter-service` is the only Python runtime container. It exposes HTTP endpoints for health, digest, collection, action proposals/apply/revert/history, usage, and bounded job mutations.
 - Telegram polling, message rendering, callback routing, and Codex sessions are owned by `openclaw-gateway`.
 - The old file-based `openclaw/workspace/` IPC and `AgentCoordinator` loop are gone. Agent requests now flow through OpenClaw's Codex runtime into Jobhunter MCP tools.
+- `plugins/jobhunter-tools/` is loaded by `./bin/openclaw onboard` so Jobhunter actions are exposed as OpenClaw dynamic tools for trajectory-visible `tool.call` evidence.
+- Codex-native MCP remains registered through top-level `mcp.servers`, per-agent `config.toml`, and `codex mcp add`; it provides Codex-side tool access and `mcp_tool_call_*` evidence, but it is not sufficient by itself for OpenClaw trajectory-visible tool calls.
+- `tools.alsoAllow` includes `jobhunter-tools` specifically. Do not replace this with `group:plugins`; the point is to expose only the Jobhunter bridge plus messaging/web while runtime/fs/automation stay denied.
+- Phase 2 verification uses OpenClaw dynamic tool trajectories as the primary runtime signal. In Codex 0.128.0, native MCP calls appear in `logs_2.sqlite` as `mcp__jobhunter__...` with `mcp_tool=true` and `rmcp::service ... CallToolRequest ...`; the logs did not contain literal `mcp_tool_call_begin` / `mcp_tool_call_end` strings.
 - `./bin/jobhunter` is a compatibility wrapper for `./bin/openclaw` for one release.
 - Done at `5844bd0`.
 
