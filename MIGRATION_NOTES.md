@@ -48,3 +48,27 @@ Then configure OpenClaw with:
 - Prefix resolution: `jobhunter-service` exposes `POST /jobs/resolve_prefix`, and MCP tools accept either `job_id` or `id_prefix`. Ambiguous or missing 12-character prefixes are rejected before any mutation.
 - Audit behavior: inline job mutations write `agent_actions.kind='mark_job'` rows with the resolved full job id in `payload_json`, an applied status, and an applied timestamp.
 - Original digest behavior: Phase 1.5b does not mutate the original digest card after a tap. Buttons remain visible; OpenClaw acknowledges the callback spinner and the agent should send only a short one-line confirmation or the cover draft.
+
+## Phase 1.5c: Codex native MCP exposure fix
+
+- Root cause: the Jobhunter MCP server was healthy, but Codex app-server did not use it because Codex's per-agent `config.toml` lacked MCP tool approval settings. In headless OpenClaw turns, Codex treated the MCP call as approval-gated and cancelled or stalled instead of invoking it.
+- Rejected workaround: switching the whole agent to OpenClaw `codex-cli` mode made MCP discovery visible, but it is not the intended primary path for this setup. Upstream docs describe `codex-cli` as a CLI backend path; the fuller OpenClaw/Codex integration is the `codex` app-server harness.
+- Final runtime choice: keep `agents.defaults.agentRuntime.id = "codex"` with `model.primary = "openai-codex/gpt-5.5"`.
+- OpenClaw tool policy: `tools` must be top-level, not under `agents.defaults`, for OpenClaw 2026.5.7. Use `tools.profile = "messaging"` plus `tools.alsoAllow = ["web_search", "web_fetch"]`; avoid an explicit `tools.allow` list that names `bundle-mcp`, because this build logs it as an unknown allowlist entry.
+- Native Codex shell policy: keep `plugins.entries.codex.config.appServer.approvalPolicy = "on-request"`. OpenClaw's `tools.exec.security = "deny"` does not remove Codex's native shell tool from the app-server harness; `on-request` prevents surprise shell execution while the approved Jobhunter MCP server remains callable headlessly.
+- MCP tool descriptions: do not encode unconditional side effects into read tools. `jobhunter_get_more_jobs` must allow `mark_sent=false` diagnostics/analysis without requiring Telegram sends; otherwise Codex's safety monitor can cancel the call before the real service is reached.
+- Codex MCP approval: `./bin/openclaw onboard` writes the following bounded approval into `/home/node/.openclaw/agents/main/agent/codex-home/config.toml`:
+
+  ```toml
+  [mcp_servers.jobhunter]
+  default_tools_approval_mode = "approve"
+  command = "python3"
+  args = ["-m", "jobhunter.openclaw_mcp"]
+  cwd = "/opt/jobhunter"
+
+  [mcp_servers.jobhunter.env]
+  JOBHUNTER_SERVICE_URL = "http://jobhunter-service:8765"
+  ```
+
+- Security note: approving this MCP server is narrower than relaxing shell execution. Jobhunter MCP tools are bounded Python service endpoints; shell/runtime/fs OpenClaw tools remain denied, native Codex shell is approval-gated, Codex app-server sandbox is forced to `read-only`, and the gateway still has no Docker socket.
+- Verification: a fresh native Codex app-server session `phase15c-native-tools-check-approve` searched for `jobhunter_get_more_jobs`, called `mcp__jobhunter__.jobhunter_get_more_jobs`, and received 3 real job rows. After the shell/tool-description cleanup, session `phase15c-soft-contract-check` used only `jobhunter.jobhunter_get_more_jobs` in `toolSummary` and returned one real row with `mark_sent=false`.

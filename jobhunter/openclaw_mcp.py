@@ -12,7 +12,29 @@ SERVICE_URL = os.getenv("JOBHUNTER_SERVICE_URL", "http://127.0.0.1:8765").rstrip
 TOOLS = [
     {
         "name": "jobhunter_get_more_jobs",
-        "description": "Return ranked job matches from Jobhunter. Set mark_sent=true only after sending the jobs to the user.",
+        "description": (
+            "Return ranked job matches from Jobhunter. "
+            "STALENESS RULE (applies to Telegram digest requests like \"Get more jobs\", "
+            "\"fresh\", \"new\", \"today\", \"latest\"): the response includes "
+            "`queue_freshness_hours`, `queue_last_collected`, and `queue_is_stale`. "
+            "If `queue_is_stale` is true OR `queue_freshness_hours` >= 6, you MUST first call "
+            "`jobhunter_collect_all_sources` to pull fresh IMAP/RSS/ATS data, then call this "
+            "tool AGAIN. Do not show a stale digest without refreshing. The collect roundtrip "
+            "takes ~45-60s; that is expected. Tell the user briefly: \"Collecting fresh jobs, "
+            "back in ~1 min.\" "
+            "For read-only diagnostics, analysis, or source/scoring work, call with "
+            "mark_sent=false and use the returned rows without sending channel messages. "
+            "RENDERING (Telegram digest requests only): render EACH returned job with one "
+            "`message` tool call (action=send, target=<chat_id from conversation metadata, e.g. "
+            "\"telegram:855127987\">) containing the job text and these inline buttons: "
+            "[[{text:\"Applied\",callback_data:\"applied:<id_prefix>\",style:\"success\"},"
+            "{text:\"Irrelevant\",callback_data:\"irrelevant:<id_prefix>\",style:\"danger\"}],"
+            "[{text:\"Snooze\",callback_data:\"snooze:<id_prefix>\"},"
+            "{text:\"Cover\",callback_data:\"cover:<id_prefix>\",style:\"primary\"}]] "
+            "where <id_prefix> is the first 12 characters of the job's id (returned as "
+            "id_prefix in each row). Do not replace the per-job messages with a single summary; "
+            "use mark_sent=true only for rows the user is actually being shown."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -185,7 +207,27 @@ def handle_rpc(request: Dict):
 
 def call_tool(name: str, args: Dict) -> Dict:
     if name == "jobhunter_get_more_jobs":
-        return post("/digest", {"limit": args.get("limit"), "mark_sent": bool(args.get("mark_sent", False))})
+        digest = post("/digest", {"limit": args.get("limit"), "mark_sent": bool(args.get("mark_sent", False))})
+        try:
+            staleness = post(
+                "/query-sql",
+                {
+                    "sql": "SELECT MAX(first_seen_at) AS last_seen, "
+                           "CAST((julianday('now') - julianday(MAX(first_seen_at))) * 24 AS INTEGER) AS hours_since_last "
+                           "FROM jobs",
+                    "params": [],
+                },
+            )
+            rows = staleness.get("rows") or [{}]
+            row = rows[0] if rows else {}
+            hours = row.get("hours_since_last")
+            if isinstance(hours, (int, float)):
+                digest["queue_freshness_hours"] = int(hours)
+                digest["queue_last_collected"] = row.get("last_seen")
+                digest["queue_is_stale"] = int(hours) >= 6
+        except Exception:
+            pass
+        return digest
     if name == "jobhunter_collect_all_sources":
         return post("/collect", {})
     if name == "jobhunter_usage":

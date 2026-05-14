@@ -8,6 +8,8 @@
 // mounting /var/run/docker.sock into the gateway is explicitly forbidden.
 // Safety is enforced by narrow mounts, no shell exec, deny-lists, and bounded
 // Jobhunter MCP tools.
+// Run './bin/openclaw onboard' to apply this plus Codex's per-agent
+// [mcp_servers.jobhunter].default_tools_approval_mode = "approve".
 {
   channels: {
     telegram: {
@@ -42,25 +44,18 @@
   },
   agents: {
     defaults: {
-      model: "openai/gpt-5.5",
+      agentRuntime: {
+        id: "codex",
+      },
+      model: {
+        primary: "openai-codex/gpt-5.5",
+      },
+      models: {
+        "openai-codex/gpt-5.5": {},
+      },
       skills: ["jobhunter"],
       sandbox: {
         mode: "off",
-      },
-      tools: {
-        profile: "messaging",
-        deny: ["group:runtime", "group:fs", "group:automation"],
-        allow: ["group:messaging", "bundle-mcp", "web_search", "web_fetch"],
-        fs: {
-          workspaceOnly: true,
-        },
-        exec: {
-          security: "deny",
-          ask: "always",
-        },
-        elevated: {
-          enabled: false,
-        },
       },
     },
     list: [
@@ -73,5 +68,36 @@
         skills: ["leadhunter"],
       },
     ],
+  },
+  plugins: {
+    entries: {
+      codex: {
+        enabled: true,
+        config: {
+          codexDynamicToolsProfile: "native-first",
+          codexDynamicToolsExclude: [],
+          appServer: {
+            approvalPolicy: "on-request",
+            sandbox: "read-only",
+            serviceTier: "fast",
+          },
+        },
+      },
+    },
+  },
+  tools: {
+    profile: "messaging",
+    alsoAllow: ["web_search", "web_fetch"],
+    deny: ["group:runtime", "group:fs", "group:automation"],
+    fs: {
+      workspaceOnly: true,
+    },
+    exec: {
+      security: "deny",
+      ask: "always",
+    },
+    elevated: {
+      enabled: false,
+    },
   },
 }

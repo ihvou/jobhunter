@@ -30,6 +30,12 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn('mode: "off"', result.stdout)
         self.assertIn('inlineButtons: "dm"', result.stdout)
         self.assertIn("sendMessage: true", result.stdout)
+        self.assertIn('agentRuntime', result.stdout)
+        self.assertIn('id: "codex"', result.stdout)
+        self.assertIn('primary: "openai-codex/gpt-5.5"', result.stdout)
+        self.assertIn('alsoAllow: ["web_search", "web_fetch"]', result.stdout)
+        self.assertIn('approvalPolicy: "on-request"', result.stdout)
+        self.assertIn('sandbox: "read-only"', result.stdout)
 
     def test_onboard_dry_run_uses_docker_gateway(self):
         result = self.run_launcher("onboard", env={"OPENCLAW_DRY_RUN": "1"})
@@ -37,8 +43,10 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("openclaw-gateway dist/index.js onboard --mode local --no-install-daemon", result.stdout)
         self.assertIn("openclaw-gateway dist/index.js config set --batch-json", result.stdout)
         self.assertIn("openclaw-gateway dist/index.js config patch --stdin", result.stdout)
+        self.assertIn("openclaw-gateway -c", result.stdout)
         self.assertIn("inlineButtons", result.stdout)
         self.assertIn("sendMessage", result.stdout)
+        self.assertIn("default_tools_approval_mode", result.stdout)
 
 
 if __name__ == "__main__":

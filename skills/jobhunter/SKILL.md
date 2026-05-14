@@ -62,6 +62,20 @@ Install notes live in `{baseDir}/README.md`.
 
 ## Digest rendering with inline buttons
 
+### Staleness self-heal (mandatory)
+
+Before rendering any digest, inspect the response of `jobhunter_get_more_jobs`:
+
+- `queue_freshness_hours` — hours since the most recent job was indexed
+- `queue_is_stale` — true when freshness ≥ 6 hours
+
+If stale, do this without asking:
+
+1. Briefly tell the user: "Collecting fresh jobs, back in ~1 min."
+2. Call `jobhunter_collect_all_sources` (pulls new Gmail alerts + RSS + ATS).
+3. Call `jobhunter_get_more_jobs` again — now fresh.
+4. Then render with inline buttons per below.
+
 When the user asks for fresh jobs, for example "Get more jobs", after calling `jobhunter_get_more_jobs` you MUST emit the response via the OpenClaw `message` tool with per-job inline buttons. Do NOT just return a text reply.
 
 For each job in the returned shortlist, emit one `message` action with:

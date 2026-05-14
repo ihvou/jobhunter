@@ -291,6 +291,67 @@ After Phase 1.5 lands, update this section's status to "Done at <commit>".
 
 **Stop and review with user before Phase 2.** After user confirms parity on the Dockerized setup, proceed to Phase 2 destructive deletions.
 
+## Phase 1.5c — Wire Codex app-server to Jobhunter MCP
+
+**Status**: implemented on branch `openclaw-phase-1-5`; commit footer to be filled after commit.
+
+The intended runtime remains OpenClaw's native Codex app-server harness:
+
+```json5
+agents: {
+  defaults: {
+    agentRuntime: { id: "codex" },
+    model: { primary: "openai-codex/gpt-5.5" }
+  }
+}
+```
+
+Do **not** switch the main agent to `codex-cli` just to make MCP visible. `codex-cli` can expose MCP through Codex config overrides, but it is the CLI backend path, not the primary OpenClaw/Codex harness we want for Telegram, skills, native message tools, and long-lived channel sessions.
+
+The missing piece was Codex's own MCP approval layer. OpenClaw can register the MCP server, and Codex can discover it, but a headless app-server turn will cancel/stall an MCP tool call unless the server/tool is configured as approved in Codex's per-agent config. `./bin/openclaw onboard` must write this into the OpenClaw volume:
+
+```toml
+[mcp_servers.jobhunter]
+default_tools_approval_mode = "approve"
+command = "python3"
+args = ["-m", "jobhunter.openclaw_mcp"]
+cwd = "/opt/jobhunter"
+
+[mcp_servers.jobhunter.env]
+JOBHUNTER_SERVICE_URL = "http://jobhunter-service:8765"
+```
+
+This is intentionally narrower than relaxing shell execution. Jobhunter MCP tools are bounded service endpoints; OpenClaw `group:runtime` and `group:fs` stay denied, native Codex shell is approval-gated with `appServer.approvalPolicy = "on-request"`, Codex app-server sandbox is `read-only`, and `/var/run/docker.sock` remains unmounted.
+
+OpenClaw tool policy also belongs at top level:
+
+```json5
+tools: {
+  profile: "messaging",
+  alsoAllow: ["web_search", "web_fetch"],
+  deny: ["group:runtime", "group:fs", "group:automation"],
+  fs: { workspaceOnly: true },
+  exec: { security: "deny", ask: "always" },
+  elevated: { enabled: false }
+}
+```
+
+Avoid `agents.defaults.tools` for this OpenClaw build; config validation rejects it. Avoid explicit `tools.allow: ["bundle-mcp", ...]`; `messaging` already carries the profile defaults, and this build logs explicit `bundle-mcp` as an unknown allowlist entry.
+
+Also avoid `appServer.approvalPolicy = "never"` in this Dockerized setup. OpenClaw's `tools.exec.security = "deny"` blocks OpenClaw runtime exec tools, but it does not remove Codex's native shell tool from the Codex app-server harness. `on-request` keeps shell gated without blocking approved Jobhunter MCP tools.
+
+MCP tool descriptions should not turn read calls into unconditional side effects. `jobhunter_get_more_jobs` supports diagnostics and agent analysis with `mark_sent=false`; the Telegram inline-button rendering contract applies only when the user is actually asking to receive a digest.
+
+**Critical missing piece discovered during live verification.** Writing `[mcp_servers.jobhunter]` to Codex's `config.toml` is necessary but NOT sufficient with Codex CLI 0.128.0. Empirically, after a fresh gateway restart with only the config.toml block present, `codex mcp list` reports "No MCP servers configured yet" and the agent's toolset never includes the jobhunter tools. **The `codex mcp add` command must run separately** so Codex's own runtime registry marks the server enabled. `bin/openclaw onboard` now runs `register_codex_mcp_jobhunter` after `patch_codex_mcp_approval` to handle this.
+
+Acceptance evidence (real, trajectory-verified):
+
+- Live Telegram session `2bff21f4-1b57-4d26-b436-be85c2019661` (2026-05-14): user pressed "Get more jobs", agent emitted 5 `message` tool calls each with `presentation.blocks[].type=buttons` and 4 inline buttons; user confirmed buttons rendered on Telegram screen.
+- Follow-up turn in the same session triggered the staleness self-heal: agent called `jobhunter_collect_all_sources` (pulling new Gmail alerts), then `jobhunter_get_more_jobs` again, and surfaced high-relevance product/AI roles (Product Lead Core Platform & AI, AI Product Owner — VC-backed GovTech, AI Product Engineer, Head of Product Toronto) as a fresh batch with inline buttons.
+- Real MCP execution confirmed by absence of fabricated job rows: every job in the digest matched DB rows queryable via `/query-sql`, with company/title/url/score consistent with `jobs` table state at that timestamp.
+
+The earlier internal "phase15c" diagnostic-only sessions did NOT exercise MCP — Codex CLI was returning fabricated row counts because `codex mcp add` had not yet been run. Verification done purely by chat output is unreliable; trajectories and the Codex `logs_2.sqlite` `mcp_tool_call_*` events are the only trustworthy signals.
+
 ## Rollback safety net (before any Phase 2 work)
 
 Phase 2 is destructive: it deletes `openclaw/worker/`, `jobhunter/telegram.py`, and `openclaw/workspace/` file-based IPC. Once those are gone, the *fast* rollback path is the previously-validated "both worlds coexist" commit, not git archaeology.
@@ -454,12 +515,30 @@ Add a small helper in `jobhunter/service.py` POST `/jobs/resolve_prefix` that ma
 
 ## Phase 2 — Retire custom Telegram + worker code (2-3 days)
 
-After Phase 1 parity is proven:
+After Phase 1 / 1.5 / 1.5b / 1.5c parity is proven.
+
+### Updates folded in from 1.5b/1.5c findings (read before executing)
+
+The original Phase 2 spec was written before we discovered the Codex CLI / OpenClaw integration quirks. The instructions below override or supplement the per-step text:
+
+1. **Do NOT remove `openclaw-gateway` from `docker-compose.yml` in 2a.** That instruction referred to the *legacy* worker container that no longer exists. The current `openclaw-gateway` IS the real OpenClaw runtime container from Phase 1.5 and must stay.
+2. **MCP registration requires three artifacts**, not just config files. `bin/openclaw onboard` must call all three or the bot is silently broken:
+   - `openclaw config patch` writing `mcp.servers.jobhunter` into `openclaw.json`
+   - Python helper writing `[mcp_servers.jobhunter]` with `default_tools_approval_mode = "approve"` into `codex-home/config.toml`
+   - `codex mcp add jobhunter -- python3 -m jobhunter.openclaw_mcp` (the Codex CLI registry update — config.toml alone is not picked up by Codex CLI 0.128.0)
+3. **OpenClaw tool policy lives at top-level `tools.*`, not under `agents.defaults.tools.*`.** The latter is rejected by schema validation in this build. Use `tools.profile = "messaging"` plus `tools.alsoAllow = ["web_search", "web_fetch"]`; do not put `bundle-mcp` in any allowlist (it's logged as unknown).
+4. **Codex's native bash tool is NOT gated by `tools.exec.security = "deny"`.** That setting blocks OpenClaw's runtime exec tools only. Codex app-server requires `appServer.approvalPolicy = "on-request"` plus `sandbox = "read-only"` to make its own shell approval-gated. Both must be in `plugins.entries.codex.config.appServer`.
+5. **SKILL.md is loaded lazily and the agent often skips it.** Authoritative rendering rules, callback dispatch, and staleness behavior must live in MCP tool descriptions (where the agent reads them inline with each call), not in SKILL.md. SKILL.md is duplicate documentation, not the source of truth.
+6. **Inline buttons render via `presentation.blocks[].buttons`**, not a direct `buttons` arg on the `message` tool. The agent emits `{action: "send", target, message, presentation: {blocks: [{type: "buttons", buttons: [...]}]}}` and OpenClaw's Telegram channel converts that to `reply_markup.inline_keyboard`.
+7. **No native reply-keyboard support.** OpenClaw renders inline-keyboards (per-message buttons) but does not maintain a persistent bottom-pane reply-keyboard like the pre-migration `jobhunter/telegram.py`. The four "Get more jobs / Update sources / Tune scoring / Usage" reply-keyboard surface labels become free-text triggers — the agent routes them by intent. Optionally register `channels.telegram.customCommands` for `/jobs`, `/sources`, `/scoring`, `/usage` slash commands.
+8. **Telegram polling in Docker requires `network.autoSelectFamily: false` + `dnsResultOrder: "ipv4first"`.** Without these, getUpdates long-poll stalls for 5-9 minutes at a time under Docker bridge networking. Already in current openclaw.json; must be in `bin/openclaw onboard`.
+9. **Verification must be trajectory-based, never chat-output-based.** Codex/gpt-5.5 will fabricate plausible answers when MCP tools aren't actually connected. Real acceptance evidence is `tool.call name=jobhunter_*` events in `~/.openclaw/agents/main/sessions/*.trajectory.jsonl` plus `mcp_tool_call_begin`/`mcp_tool_call_end` rows in `~/.openclaw/agents/main/agent/codex-home/logs_2.sqlite`.
+10. **Docker healthcheck for openclaw-gateway must be permissive** (60s interval, 15s timeout, 5 retries). The default would kill the gateway on Codex rate-limit event-loop hangs. Already in `docker-compose.yml`.
 
 ### 2a. Delete `openclaw/worker/`
 
 - Remove the entire `openclaw/worker/` directory.
-- Remove the `openclaw-gateway` service from `docker-compose.yml`.
+- **Skip** the original "remove the openclaw-gateway service" instruction — that text referred to a legacy container that no longer exists.
 - Remove worker-related env vars from `.env.example`.
 - Update `Dockerfile` for jobhunter-service container.
 
@@ -498,11 +577,32 @@ Keep the old `bin/jobhunter` as a deprecated wrapper for one release that points
 
 ### 2f. Phase 2 acceptance
 
-- `docker ps` shows ONE container for jobhunter-service (no more openclaw-gateway, no more jobhunter Telegram container).
-- OpenClaw gateway runs natively on host (or in its own container if user prefers).
-- All 4 reply-keyboard buttons work via the skill.
-- All per-job buttons (Applied/Irrelevant/Snooze/Cover note) work.
-- `/agent`, `/history`, `/revert`, `/usage` all work.
+**Trajectory-verified, not chat-verified.** For every acceptance check below, the corresponding `tool.call` event must appear in `/home/node/.openclaw/agents/main/sessions/*.trajectory.jsonl` AND (where applicable) `mcp_tool_call_begin` / `mcp_tool_call_end` must appear in `~/.openclaw/agents/main/agent/codex-home/logs_2.sqlite`. Chat output alone is not acceptance evidence.
+
+**Container state:**
+- `docker ps` shows exactly two containers: `jobhunter-service` and `openclaw-gateway` (both healthy). The legacy custom Node worker container is gone.
+- No `openclaw/workspace/` mount remains; no `jobhunter/telegram.py` polling-task running.
+
+**Functional checks (each via a real Telegram round-trip with trajectory inspection):**
+- "Get more jobs" — agent calls `jobhunter_get_more_jobs`; if `queue_is_stale` is true, also calls `jobhunter_collect_all_sources` first; renders each job via per-job `message` action with `presentation.blocks` buttons.
+- "Update sources" — agent calls `jobhunter_propose_actions` with kind `sources_proposal`; bot returns proposal ids; on user approval, agent calls `jobhunter_apply_action`; `sources.local.json` is updated and an `agent_actions` audit row appears.
+- "Tune scoring" — same flow as sources, with kind `scoring_rule_proposal` and `scoring.local.json` as the target.
+- "Usage" — agent calls `jobhunter_usage`; bot returns formatted spend/quota/counters.
+- Inline button taps: tapping `Applied`/`Irrelevant`/`Snooze`/`Cover` on a digest job emits `callback_data` like `applied:<id_prefix>`; agent receives that as a synthetic user text turn (per OpenClaw `bot.on("callback_query")` dispatch) and calls `jobhunter_mark_job` / `jobhunter_cover_note` accordingly; DB rows update.
+- `/agent <free text>` — generic free-form path still works; agent routes to MCP tools or composes a direct reply as appropriate.
+- `/history`, `/revert` — slash-command equivalents reach `jobhunter_history` / `jobhunter_revert_action`.
+
+**Negative checks:**
+- Codex internal log shows no `bash` calls during a clean digest turn (only MCP + message tool calls).
+- No `jobhunter/telegram.py` import errors in any test run.
+- `docker compose --profile openclaw config --quiet` passes.
+- `python3 -m unittest discover -s tests` passes.
+
+**Operational checks (24h soak after merge):**
+- Zero `Polling stall detected` events in the gateway log.
+- Container memory steady (no climb past 1GiB / 2GiB limit).
+- No unexpected gateway self-restarts triggered by `rateLimits/updated` notifications.
+- At least one successful background staleness self-heal: a "Get more jobs" hit with stale queue → automatic `collect_all_sources` → re-rendered digest with higher scores.
 
 ## Phase 3 — Plug in OpenClaw's tool ecosystem (1 week)
 

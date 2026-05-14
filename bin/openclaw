@@ -74,8 +74,8 @@ gateway_node() {
   run_cmd "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js "$@"
 }
 
-patch_inline_buttons() {
-  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}}}'
+config_patch() {
+  local payload="$1"
   if [ "$DRY_RUN" = "1" ]; then
     printf '+'
     printf ' %q' "${COMPOSE[@]}" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config patch --stdin
@@ -85,11 +85,73 @@ patch_inline_buttons() {
   fi
 }
 
+patch_jobhunter_openclaw_config() {
+  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}},"mcp":{"servers":{"jobhunter":{"command":"python3","args":["-m","jobhunter.openclaw_mcp"],"cwd":"/opt/jobhunter","env":{"JOBHUNTER_SERVICE_URL":"http://jobhunter-service:8765"}}}},"skills":{"load":{"extraDirs":["/openclaw/skills"]}},"agents":{"defaults":{"agentRuntime":{"id":"codex"},"model":{"primary":"openai-codex/gpt-5.5"},"models":{"openai-codex/gpt-5.5":{}},"skills":["jobhunter"],"sandbox":{"mode":"off"}}},"plugins":{"entries":{"codex":{"enabled":true,"config":{"codexDynamicToolsProfile":"native-first","codexDynamicToolsExclude":[],"appServer":{"approvalPolicy":"on-request","sandbox":"read-only","serviceTier":"fast"}}}}},"tools":{"profile":"messaging","alsoAllow":["web_search","web_fetch"],"deny":["group:runtime","group:fs","group:automation"],"fs":{"workspaceOnly":true},"exec":{"security":"deny","ask":"always"},"elevated":{"enabled":false}}}'
+  config_patch "$payload"
+}
+
+patch_codex_mcp_approval() {
+  local script='from pathlib import Path
+import re
+
+path = Path("/home/node/.openclaw/agents/main/agent/codex-home/config.toml")
+text = path.read_text() if path.exists() else ""
+
+def strip_table(source, table):
+    return re.sub(r"(?ms)^\[" + re.escape(table) + r"\]\n.*?(?=^\[|\Z)", "", source).strip()
+
+trusted_workspace = "[projects.\"/home/node/.openclaw/workspace\"]"
+prefix = ""
+if trusted_workspace not in text:
+    prefix = trusted_workspace + "\ntrust_level = \"trusted\"\n\n"
+
+text = strip_table(text, "mcp_servers.jobhunter.env")
+text = strip_table(text, "mcp_servers.jobhunter")
+block = """[mcp_servers.jobhunter]
+default_tools_approval_mode = "approve"
+command = "python3"
+args = ["-m", "jobhunter.openclaw_mcp"]
+cwd = "/opt/jobhunter"
+
+[mcp_servers.jobhunter.env]
+JOBHUNTER_SERVICE_URL = "http://jobhunter-service:8765"
+"""
+next_text = (prefix + text.strip() + "\n\n" + block).strip() + "\n"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(next_text)
+print(path)
+'
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+'
+    printf ' %q' "${COMPOSE[@]}" run --rm --no-deps --entrypoint python3 openclaw-gateway -c "$script"
+    printf '\n'
+  else
+    "${COMPOSE[@]}" run --rm --no-deps --entrypoint python3 openclaw-gateway -c "$script"
+  fi
+}
+
+register_codex_mcp_jobhunter() {
+  # Empirically required for Codex CLI 0.128.0: writing [mcp_servers.jobhunter]
+  # to ~/.codex/config.toml is necessary but NOT sufficient for Codex
+  # app-server to register the MCP tools at startup. `codex mcp add` must run
+  # separately so Codex's own runtime registry sees the server as enabled.
+  local cmd=(env HOME=/home/node/.openclaw/agents/main/agent/codex-home /home/node/.openclaw/npm/node_modules/@openai/codex/bin/codex.js mcp add jobhunter --env JOBHUNTER_SERVICE_URL=http://jobhunter-service:8765 -- python3 -m jobhunter.openclaw_mcp)
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+'
+    printf ' %q' "${COMPOSE[@]}" exec -T openclaw-gateway "${cmd[@]}"
+    printf '\n'
+  else
+    "${COMPOSE[@]}" exec -T openclaw-gateway "${cmd[@]}" || true
+  fi
+}
+
 print_config() {
   cat <<EOF
 {
   // Dockerized Phase 1.5 config. Gateway runs in container, so paths are
   // container-relative and the Jobhunter service is reached over Compose DNS.
+  // Run './bin/openclaw onboard' to apply this and to set Codex's per-agent
+  // [mcp_servers.jobhunter].default_tools_approval_mode = "approve".
   channels: {
     telegram: {
       capabilities: {
@@ -119,19 +181,44 @@ print_config() {
   },
   agents: {
     defaults: {
+      agentRuntime: {
+        id: "codex"
+      },
+      model: {
+        primary: "openai-codex/gpt-5.5"
+      },
+      models: {
+        "openai-codex/gpt-5.5": {}
+      },
       skills: ["jobhunter"],
       sandbox: {
         mode: "off"
-      },
-      tools: {
-        profile: "messaging",
-        deny: ["group:runtime", "group:fs", "group:automation"],
-        allow: ["group:messaging", "bundle-mcp", "web_search", "web_fetch"],
-        fs: { workspaceOnly: true },
-        exec: { security: "deny", ask: "always" },
-        elevated: { enabled: false }
       }
     }
+  },
+  plugins: {
+    entries: {
+      codex: {
+        enabled: true,
+        config: {
+          codexDynamicToolsProfile: "native-first",
+          codexDynamicToolsExclude: [],
+          appServer: {
+            approvalPolicy: "on-request",
+            sandbox: "read-only",
+            serviceTier: "fast"
+          }
+        }
+      }
+    }
+  },
+  tools: {
+    profile: "messaging",
+    alsoAllow: ["web_search", "web_fetch"],
+    deny: ["group:runtime", "group:fs", "group:automation"],
+    fs: { workspaceOnly: true },
+    exec: { security: "deny", ask: "always" },
+    elevated: { enabled: false }
   }
 }
 EOF
@@ -194,8 +281,10 @@ case "${1:-help}" in
   onboard)
     gateway_node onboard --mode local --no-install-daemon
     gateway_node config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
-    patch_inline_buttons
-    printf "\nOnboarding finished. Merge the Jobhunter MCP/skills snippet from './bin/openclaw config' into the OpenClaw config if it is not already present.\n"
+    patch_jobhunter_openclaw_config
+    patch_codex_mcp_approval
+    register_codex_mcp_jobhunter
+    printf "\nOnboarding finished. Jobhunter MCP, skill, Telegram, Codex runtime, Codex MCP approval, and Codex CLI registry are configured.\n"
     ;;
   doctor)
     shift
