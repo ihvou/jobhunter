@@ -614,7 +614,7 @@ Keep the old `bin/jobhunter` as a deprecated wrapper for one release that points
 - `tools.alsoAllow` includes `jobhunter-tools` specifically. Do not replace this with `group:plugins`; the point is to expose only the Jobhunter bridge plus messaging/web while runtime/fs/automation stay denied.
 - Phase 2 verification uses OpenClaw dynamic tool trajectories as the primary runtime signal. In Codex 0.128.0, native MCP calls appear in `logs_2.sqlite` as `mcp__jobhunter__...` with `mcp_tool=true` and `rmcp::service ... CallToolRequest ...`; the logs did not contain literal `mcp_tool_call_begin` / `mcp_tool_call_end` strings.
 - `./bin/jobhunter` is a compatibility wrapper for `./bin/openclaw` for one release.
-- Done at `5844bd0`.
+- Done at `5844bd0` and trajectory bridge completed at `7d432d5`.
 
 ## Phase 3 — Plug in OpenClaw's tool ecosystem (1 week)
 
