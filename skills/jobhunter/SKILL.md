@@ -66,7 +66,7 @@ Install notes live in `{baseDir}/README.md`.
 
 Before rendering any digest, inspect the response of `jobhunter_get_more_jobs`:
 
-- `queue_freshness_hours` — hours since the most recent job was indexed
+- `queue_freshness_hours` — hours since the last successful source collection
 - `queue_is_stale` — true when freshness ≥ 6 hours
 
 If stale, do this without asking:
@@ -83,12 +83,21 @@ For each job in the returned shortlist, emit one `message` action with:
 ```text
 target = "telegram:<chat_id_from_conversation_metadata>"
 message = "<rank>. <title> — <company> — score <total_score>\n<url>"
-buttons = [[
-  { text: "Applied",    callback_data: "applied:<job_id_first_12>",    style: "success" },
-  { text: "Irrelevant", callback_data: "irrelevant:<job_id_first_12>", style: "danger" },
-  { text: "Snooze",     callback_data: "snooze:<job_id_first_12>" },
-  { text: "Cover",      callback_data: "cover:<job_id_first_12>",      style: "primary" }
-]]
+presentation = {
+  blocks: [{
+    type: "buttons",
+    buttons: [
+      [
+        { text: "Applied", callback_data: "applied:<job_id_first_12>", style: "success" },
+        { text: "Irrelevant", callback_data: "irrelevant:<job_id_first_12>", style: "danger" }
+      ],
+      [
+        { text: "Snooze", callback_data: "snooze:<job_id_first_12>" },
+        { text: "Cover", callback_data: "cover:<job_id_first_12>", style: "primary" }
+      ]
+    ]
+  }]
+}
 ```
 
 `job_id_first_12` is the first 12 lowercase hex characters of the `jobs.id` value returned by `jobhunter_get_more_jobs`.

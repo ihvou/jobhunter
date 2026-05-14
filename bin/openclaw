@@ -38,19 +38,14 @@ run_cmd() {
 }
 
 service_health() {
-  python3 - "$SERVICE_URL" <<'PY'
-import json
-import sys
-import urllib.error
-import urllib.request
-
-try:
-    with urllib.request.urlopen(sys.argv[1].rstrip("/") + "/health", timeout=2) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    print("ok" if payload.get("ok") else "bad")
-except Exception:
-    print("down")
-PY
+  local health
+  health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' jobhunter-service 2>/dev/null || true)"
+  case "$health" in
+    healthy|running) printf "ok\n" ;;
+    starting) printf "starting\n" ;;
+    unhealthy|exited|dead) printf "bad\n" ;;
+    *) printf "down\n" ;;
+  esac
 }
 
 gateway_health() {

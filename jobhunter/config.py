@@ -34,9 +34,7 @@ class AppConfig:
     profile_settings_path: Path
     sources_path: Path
     scoring_path: Path
-    workspace_dir: Path
     heartbeat_path: Path
-    tasks_path: Path
     taskcandidates_path: Path
     telegram_bot_token: str = ""
     telegram_allowed_chat_id: Optional[int] = None
@@ -63,7 +61,6 @@ class AppConfig:
     agent_request_desc_chars: int = 250
     agent_request_feedback_items: int = 5
     robots_txt_respect: str = "ignore"
-    codex_handoff_mode: str = "auto"
     cost: CostConfig = field(default_factory=CostConfig)
 
 
@@ -106,11 +103,8 @@ def load_app_config() -> AppConfig:
     )
     sources_path = Path(os.getenv("JOBHUNTER_SOURCES_PATH", str(config_dir / "sources.local.json")))
     scoring_path = Path(os.getenv("JOBHUNTER_SCORING_PATH", str(config_dir / "scoring.local.json")))
-    workspace_dir = Path(os.getenv("JOBHUNTER_WORKSPACE_DIR", "openclaw/workspace"))
     heartbeat_path = Path(os.getenv("JOBHUNTER_HEARTBEAT_PATH", str(data_dir / "heartbeat")))
     database_path = Path(os.getenv("JOBHUNTER_DATABASE_PATH", str(data_dir / "jobs.sqlite")))
-    tasks_default = "/jobhunter/repo/tasks.md" if Path("/jobhunter/repo").exists() else str(_cwd() / "tasks.md")
-    tasks_path = Path(os.getenv("JOBHUNTER_TASKS_PATH", tasks_default))
     taskcandidates_path = Path(os.getenv("JOBHUNTER_TASKCANDIDATES_PATH", str(data_dir / "taskcandidates.md")))
 
     settings_path = Path(os.getenv("JOBHUNTER_SETTINGS_PATH", str(config_dir / "jobhunter.json")))
@@ -138,9 +132,7 @@ def load_app_config() -> AppConfig:
         profile_settings_path=profile_settings_path,
         sources_path=sources_path,
         scoring_path=scoring_path,
-        workspace_dir=workspace_dir,
         heartbeat_path=heartbeat_path,
-        tasks_path=tasks_path,
         taskcandidates_path=taskcandidates_path,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_chat_id=parse_optional_int(os.getenv("TELEGRAM_ALLOWED_CHAT_ID")),
@@ -199,7 +191,6 @@ def load_app_config() -> AppConfig:
         robots_txt_respect=str(
             os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", settings.get("robots_txt_respect", "ignore"))
         ).strip().lower(),
-        codex_handoff_mode=str(os.getenv("JOBHUNTER_CODEX_HANDOFF_MODE", settings.get("codex_handoff_mode", "auto"))).strip().lower(),
         cost=cost,
     )
 
@@ -258,10 +249,6 @@ def load_profile(config: AppConfig) -> UserProfile:
 def ensure_directories(config: AppConfig) -> None:
     config.data_dir.mkdir(parents=True, exist_ok=True)
     config.config_dir.mkdir(parents=True, exist_ok=True)
-    config.workspace_dir.mkdir(parents=True, exist_ok=True)
-    (config.workspace_dir / "discovery").mkdir(parents=True, exist_ok=True)
-    (config.workspace_dir / "tuning").mkdir(parents=True, exist_ok=True)
-    (config.workspace_dir / "agent").mkdir(parents=True, exist_ok=True)
 
 
 def ensure_profile_file(config: AppConfig) -> None:

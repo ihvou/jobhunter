@@ -7,7 +7,7 @@ from unittest import mock
 from jobhunter.agent_actions import AgentActionContext, apply_agent_action, sanitize_actions
 from jobhunter.app import JobHunter
 from jobhunter.config import split_profile_sections
-from test_app import FakeTelegram, config_for
+from test_app import config_for
 
 
 class AgentActionTests(unittest.TestCase):
@@ -123,40 +123,33 @@ class AgentActionTests(unittest.TestCase):
             self.assertEqual(sources[0]["created_by"], "agent")
             self.assertEqual(sources[0]["risk_level"], "low")
 
-    def test_agent_response_apply_and_revert_audits_file_change(self):
+    def test_recorded_service_action_apply_and_revert_audits_file_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.profile_path.write_text("# About me\n\nBuilder PM\n\n# Directives\n", encoding="utf-8")
             bot = JobHunter(config)
-            bot.telegram = FakeTelegram()
-            session_id = bot.agent.create_request("remember this")
-            response_path = config.workspace_dir / "agent" / ("response-%s.json" % session_id)
-            response_path.write_text(
-                json.dumps(
-                    {
-                        "user_intent_summary": "add directive",
-                        "answer": "I can add it.",
-                        "proposed_actions": [
-                            {
-                                "kind": "directive_edit",
-                                "summary": "Add exclusion",
-                                "payload": {"directive": "Skip Product Marketing Manager roles"},
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            status_path = config.workspace_dir / "agent" / ("status-%s.json" % session_id)
-            status_path.write_text('{"state":"done","message":"ok"}', encoding="utf-8")
-            bot.poll_workspace()
+            from jobhunter.service import JobHunterService
 
-            bot.handle_action(type("Action", (), {"scope": "agent", "action": "apply", "target_id": session_id, "index": 0, "callback_id": "cb", "message_id": 1})())
+            service = JobHunterService(bot)
+            proposed = service.propose_actions(
+                [
+                    {
+                        "kind": "directive_edit",
+                        "summary": "Add exclusion",
+                        "payload": {"directive": "Skip Product Marketing Manager roles"},
+                    }
+                ],
+                user_intent="remember this",
+                session_id="openclaw-test",
+            )
+            action_id = proposed["actions"][0]["id"]
+
+            service.apply_action(action_id=action_id)
             rows = bot.database.recent_agent_actions(10)
             self.assertEqual(rows[0]["status"], "applied")
             self.assertIn("Skip Product Marketing", config.profile_path.read_text(encoding="utf-8"))
 
-            bot.handle_action(type("Action", (), {"scope": "bot", "action": "revert", "target_id": str(rows[0]["id"]), "callback_id": None})())
+            service.revert_action(rows[0]["id"])
             self.assertNotIn("Skip Product Marketing", config.profile_path.read_text(encoding="utf-8"))
             self.assertEqual(bot.database.get_agent_action(rows[0]["id"])["status"], "reverted")
 

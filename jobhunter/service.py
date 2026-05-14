@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Dict, List
 from urllib.parse import parse_qs, urlparse
 
-from .agent import read_agent_response
 from .agent_actions import ActionResult, AgentActionContext, apply_agent_action, sanitize_actions
 from .app import JobHunter
 from .config import load_app_config, load_sources
@@ -53,7 +52,9 @@ class JobHunterService:
         digest_id = ""
         if mark_sent and jobs:
             digest_id = self.bot.database.mark_digested([job["id"] for job in jobs])
-        return {"jobs": jobs, "count": len(jobs), "digest_id": digest_id, "marked_sent": bool(digest_id)}
+        payload = {"jobs": jobs, "count": len(jobs), "digest_id": digest_id, "marked_sent": bool(digest_id)}
+        payload.update(self.bot.collection_freshness())
+        return payload
 
     def mark_irrelevant(self, job_id: str, details: str = "") -> Dict:
         return self.mark_job(job_id, "rejected", "irrelevant", details)
@@ -79,17 +80,6 @@ class JobHunterService:
         self.bot.database.save_draft(job_id, "cover_note", draft)
         self.bot.database.update_job_status(job_id, "draft_ready")
         return {"ok": True, "job_id": job_id, "draft": draft}
-
-    def agent_request(self, user_text: str) -> Dict:
-        session_id = self.bot.agent.create_request(user_text)
-        self.bot.database.add_feedback("__system__", "bot:agent", session_id)
-        return {"ok": True, "session_id": session_id}
-
-    def agent_poll(self, session_id: str = "") -> Dict:
-        completed = self.bot.agent.poll_done()
-        if session_id:
-            completed = [item for item in completed if item.get("session_id") == session_id]
-        return {"completed": completed, "count": len(completed)}
 
     def propose_actions(self, actions: List[Dict], user_intent: str = "", session_id: str = "") -> Dict:
         session_id = session_id or "openclaw-%s" % int(time.time() * 1000)
@@ -119,22 +109,7 @@ class JobHunterService:
     def apply_action(self, action_id: int = None, session_id: str = "", index=None, confirm: bool = False) -> Dict:
         if action_id:
             return self.apply_recorded_action(int(action_id), confirm=confirm)
-        if not session_id:
-            raise ServiceError(400, "Missing action_id or session_id")
-        response = read_agent_response(self.bot.config, session_id)
-        raw_actions = response.get("proposed_actions") or []
-        if index is None:
-            selected = [item for item in raw_actions if item.get("kind") != "data_answer"]
-        else:
-            try:
-                selected = [raw_actions[int(index)]]
-            except (IndexError, TypeError, ValueError):
-                selected = []
-        if not selected:
-            raise ServiceError(400, "No proposed action selected")
-        proposal = self.propose_actions(selected, response.get("user_intent_summary", ""), session_id)
-        applied = [self.apply_recorded_action(item["id"], confirm=confirm) for item in proposal["actions"]]
-        return {"ok": True, "session_id": session_id, "applied": applied, "count": len(applied)}
+        raise ServiceError(400, "Missing action_id")
 
     def apply_recorded_action(self, action_id: int, confirm: bool = False) -> Dict:
         row = self.bot.database.get_agent_action(action_id)
@@ -330,10 +305,6 @@ def create_handler(app: JobHunterService):
                     payload = app.cover_note(required(body, "job_id"), bool(body.get("override_budget", False)))
                 elif method == "POST" and path == "/jobs/resolve_prefix":
                     payload = app.resolve_job_prefix(required(body, "id_prefix"))
-                elif method == "POST" and path == "/agent/request":
-                    payload = app.agent_request(required(body, "user_text"))
-                elif method == "POST" and path == "/agent/poll":
-                    payload = app.agent_poll(str(body.get("session_id") or ""))
                 elif method == "POST" and path == "/action/propose":
                     payload = app.propose_actions(body.get("actions") or [], str(body.get("user_intent") or ""), str(body.get("session_id") or ""))
                 elif method == "POST" and path == "/action/apply":

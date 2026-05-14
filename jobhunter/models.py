@@ -70,24 +70,5 @@ class ScoreResult:
     fired_rules: List[str] = field(default_factory=list)
 
 
-@dataclass
-class TelegramAction:
-    scope: str
-    action: str
-    target_id: Optional[str] = None
-    index: Optional[int] = None
-    text: str = ""
-    callback_id: Optional[str] = None
-    chat_id: Optional[int] = None
-    message_id: Optional[int] = None
-    raw: Dict = field(default_factory=dict)
-
-    @property
-    def job_id(self) -> Optional[str]:
-        if self.scope in ("job", "cover"):
-            return self.target_id
-        return None
-
-
 def utc_now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"

@@ -1,53 +1,4 @@
 services:
-  jobhunter:
-    build:
-      context: .
-    container_name: jobhunter
-    restart: unless-stopped
-    environment:
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
-      JOBHUNTER_LOG_LEVEL: ${JOBHUNTER_LOG_LEVEL:-INFO}
-      JOBHUNTER_DAILY_BUDGET_USD: ${JOBHUNTER_DAILY_BUDGET_USD:-0.50}
-      JOBHUNTER_MONTHLY_BUDGET_USD: ${JOBHUNTER_MONTHLY_BUDGET_USD:-10.00}
-      JOBHUNTER_DATA_DIR: /jobhunter/data
-      JOBHUNTER_INPUT_DIR: /jobhunter/input
-      JOBHUNTER_CONFIG_DIR: /jobhunter/config
-      JOBHUNTER_WORKSPACE_DIR: /jobhunter/workspace
-      JOBHUNTER_DATABASE_PATH: /jobhunter/data/jobs.sqlite
-      JOBHUNTER_HEARTBEAT_PATH: /jobhunter/data/heartbeat
-      JOBHUNTER_TASKS_PATH: /jobhunter/repo/tasks.md
-      JOBHUNTER_PROFILE_PATH: /jobhunter/input/profile.local.md
-      JOBHUNTER_CV_PATH: /jobhunter/input/cv.local.md
-      JOBHUNTER_PROFILE_SETTINGS_PATH: /jobhunter/config/profile.local.json
-      JOBHUNTER_SOURCES_PATH: /jobhunter/config/sources.local.json
-      JOBHUNTER_SCORING_PATH: /jobhunter/config/scoring.local.json
-      JOBHUNTER_SETTINGS_PATH: /jobhunter/config/jobhunter.json
-      JOBHUNTER_CODEX_HANDOFF_MODE: ${JOBHUNTER_CODEX_HANDOFF_MODE:-auto}
-      JOBHUNTER_ROBOTS_TXT_RESPECT: ${JOBHUNTER_ROBOTS_TXT_RESPECT:-trust}
-      EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-}
-      EMAIL_IMAP_USERNAME: ${EMAIL_IMAP_USERNAME:-}
-      EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
-      EMAIL_IMAP_FOLDER: ${EMAIL_IMAP_FOLDER:-job-alerts}
-    volumes:
-      - ./data:/jobhunter/data
-      - ./config:/jobhunter/config
-      - ./input:/jobhunter/input
-      - ./openclaw/workspace:/jobhunter/workspace
-      - ./:/jobhunter/repo:ro
-    command: ["python", "-m", "jobhunter", "serve"]
-    read_only: true
-    tmpfs:
-      - /tmp
-    mem_limit: 256m
-    cpus: 0.5
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
   jobhunter-service:
     build:
       context: .
@@ -62,17 +13,14 @@ services:
       JOBHUNTER_DATA_DIR: /jobhunter/data
       JOBHUNTER_INPUT_DIR: /jobhunter/input
       JOBHUNTER_CONFIG_DIR: /jobhunter/config
-      JOBHUNTER_WORKSPACE_DIR: /jobhunter/workspace
       JOBHUNTER_DATABASE_PATH: /jobhunter/data/jobs.sqlite
       JOBHUNTER_HEARTBEAT_PATH: /jobhunter/data/heartbeat
-      JOBHUNTER_TASKS_PATH: /jobhunter/repo/tasks.md
       JOBHUNTER_PROFILE_PATH: /jobhunter/input/profile.local.md
       JOBHUNTER_CV_PATH: /jobhunter/input/cv.local.md
       JOBHUNTER_PROFILE_SETTINGS_PATH: /jobhunter/config/profile.local.json
       JOBHUNTER_SOURCES_PATH: /jobhunter/config/sources.local.json
       JOBHUNTER_SCORING_PATH: /jobhunter/config/scoring.local.json
       JOBHUNTER_SETTINGS_PATH: /jobhunter/config/jobhunter.json
-      JOBHUNTER_CODEX_HANDOFF_MODE: ${JOBHUNTER_CODEX_HANDOFF_MODE:-auto}
       JOBHUNTER_ROBOTS_TXT_RESPECT: ${JOBHUNTER_ROBOTS_TXT_RESPECT:-ignore}
       JOBHUNTER_SERVICE_HOST: 0.0.0.0
       JOBHUNTER_SERVICE_PORT: 8765
@@ -84,11 +32,7 @@ services:
       - ./data:/jobhunter/data
       - ./config:/jobhunter/config
       - ./input:/jobhunter/input
-      - ./openclaw/workspace:/jobhunter/workspace
-      - ./:/jobhunter/repo:ro
     command: ["python", "-m", "jobhunter", "service"]
-    ports:
-      - "127.0.0.1:8765:8765"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()"]
       interval: 30s

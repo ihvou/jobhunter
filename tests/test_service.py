@@ -146,8 +146,10 @@ class ServiceTests(unittest.TestCase):
 
             listed = handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
             self.assertIn("jobhunter_get_more_jobs", [tool["name"] for tool in listed["result"]["tools"]])
+            self.assertNotIn("jobhunter_agent_request", [tool["name"] for tool in listed["result"]["tools"]])
             digest_tool = next(tool for tool in listed["result"]["tools"] if tool["name"] == "jobhunter_get_more_jobs")
             self.assertIn("read-only diagnostics", digest_tool["description"])
+            self.assertIn("presentation", digest_tool["description"])
             self.assertNotIn("MANDATORY RENDERING CONTRACT", digest_tool["description"])
 
             called = handle_rpc(

@@ -1,4 +1,5 @@
 import argparse
+import json
 
 from .app import JobHunter, run_once
 
@@ -8,12 +9,8 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init", help="Initialize database and source registry")
     subparsers.add_parser("collect", help="Collect jobs from configured sources")
-    subparsers.add_parser("digest", help="Send current Telegram digest")
-    subparsers.add_parser("run-once", help="Initialize, collect, score, and send one digest")
-    subparsers.add_parser("telegram-poll", help="Poll Telegram callbacks once")
-    subparsers.add_parser("discover-sources", help="Write a source-discovery request to the shared workspace")
-    subparsers.add_parser("tune-scoring", help="Write a scoring tuning request to the shared workspace")
-    subparsers.add_parser("serve", help="Run Telegram and workspace polling loop")
+    subparsers.add_parser("digest", help="Print current ranked digest rows as JSON")
+    subparsers.add_parser("run-once", help="Initialize, collect, and score once")
     subparsers.add_parser("service", help="Run the localhost HTTP service for OpenClaw/MCP tools")
     subparsers.add_parser("usage", help="Print local usage summary")
     args = parser.parse_args()
@@ -35,15 +32,9 @@ def main() -> None:
         bot.initialize()
         bot.collect()
     elif args.command == "digest":
-        bot.send_digest()
-    elif args.command == "telegram-poll":
-        bot.poll_telegram_once()
-    elif args.command == "discover-sources":
-        bot.discover_sources()
-    elif args.command == "tune-scoring":
-        bot.tune_scoring()
-    elif args.command == "serve":
-        bot.serve()
+        from .service import JobHunterService
+
+        print(json.dumps(JobHunterService(bot).digest(mark_sent=False), indent=2, sort_keys=True))
     elif args.command == "usage":
         usage = bot.database.usage_summary()
         print("Spend today: $%.4f" % usage["today"])

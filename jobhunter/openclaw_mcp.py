@@ -26,7 +26,8 @@ TOOLS = [
             "mark_sent=false and use the returned rows without sending channel messages. "
             "RENDERING (Telegram digest requests only): render EACH returned job with one "
             "`message` tool call (action=send, target=<chat_id from conversation metadata, e.g. "
-            "\"telegram:855127987\">) containing the job text and these inline buttons: "
+            "\"telegram:855127987\">). Inline buttons MUST be sent as "
+            "`presentation: {blocks: [{type: \"buttons\", buttons: [[...],[...]]}]}` with: "
             "[[{text:\"Applied\",callback_data:\"applied:<id_prefix>\",style:\"success\"},"
             "{text:\"Irrelevant\",callback_data:\"irrelevant:<id_prefix>\",style:\"danger\"}],"
             "[{text:\"Snooze\",callback_data:\"snooze:<id_prefix>\"},"
@@ -65,7 +66,13 @@ TOOLS = [
     },
     {
         "name": "jobhunter_propose_actions",
-        "description": "Store bounded Jobhunter actions for user approval. This does not apply changes.",
+        "description": (
+            "Store bounded Jobhunter actions for user approval. This does not apply changes. "
+            "For an Update sources request, propose kind=sources_proposal with payload.operations. "
+            "For a Tune scoring request, propose kind=scoring_rule_proposal with payload.ruleset. "
+            "After this returns action ids, show the ids to the user and only call "
+            "jobhunter_apply_action after explicit approval."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -101,27 +108,12 @@ TOOLS = [
         },
     },
     {
-        "name": "jobhunter_agent_request",
-        "description": "Queue a legacy Jobhunter agent request. Prefer native OpenClaw reasoning unless explicitly testing rollback.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"user_text": {"type": "string"}},
-            "required": ["user_text"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "jobhunter_agent_poll",
-        "description": "Poll completed legacy Jobhunter agent responses. Prefer native OpenClaw reasoning unless explicitly testing rollback.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"session_id": {"type": "string"}},
-            "additionalProperties": False,
-        },
-    },
-    {
         "name": "jobhunter_mark_job",
-        "description": "Mark a job as irrelevant, applied, or snoozed. Use job_id or the 12-char id_prefix from an inline button.",
+        "description": (
+            "Mark a job as irrelevant, applied, or snoozed. Use job_id or the 12-char "
+            "id_prefix from an inline button. Callback text such as `applied:<id_prefix>`, "
+            "`irrelevant:<id_prefix>`, or `snooze:<id_prefix>` must be routed here."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -137,7 +129,10 @@ TOOLS = [
     },
     {
         "name": "jobhunter_cover_note",
-        "description": "Draft a cover note for one job. Use job_id or the 12-char id_prefix from an inline button.",
+        "description": (
+            "Draft a cover note for one job. Use job_id or the 12-char id_prefix from an "
+            "inline button. Callback text `cover:<id_prefix>` must be routed here."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -208,25 +203,6 @@ def handle_rpc(request: Dict):
 def call_tool(name: str, args: Dict) -> Dict:
     if name == "jobhunter_get_more_jobs":
         digest = post("/digest", {"limit": args.get("limit"), "mark_sent": bool(args.get("mark_sent", False))})
-        try:
-            staleness = post(
-                "/query-sql",
-                {
-                    "sql": "SELECT MAX(first_seen_at) AS last_seen, "
-                           "CAST((julianday('now') - julianday(MAX(first_seen_at))) * 24 AS INTEGER) AS hours_since_last "
-                           "FROM jobs",
-                    "params": [],
-                },
-            )
-            rows = staleness.get("rows") or [{}]
-            row = rows[0] if rows else {}
-            hours = row.get("hours_since_last")
-            if isinstance(hours, (int, float)):
-                digest["queue_freshness_hours"] = int(hours)
-                digest["queue_last_collected"] = row.get("last_seen")
-                digest["queue_is_stale"] = int(hours) >= 6
-        except Exception:
-            pass
         return digest
     if name == "jobhunter_collect_all_sources":
         return post("/collect", {})
@@ -247,10 +223,6 @@ def call_tool(name: str, args: Dict) -> Dict:
         return post("/action/apply", {"action_id": args.get("action_id"), "confirm": bool(args.get("confirm", False))})
     if name == "jobhunter_revert_action":
         return post("/action/revert", {"action_id": args.get("action_id")})
-    if name == "jobhunter_agent_request":
-        return post("/agent/request", {"user_text": args.get("user_text")})
-    if name == "jobhunter_agent_poll":
-        return post("/agent/poll", {"session_id": args.get("session_id") or ""})
     if name == "jobhunter_mark_job":
         job_id = resolve_job_id(args)
         action = args.get("status") or args.get("action")
