@@ -17,7 +17,7 @@ SUPPORTED_RULE_KINDS = {
 
 
 class ScoringCoordinator:
-    """Scoring analysis helpers used by approval-gated MCP actions."""
+    """Scoring analysis helpers used by approval-gated tool actions."""
 
     def __init__(self, config: AppConfig, database: Database, profile: UserProfile):
         self.config = config

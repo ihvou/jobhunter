@@ -1,6 +1,6 @@
 ---
 name: jobhunter
-description: Operate Jobhunter through bounded MCP tools for job search, source discovery, scoring, and approved user actions.
+description: Operate Jobhunter through bounded OpenClaw plugin tools for job search, source discovery, scoring, and approved user actions.
 metadata: { "openclaw": { "homepage": "https://github.com/ihvou/jobhunter" } }
 ---
 
@@ -10,7 +10,7 @@ Use this skill when the user asks about jobs, job sources, scoring, cover notes,
 
 ## Tool selection rules (read this first)
 
-**Always go through the `jobhunter` MCP server. Never shell-grep the workspace, never `find`/`rg`/`sed` to locate files or read the SQLite DB.**
+**Always go through the `jobhunter_*` OpenClaw plugin tools. Never shell-grep the workspace, never `find`/`rg`/`sed` to locate files or read the SQLite DB.**
 
 Decision tree for any user question:
 
@@ -34,7 +34,7 @@ If none of those fit, call `jobhunter_query_sql` with a SELECT against the `jobs
 - `sed`/`cat`/`head` on workspace files
 - Reading `jobs.sqlite` directly with `sqlite3` CLI (the service owns the DB)
 
-Available MCP tools exposed by the `jobhunter` MCP server:
+Available Jobhunter plugin tools:
 
 - `jobhunter_get_more_jobs`: return ranked job matches. Use `mark_sent=true` only after the jobs have been shown to the user.
 - `jobhunter_collect_all_sources`: run collection/indexing from configured sources.

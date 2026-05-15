@@ -11,7 +11,7 @@ def main() -> None:
     subparsers.add_parser("collect", help="Collect jobs from configured sources")
     subparsers.add_parser("digest", help="Print current ranked digest rows as JSON")
     subparsers.add_parser("run-once", help="Initialize, collect, and score once")
-    subparsers.add_parser("service", help="Run the localhost HTTP service for OpenClaw/MCP tools")
+    subparsers.add_parser("service", help="Run the localhost HTTP service for OpenClaw plugin tools")
     subparsers.add_parser("usage", help="Print local usage summary")
     args = parser.parse_args()
 

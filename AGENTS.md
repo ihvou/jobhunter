@@ -10,9 +10,8 @@ Current Phase 2 shape:
 
 - `jobhunter-service` is the headless Python domain service.
 - `openclaw-gateway` is the Dockerized real OpenClaw runtime and owns Telegram, Codex sessions, buttons, and channel I/O.
-- Jobhunter tools are exposed through stdio MCP in [`jobhunter/openclaw_mcp.py`](jobhunter/openclaw_mcp.py) for Codex-native access and `mcp_tool_call_*` logs.
-- [`plugins/jobhunter-tools/`](plugins/jobhunter-tools/) is an OpenClaw dynamic tool plugin that calls the same headless service over the Compose network so Jobhunter calls are trajectory-visible.
-- Skills live under [`skills/`](skills/); rendering and routing rules that must always work belong in MCP tool descriptions first, with `SKILL.md` as duplicate guidance.
+- [`plugins/jobhunter-tools/`](plugins/jobhunter-tools/) is the sole Jobhunter tool surface for OpenClaw/Codex. It calls the headless service over the Compose network and produces trajectory-visible `tool.call` events.
+- Skills live under [`skills/`](skills/); rendering and routing rules that must always work belong in plugin tool descriptions first, with `SKILL.md` as duplicate guidance.
 - The custom Node worker, Python Telegram client, and workspace file IPC are retired. Do not reintroduce `openclaw/worker/`, `jobhunter/telegram.py`, `jobhunter/agent.py`, or `openclaw/workspace/`.
 
 ## What This Project Is
@@ -20,7 +19,7 @@ Current Phase 2 shape:
 A safe, low-cost job-search assistant that runs as two Docker containers:
 
 1. **`jobhunter-service`**: stdlib Python service. Collects public/API/RSS/ATS/IMAP jobs, dedupes, scores, runs capped L2 relevance and cover-note calls, persists audits, and applies approved bounded actions.
-2. **`openclaw-gateway`**: Dockerized OpenClaw gateway. Uses Codex via the user's subscription and reaches Jobhunter only through MCP. Codex auth is mounted read-only from `~/.codex`; no Docker socket is mounted.
+2. **`openclaw-gateway`**: Dockerized OpenClaw gateway. Uses Codex via the user's subscription and reaches Jobhunter only through the `jobhunter-tools` plugin. Codex auth is mounted read-only from `~/.codex`; no Docker socket is mounted.
 
 The user interacts through Telegram via OpenClaw. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 
@@ -56,9 +55,8 @@ jobhunter/
   coordinators.py      # Scoring shadow-test helpers
   database.py          # SQLite schema, migrations, queries
   llm.py               # OpenAI cover-note + L2 relevance client
-  openclaw_mcp.py      # MCP bridge used by OpenClaw/Codex
   scoring.py           # Deterministic scoring DSL interpreter
-  service.py           # HTTP service for MCP tools
+  service.py           # HTTP service for OpenClaw plugin tools
   sources.py           # Collectors + IMAP/email parser DSL
 skills/
   jobhunter/
@@ -91,7 +89,7 @@ openclaw/codex-home/
 - Keep comments scarce and useful.
 - Word-boundary matching only for job-text rules.
 - Never put secrets in URLs or logs.
-- OpenClaw/Codex must use MCP tools for Jobhunter data, not direct DB/file reads.
+- OpenClaw/Codex must use `jobhunter-tools` plugin tools for Jobhunter data, not direct DB/file reads.
 - `/agent` write actions must go through [`jobhunter/agent_actions.py`](jobhunter/agent_actions.py); never add an action kind that executes code or shell commands.
 - Config-changing actions must be approval-gated and audited in `agent_actions`.
 
@@ -116,18 +114,15 @@ Docker:
 
 `./bin/jobhunter` is a deprecated wrapper for one release and delegates to `./bin/openclaw`.
 
-## MCP / OpenClaw Non-Negotiables
+## OpenClaw Non-Negotiables
 
 - Do not remove `openclaw-gateway` from `docker-compose.yml`.
-- `bin/openclaw onboard` must keep all three MCP registration steps:
-  - OpenClaw config patch for `mcp.servers.jobhunter`
-  - Codex home `[mcp_servers.jobhunter]` with `default_tools_approval_mode = "approve"`
-  - `codex mcp add jobhunter -- python3 -m jobhunter.openclaw_mcp`
+- `bin/openclaw onboard` must expose Jobhunter only through the `jobhunter-tools` OpenClaw plugin. Do not re-add `mcp.servers.jobhunter` or `codex mcp add jobhunter`.
 - OpenClaw tool policy is top-level `tools.*`, not `agents.defaults.tools.*`.
 - `tools.alsoAllow` must include `jobhunter-tools`; do not use broad `group:plugins` for this bridge.
 - Keep Codex app-server `approvalPolicy = "on-request"` and `sandbox = "read-only"`.
 - Inline buttons render via `presentation.blocks[].buttons`.
-- Verify agent behavior by trajectory/logs, not chat text. OpenClaw dynamic tools must appear as `tool.call` trajectory events; Codex-native MCP calls must appear as `mcp_tool_call_begin` / `mcp_tool_call_end` rows.
+- Verify agent behavior by trajectory, not chat text. Jobhunter plugin tools must appear as bare `tool.call name=jobhunter_*` events.
 
 ## Validation Before Declaring Done
 

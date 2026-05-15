@@ -5,7 +5,6 @@ from pathlib import Path
 
 from jobhunter.app import JobHunter
 from jobhunter.models import Job, ScoreResult, SourceConfig
-from jobhunter.openclaw_mcp import handle_rpc
 from jobhunter.service import JobHunterService, ServiceError
 from test_app import config_for
 
@@ -115,105 +114,6 @@ class ServiceTests(unittest.TestCase):
             reverted = service.revert_action(action_id)
             self.assertTrue(reverted["ok"])
             self.assertEqual(bot.config.profile_path.read_text(encoding="utf-8"), before)
-
-    def test_mcp_lists_and_calls_service_tools(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bot, _job_id = self.seeded_bot(tmp)
-            service = JobHunterService(bot)
-            import jobhunter.openclaw_mcp as mcp
-
-            old_get = mcp.get
-            old_post = mcp.post
-
-            def fake_get(path):
-                if path.startswith("/usage"):
-                    return service.usage()
-                if path.startswith("/history"):
-                    return service.history()
-                raise AssertionError("unexpected GET %s" % path)
-
-            def fake_post(path, payload):
-                if path == "/digest":
-                    return service.digest(limit=payload.get("limit"), mark_sent=bool(payload.get("mark_sent", False)))
-                if path == "/query-sql":
-                    return service.query_sql(payload.get("sql"), payload.get("params") or [], payload.get("limit") or 50)
-                raise AssertionError("unexpected POST %s" % path)
-
-            mcp.get = fake_get
-            mcp.post = fake_post
-            self.addCleanup(setattr, mcp, "get", old_get)
-            self.addCleanup(setattr, mcp, "post", old_post)
-
-            listed = handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
-            self.assertIn("jobhunter_get_more_jobs", [tool["name"] for tool in listed["result"]["tools"]])
-            self.assertNotIn("jobhunter_agent_request", [tool["name"] for tool in listed["result"]["tools"]])
-            digest_tool = next(tool for tool in listed["result"]["tools"] if tool["name"] == "jobhunter_get_more_jobs")
-            self.assertIn("read-only diagnostics", digest_tool["description"])
-            self.assertIn("presentation", digest_tool["description"])
-            self.assertNotIn("MANDATORY RENDERING CONTRACT", digest_tool["description"])
-
-            called = handle_rpc(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {"name": "jobhunter_get_more_jobs", "arguments": {"limit": 1}},
-                }
-            )
-            text = called["result"]["content"][0]["text"]
-            self.assertIn("AI Product Manager", text)
-
-    def test_mcp_mark_job_and_cover_note_accept_id_prefix(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bot, job_id = self.seeded_bot(tmp)
-            service = JobHunterService(bot)
-            import jobhunter.openclaw_mcp as mcp
-
-            old_post = mcp.post
-            calls = []
-
-            def fake_post(path, payload):
-                calls.append((path, payload))
-                if path == "/jobs/resolve_prefix":
-                    return service.resolve_job_prefix(payload["id_prefix"])
-                if path == "/applied":
-                    return service.mark_applied(payload["job_id"])
-                if path == "/cover-note":
-                    return {"ok": True, "job_id": payload["job_id"], "draft": "Cover draft"}
-                raise AssertionError("unexpected POST %s" % path)
-
-            mcp.post = fake_post
-            self.addCleanup(setattr, mcp, "post", old_post)
-
-            marked = handle_rpc(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "jobhunter_mark_job",
-                        "arguments": {"id_prefix": job_id[:12], "status": "applied"},
-                    },
-                }
-            )
-            marked_payload = json.loads(marked["result"]["content"][0]["text"])
-            self.assertEqual(marked_payload["status"], "applied")
-            self.assertEqual(bot.database.get_job(job_id)["status"], "applied")
-
-            cover = handle_rpc(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 4,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "jobhunter_cover_note",
-                        "arguments": {"id_prefix": job_id[:12]},
-                    },
-                }
-            )
-            cover_payload = json.loads(cover["result"]["content"][0]["text"])
-            self.assertEqual(cover_payload["draft"], "Cover draft")
-            self.assertIn(("/cover-note", {"job_id": job_id, "override_budget": False}), calls)
 
 
 if __name__ == "__main__":

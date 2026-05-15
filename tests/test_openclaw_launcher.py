@@ -21,10 +21,11 @@ class OpenClawLauncherTests(unittest.TestCase):
         for command in ("start", "stop", "restart", "logs", "status", "shell", "onboard", "doctor", "migrate-codex", "config"):
             self.assertIn(command, result.stdout)
 
-    def test_config_prints_mcp_and_skill_paths(self):
+    def test_config_prints_plugin_and_skill_paths(self):
         result = self.run_launcher("config")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("jobhunter.openclaw_mcp", result.stdout)
+        self.assertNotIn("jobhunter.openclaw_mcp", result.stdout)
+        self.assertNotIn("mcp_servers.jobhunter", result.stdout)
         self.assertIn("/opt/jobhunter", result.stdout)
         self.assertIn("/openclaw/skills", result.stdout)
         self.assertIn('mode: "off"', result.stdout)
@@ -45,12 +46,12 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("openclaw-gateway dist/index.js onboard --mode local --no-install-daemon", result.stdout)
         self.assertIn("exec -T openclaw-gateway node /app/dist/index.js config set --batch-json", result.stdout)
         self.assertIn("exec -T openclaw-gateway node /app/dist/index.js config patch --stdin", result.stdout)
-        self.assertIn("openclaw-gateway -c", result.stdout)
         self.assertIn("inlineButtons", result.stdout)
         self.assertIn("sendMessage", result.stdout)
         self.assertIn("jobhunter-tools", result.stdout)
-        self.assertIn("jobhunter-mcp", result.stdout)
-        self.assertIn("default_tools_approval_mode", result.stdout)
+        self.assertIn("mcp remove jobhunter", result.stdout)
+        self.assertNotIn("jobhunter.openclaw_mcp", result.stdout)
+        self.assertNotIn("default_tools_approval_mode", result.stdout)
 
 
 if __name__ == "__main__":

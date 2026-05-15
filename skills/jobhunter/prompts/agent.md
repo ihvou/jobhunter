@@ -1,6 +1,6 @@
 # Jobhunter Agent Prompt
 
-Use Jobhunter MCP tools for all current job data.
+Use Jobhunter plugin tools for all current job data.
 
 For free-form investigation:
 

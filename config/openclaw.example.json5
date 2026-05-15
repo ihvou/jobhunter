@@ -7,9 +7,8 @@
 // Phase 1.5 keeps the gateway itself in Docker, so per-agent sandboxing is off:
 // mounting /var/run/docker.sock into the gateway is explicitly forbidden.
 // Safety is enforced by narrow mounts, no shell exec, deny-lists, and bounded
-// Jobhunter MCP tools.
-// Run './bin/openclaw onboard' to apply this plus Codex's per-agent
-// [mcp_servers.jobhunter].default_tools_approval_mode = "approve".
+// Jobhunter dynamic tools.
+// Run './bin/openclaw onboard' to apply this config.
 {
   channels: {
     telegram: {
@@ -22,18 +21,6 @@
       },
       actions: {
         sendMessage: true,
-      },
-    },
-  },
-  mcp: {
-    servers: {
-      jobhunter: {
-        command: "python3",
-        args: ["-m", "jobhunter.openclaw_mcp"],
-        cwd: "/opt/jobhunter",
-        env: {
-          JOBHUNTER_SERVICE_URL: "http://jobhunter-service:8765",
-        },
       },
     },
   },
@@ -71,9 +58,8 @@
   },
   plugins: {
     load: {
-      // Dynamic Jobhunter tools are OpenClaw trajectory-visible. Keep the
-      // top-level mcp.servers and codex mcp add registration too;
-      // Codex-native MCP logs depend on them.
+      // Dynamic Jobhunter tools are the sole Jobhunter tool surface. Do not
+      // register a duplicate mcp.servers.jobhunter entry.
       paths: ["/opt/jobhunter/plugins/jobhunter-tools"],
     },
     entries: {

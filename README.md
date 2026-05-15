@@ -37,7 +37,7 @@ Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 You need: a Telegram bot token, your Telegram chat ID, and a Codex CLI subscription (ChatGPT Pro or equivalent). Optionally, an OpenAI API key for cover notes and the L2 relevance pass.
 
-The runtime is real OpenClaw plus the local `jobhunter-service`. A small local OpenClaw tool plugin exposes Jobhunter actions in OpenClaw trajectories, while the native Codex MCP registration stays in place for Codex-side tool calls and logs. Use `./bin/openclaw` for normal operation. `./bin/jobhunter` remains only as a temporary deprecated wrapper.
+The runtime is real OpenClaw plus the local `jobhunter-service`. A small local OpenClaw tool plugin exposes Jobhunter actions in OpenClaw trajectories; there is no duplicate Codex-native MCP registration. Use `./bin/openclaw` for normal operation. `./bin/jobhunter` remains only as a temporary deprecated wrapper.
 
 ```bash
 # 1. Configure secrets
@@ -91,13 +91,13 @@ After `./bin/openclaw start` and `./bin/openclaw onboard`:
 ./bin/openclaw start      # start jobhunter-service + openclaw-gateway
 ./bin/openclaw stop       # stop both containers
 ./bin/openclaw restart    # rebuild and recreate both containers
-./bin/openclaw config     # print the container-relative MCP + skill config snippet
+./bin/openclaw config     # print the container-relative plugin + skill config snippet
 ./bin/openclaw status     # check service and gateway health
 ./bin/openclaw logs       # follow both logs; use "logs gateway" or "logs service"
 ./bin/openclaw shell      # shell into jobhunter-service; use "shell gateway" for OpenClaw
 ```
 
-The gateway exposes Jobhunter through `python -m jobhunter.openclaw_mcp` running inside the gateway container, with this repo mounted read-only at `/opt/jobhunter`. See [`MIGRATION_DISCOVERY.md`](MIGRATION_DISCOVERY.md), [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md), and [`skills/jobhunter/README.md`](skills/jobhunter/README.md).
+The gateway exposes Jobhunter through the local `jobhunter-tools` OpenClaw plugin, which calls `jobhunter-service` over the Compose network. See [`MIGRATION_DISCOVERY.md`](MIGRATION_DISCOVERY.md), [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md), and [`skills/jobhunter/README.md`](skills/jobhunter/README.md).
 
 ### Telegram commands cheatsheet
 
@@ -243,7 +243,7 @@ python3 -m jobhunter init           # init schema, sources, local profile files
 python3 -m jobhunter collect        # fetch from enabled sources, L1-score, and index capped L2 relevance
 python3 -m jobhunter digest         # print current ranked digest rows as JSON
 python3 -m jobhunter run-once       # init + collect once
-python3 -m jobhunter service        # local HTTP service used by OpenClaw MCP
+python3 -m jobhunter service        # local HTTP service used by OpenClaw plugin tools
 python3 -m jobhunter usage          # local OpenAI usage summary
 ```
 
@@ -285,4 +285,4 @@ Or via the agent: `/agent backup my config and profile`.
 
 ## Mental Model and Architecture
 
-For how the two containers talk to each other, the bounded action set, the L1/L2 split, the MCP tool surface, and the audit-and-revert chain, see [`ARCHITECTURE.md`](ARCHITECTURE.md). The README intentionally does not duplicate that material.
+For how the two containers talk to each other, the bounded action set, the L1/L2 split, the OpenClaw tool surface, and the audit-and-revert chain, see [`ARCHITECTURE.md`](ARCHITECTURE.md). The README intentionally does not duplicate that material.

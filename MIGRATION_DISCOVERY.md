@@ -23,14 +23,14 @@ The parser supports single-line frontmatter keys. `metadata` must be a single-li
 
 ## Tool Registration Model
 
-Important correction: skills teach the agent how to use tools, but they do not register tools by themselves. OpenClaw tools come from built-ins, plugins, or configured MCP servers. For this repo, the safest Phase-1 bridge is:
+Important correction: skills teach the agent how to use tools, but they do not register tools by themselves. OpenClaw tools come from built-ins, plugins, or configured MCP servers. Phase 1 used a stdio MCP bridge as a temporary compatibility path:
 
 1. Keep Python domain logic in `jobhunter-service`.
 2. Expose bounded actions over localhost HTTP.
-3. Register OpenClaw-callable tools through a stdio MCP server, `python -m jobhunter.openclaw_mcp`.
-4. Install `skills/jobhunter/SKILL.md` so the agent knows when and how to call those MCP tools.
+3. Register OpenClaw-callable tools through a stdio MCP server.
+4. Install `skills/jobhunter/SKILL.md` so the agent knows when and how to call those tools.
 
-This avoids committing to the churning Plugin SDK before we have end-to-end parity.
+Phase 2 retired that bridge after plugin parity was proven. Current runtime uses `plugins/jobhunter-tools/` as the sole Jobhunter tool surface because it produces trajectory-visible `tool.call name=jobhunter_*` events.
 
 ## Telegram Channel Config Keys
 
@@ -95,7 +95,7 @@ OpenClaw docs confirm `agents.defaults.sandbox.mode: "non-main"` and Docker-back
 }
 ```
 
-Community issue research shows sandbox/skill handling has had real edge cases around host skill paths and writable skill folders. Keep Jobhunter write authority in the Python service and prefer MCP tools with narrow schemas over broad filesystem or shell access.
+Community issue research shows sandbox/skill handling has had real edge cases around host skill paths and writable skill folders. Keep Jobhunter write authority in the Python service and prefer narrow plugin tools over broad filesystem or shell access.
 
 ## Codex Runtime Integration
 

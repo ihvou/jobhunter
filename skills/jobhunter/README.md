@@ -3,26 +3,37 @@
 This skill teaches OpenClaw how to operate the local Jobhunter service. It assumes:
 
 - `jobhunter-service` is running on the Compose network at `http://jobhunter-service:8765`.
-- The OpenClaw agent has an MCP server named `jobhunter`.
+- The OpenClaw agent has the `jobhunter-tools` plugin enabled.
 - The skill directory is visible to OpenClaw at `/openclaw/skills`.
 
-## MCP Server Config
+## Plugin Config
 
 Validate exact paths with `./bin/openclaw doctor` before editing live config.
 
 ```json5
 {
-  mcp: {
-    servers: {
-      jobhunter: {
-        command: "python3",
-        args: ["-m", "jobhunter.openclaw_mcp"],
-        cwd: "/opt/jobhunter",
-        env: {
-          JOBHUNTER_SERVICE_URL: "http://jobhunter-service:8765"
+  plugins: {
+    load: {
+      paths: ["/opt/jobhunter/plugins/jobhunter-tools"]
+    },
+    entries: {
+      "jobhunter-tools": {
+        enabled: true
+      },
+      codex: {
+        enabled: true,
+        config: {
+          appServer: {
+            approvalPolicy: "on-request",
+            sandbox: "read-only"
+          }
         }
       }
     }
+  },
+  tools: {
+    profile: "messaging",
+    alsoAllow: ["web_search", "web_fetch", "jobhunter-tools"]
   },
   skills: {
     load: {
