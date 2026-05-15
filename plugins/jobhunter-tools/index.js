@@ -112,7 +112,22 @@ export default definePluginEntry({
       name: "jobhunter_get_more_jobs",
       label: "Jobhunter Get More Jobs",
       description:
-        "Return ranked job matches from Jobhunter. For Telegram digest requests, if queue_is_stale is true or queue_freshness_hours >= 6, call jobhunter_collect_all_sources first, then call this again. Render each shown job with the OpenClaw message tool using presentation.blocks[].buttons for Applied, Irrelevant, Snooze, and Cover. Use mark_sent=true only for rows actually shown. Do not use bash or shell for Jobhunter digest requests.",
+        "Return ranked job matches from Jobhunter. " +
+        "STALENESS RULE: response includes queue_freshness_hours, queue_last_collected, queue_is_stale. " +
+        "If queue_is_stale is true OR queue_freshness_hours >= 6, you MUST first call jobhunter_collect_all_sources, " +
+        "then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
+        "\"Collecting fresh jobs, back in ~1 min.\" " +
+        "RENDERING (Telegram digest requests only): for EACH job in jobs[], emit one `message` call with " +
+        "{action: \"send\", target: <chat_id from conversation metadata, e.g. \"telegram:855127987\">, " +
+        "message: <job text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
+        "[{text: \"Applied\", callback_data: \"applied:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>\", style: \"danger\"}], " +
+        "[{text: \"Snooze\", callback_data: \"snooze:<id_prefix>\"}, " +
+        "{text: \"Cover\", callback_data: \"cover:<id_prefix>\", style: \"primary\"}]]}]}}. " +
+        "<id_prefix> is the first 12 lowercase hex characters of the job's id. " +
+        "Use mark_sent=true only for rows actually shown. " +
+        "For read-only diagnostics/analysis/source-or-scoring work, call with mark_sent=false and do NOT emit messages. " +
+        "Never use bash or shell for Jobhunter digest requests.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
@@ -154,7 +169,15 @@ export default definePluginEntry({
       name: "jobhunter_propose_actions",
       label: "Jobhunter Propose Actions",
       description:
-        "Store bounded Jobhunter actions for user approval. For Update sources, propose kind=sources_proposal. For Tune scoring, propose kind=scoring_rule_proposal. Do not call jobhunter_apply_action until explicit user approval.",
+        "Store bounded Jobhunter actions for user approval. For Update sources, propose kind=sources_proposal. " +
+        "For Tune scoring, propose kind=scoring_rule_proposal. Do not call jobhunter_apply_action until explicit " +
+        "user approval. " +
+        "MANDATORY: after this tool returns successfully, you MUST emit a `message` tool call " +
+        "(action=send, target=<chat_id from conversation metadata>) summarizing the proposed action(s) including " +
+        "every action_id from the response so the user can approve. Do NOT end the turn without telling the user " +
+        "the action_id via Telegram — silently storing a proposal the user cannot see is a bug, not success. " +
+        "If you cannot complete the user's underlying request (e.g. unreachable URL, ambiguous instructions), still " +
+        "emit a `message` call explaining what you tried and what's blocking.",
       parameters: schema(
         {
           session_id: { type: "string" },
