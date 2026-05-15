@@ -598,41 +598,145 @@ Keep the old `bin/jobhunter` as a deprecated wrapper for one release that points
 - `./bin/jobhunter` is a compatibility wrapper for `./bin/openclaw` for one release.
 - Done at `5844bd0` and trajectory bridge completed at `7d432d5`.
 
-## Phase 3 — Plug in OpenClaw's tool ecosystem (1 week)
+## Phase 3 — Plug in OpenClaw's tool ecosystem
 
-Use OpenClaw's existing plugins to replace our custom collectors and improve quality.
+The full Phase 3 vision in the original spec covered firecrawl, exa, agenticmail, Gmail Pub/Sub, and source-validation. Based on Phase 1.5b/1.5c/2 learnings, Phase 3 is split into two runs to keep each Codex session under 4h and reduce blast radius:
 
-### 3a. Replace custom http_fetch with `firecrawl` + `browser`
+- **Phase 3a (this section)** — firecrawl + exa + plugin-allowlist tightening + email-alert parser fix. 3–4 hours of Codex work.
+- **Phase 3b (deferred)** — Gmail Pub/Sub webhook + `agenticmail` skill. Needs Google Cloud setup, OAuth scopes, public webhook URL — too heavy for a single session. Defer until Phase 3a is stable and the user has GCP project provisioned.
 
-The jobhunter-service `http_fetch` was always weaker than `firecrawl` (renders JS, extracts structured data, handles SPAs). Update the skill's `agent.md` prompt to instruct Codex: *"For deep web research, prefer `firecrawl` or `browser` over plain http_fetch. firecrawl renders JS and returns structured page content."*
+### Lessons folded in from 1.5b/1.5c/2 (read before executing 3a)
 
-This directly addresses the user's complaint that the bot's source discovery is weaker than direct Claude desktop research. firecrawl + exa + browser are the missing tools.
+1. **Plugin tools, not Codex-native MCP.** Phase 2 (commit 718c451) retired the Codex-native MCP path. New plugins install via OpenClaw's plugin registry, NOT via `codex mcp add`.
+2. **Tool descriptions are the only reliable instruction surface.** SKILL.md is loaded lazily and the agent often skips it. Put firecrawl/exa routing rules in the plugin tool descriptions, NOT only in SKILL.md.
+3. **`tools.profile: "messaging"` is narrow.** Every new plugin id must be added to `tools.alsoAllow` or its tools stay invisible to the agent.
+4. **Verification is trajectory-based, never chat-based.** Codex/gpt-5.5 will fabricate plausible answers when tools aren't actually wired. Real acceptance evidence is `tool.call name=firecrawl_*` events in `/home/node/.openclaw/agents/main/sessions/*.trajectory.jsonl`.
+5. **Codex's native bash is gated by `appServer.approvalPolicy: on-request`**, not `tools.exec.security: deny`. Both stay.
+6. **`plugins.allow` was empty** during Phase 2 verification, which let 4 plugins (browser, phone-control, talk-voice, device-pair) auto-load that we never asked for. Phase 3a sets an EXPLICIT allowlist.
+7. **API keys**: firecrawl and exa require keys. Free tiers are sufficient for jobhunter scale. Plugin must refuse to load gracefully if its key is missing; don't fake-install.
 
-### 3b. Replace IMAP polling with Gmail Pub/Sub + `agenticmail`
+### 3a.1. Install firecrawl plugin
 
-The current `collect_imap_alerts` polls every collection cycle. With OpenClaw's Gmail Pub/Sub, emails arrive as PUSH events:
+- Install via OpenClaw's plugin install mechanism. Pin the version explicitly (no `@latest` — supply-chain risk per the existing audit warning).
+- Add `FIRECRAWL_API_KEY` to `docker-compose.yml` under `openclaw-gateway.environment` as `${FIRECRAWL_API_KEY:-}`.
+- Document in `.env.example` that the user needs to provide this for Phase 3a.
+- Configure conservative limits (small max page size, low concurrency) to stay inside the free tier.
+- If the key is missing, plugin should refuse to load gracefully; document the failure mode in `MIGRATION_NOTES.md`.
 
-- Configure Gmail Pub/Sub per `docs/automation/gmail-pubsub.md`.
-- Each new email triggers a webhook → skill tool `process_email(msg_id, sender, subject, body)`.
-- Service's `process_email` endpoint runs through the same template-matching pipeline (template lookup, `jobs_from_template` or generic fallback).
-- The 30+ min polling latency drops to seconds.
-- `imap_last_uid` field can be retired (replaced by per-message msg_id idempotency).
+Acceptance: `node dist/index.js config get plugins.entries.firecrawl` returns the configured entry; gateway restart shows firecrawl in the loaded plugins list.
 
-For email parsing itself: try the `agenticmail` skill from ClawHub if it covers HTML→jobs extraction natively. If not, keep our `email_parser_configs` DSL and just feed it from push events.
+### 3a.2. Install exa plugin
 
-### 3c. Add `exa` for search-augmented discovery
+Same pattern as firecrawl: pin version, `EXA_API_KEY` env var, conservative limits, graceful fallback if key missing.
 
-In the discovery prompt, instruct Codex to use `exa` for niche source discovery queries: *"For Tier 2/3 search, prefer `exa` over generic web search — better recall on niche communities."*
+Acceptance: same shape as firecrawl.
 
-### 3d. Add `agent-browser` or `firecrawl` for source validation
+### 3a.3. Tighten plugins.allow + alsoAllow
 
-When a candidate source is proposed, validate it via `firecrawl` (renders JS, sees real content) rather than our SPA-detection heuristic.
+In `bin/openclaw` (the `patch_jobhunter_openclaw_config` payload) AND `config/openclaw.example.json5`:
 
-### 3e. Phase 3 acceptance
+```json
+{
+  "plugins": {
+    "allow": ["codex", "telegram", "jobhunter-tools", "firecrawl", "exa", "memory-core"],
+    "entries": { /* existing entries plus enabled: true for firecrawl and exa */ }
+  },
+  "tools": {
+    "alsoAllow": ["web_search", "web_fetch", "jobhunter-tools", "firecrawl", "exa"]
+  }
+}
+```
 
-- Source discovery via `/agent please update sources` returns 5+ candidates with at least 2 from Tier 2/3 niche sources.
-- A new email arrives → webhook fires → job appears in DB within 10 seconds (vs current 30-min worst case).
-- The 65 "needs template config" rows from the live DB drop to ≤5 after one week of operation (because per-sender templates get authored via skill).
+Acceptance: gateway restart logs `http server listening (6 plugins: codex, exa, firecrawl, jobhunter-tools, memory-core, telegram; ...)` or document why an extra plugin must be retained. The `plugins.allow is empty; discovered non-bundled plugins may auto-load` startup warning must disappear.
+
+### 3a.4. Update jobhunter-tools tool descriptions for firecrawl/exa awareness
+
+In `plugins/jobhunter-tools/index.js`, update `jobhunter_propose_actions` description to mention:
+
+- "If `web_fetch` returns 403/404 on a candidate source URL, retry once with `firecrawl` before defaulting to `source_type="community"` + `status="test"`."
+- "For 'find me sources for X' requests, use `exa` to search first, then propose the top results via `jobhunter_propose_actions`."
+
+Do NOT add this guidance to SKILL.md only — see lesson 2 above.
+
+Add regression-guard assertions in `plugins/jobhunter-tools/tests/index.test.js` that the propose_actions description contains the substrings `"firecrawl"` and `"exa"`.
+
+### 3a.5. Fix email-alert parser noise
+
+`email-job-alerts` source is producing wrapper rows that should never have been parsed as jobs. Examples from the live DB:
+- `"Read more"` (LinkedIn link text)
+- `"30+ new jobs match your preferences"` (LinkedIn footer)
+- `"Top job picks for you"` (LinkedIn header)
+- Rows with `length(title) < 8`
+
+In `jobhunter/sources.py`'s IMAP/email parser, add a post-parse filter that drops these patterns BEFORE insertion. Conservative keyword list — false positives mean dropping real jobs.
+
+Add a test in `tests/test_sources.py` that constructs a fake LinkedIn email chunk with one real-looking job + the wrapper strings and asserts only the real job survives.
+
+Provide a one-shot operator SQL in MIGRATION_NOTES.md to clean existing noise rows:
+
+```sql
+UPDATE jobs SET status='irrelevant'
+WHERE source_id='email-job-alerts'
+  AND (title='Read more' OR title LIKE '%new jobs match%'
+       OR title LIKE '%Top job picks%' OR length(title) < 8)
+  AND status='new'
+```
+
+This is run once via `jobhunter_query_sql` after deploy. The agent should not run it autonomously.
+
+### 3a.6. Phase 3a acceptance (the DOU end-to-end test)
+
+Phase 1.5b surfaced that DOU is unreachable from the Docker container because Cloudflare/geo-blocks 403 the bare `web_fetch`. Phase 3a should fix that via firecrawl. Verify via a real Telegram round-trip:
+
+1. User sends `/agent please add https://jobs.dou.ua/vacancies/?category=Product%20Manager&from=maybe to sources`.
+2. Agent uses firecrawl on the URL → succeeds → calls `jobhunter_propose_actions` with `kind=sources_proposal`, `type=community` (or `rss` if a feed is discovered), `status=test` → emits message asking for approval.
+3. User replies `approve <action_id>`.
+4. Agent calls `jobhunter_apply_action` → success → emits confirmation message.
+5. Trigger a collection. Verify ≥1 DOU job in the `jobs` table with non-zero score.
+
+Acceptance evidence to paste in the commit message:
+- Telegram session id where the DOU propose→approve→apply succeeded
+- Trajectory excerpt with `tool.call name=firecrawl_*` event
+- SQL count of DOU jobs in `jobs` table after collection
+
+**If firecrawl also can't fetch DOU** (paid tier required, or DOU blocks firecrawl too), document the constraint in `MIGRATION_NOTES.md` and accept that DOU moves to Phase 3b's agenda. Do NOT hack `validate_source_row` to bypass the reachability probe — softening it is a separate decision for a separate change.
+
+### 3a — out of scope
+
+- Gmail Pub/Sub webhook (Phase 3b)
+- agenticmail skill install (Phase 3b, after confirming the parser fix doesn't make it unnecessary)
+- L1 scoring rule patches (the user drives these via the propose-approve-apply flow in the bot — that flow is already proven)
+- Soft-mode reachability check for `status=test` sources (separate change, not in scope)
+
+### 3a — verification before declaring done
+
+```bash
+python3 -m unittest discover -s tests
+(cd plugins/jobhunter-tools && node --test tests/index.test.js)
+docker compose --profile openclaw config --quiet
+git diff --check
+git status -sb
+```
+
+All must pass. Then the DOU Telegram smoke test (§3a.6).
+
+### 3a — time budget
+
+4 hours of Codex work. Stop and write up blockers at 4h regardless of completeness. Partial progress is fine; hallucinated "done" is not.
+
+### 3a — branch and merge policy
+
+- Cut a NEW branch `phase-3a-firecrawl-exa` from `phase-2-cleanup` at HEAD.
+- Do not touch `phase-2-cleanup`, `openclaw-phase-1-5`, or `main`.
+- After all commits land and Phase 3a acceptance passes, push the branch to `origin` and report final SHA. The user reviews and decides when to merge.
+
+### Phase 3b — Deferred (do not run without explicit go-ahead)
+
+Original 3b/3d items, deferred pending GCP project setup + 3a stability:
+
+- **Gmail Pub/Sub webhook**: configure per `docs/automation/gmail-pubsub.md`; each new email triggers a webhook → skill tool `process_email(msg_id, sender, subject, body)`; service's `process_email` endpoint runs the existing template-matching pipeline. Replaces IMAP polling. Drops latency from 30+ min to seconds.
+- **`agenticmail` skill**: if its HTML→jobs extraction is stronger than our `email_parser_configs` DSL after the parser fix, swap. Otherwise keep our DSL and feed it from push events.
+- **firecrawl-backed source validation**: when a `sources_proposal` is applied, replace the existing HEAD-probe in `validate_source_row` with a firecrawl probe for community-type sources, so geo/WAF-blocked URLs can still be added if firecrawl can reach them.
 
 ## Phase 4 — Recurring + multi-agent for leadhunter (1 week)
 
