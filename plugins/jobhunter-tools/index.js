@@ -181,20 +181,79 @@ export default definePluginEntry({
       name: "jobhunter_propose_actions",
       label: "Jobhunter Propose Actions",
       description:
-        "Store bounded Jobhunter actions for user approval. For Update sources, propose kind=sources_proposal. " +
-        "For Tune scoring, propose kind=scoring_rule_proposal. Do not call jobhunter_apply_action until explicit " +
-        "user approval. " +
-        "MANDATORY: after this tool returns successfully, you MUST emit a `message` tool call " +
-        "(action=send, target=<chat_id from conversation metadata>) summarizing the proposed action(s) including " +
-        "every action_id from the response so the user can approve. Do NOT end the turn without telling the user " +
-        "the action_id via Telegram — silently storing a proposal the user cannot see is a bug, not success. " +
-        "If you cannot complete the user's underlying request (e.g. unreachable URL, ambiguous instructions), still " +
-        "emit a `message` call explaining what you tried and what's blocking.",
+        "Store bounded Jobhunter actions for user approval. " +
+        "`actions` MUST be an array of OBJECTS (not strings, not JSON-stringified). Each object MUST have: " +
+        "`kind` (one of: sources_proposal, scoring_rule_proposal, profile_edit, directive_edit, rescore_jobs, " +
+        "bulk_update_jobs, human_followup), optional `summary` (≤300 chars human-readable), and `payload` " +
+        "(kind-specific object — see below). The server silently drops any element that is not a dict with a " +
+        "valid `kind`, so getting the shape right matters. " +
+        "\n\nEXAMPLE for adding a source (sources_proposal):\n" +
+        "{\n" +
+        "  \"kind\": \"sources_proposal\",\n" +
+        "  \"summary\": \"Add DOU Product Manager as a community test source\",\n" +
+        "  \"payload\": {\n" +
+        "    \"operations\": [{\n" +
+        "      \"op\": \"add\",\n" +
+        "      \"source\": {\n" +
+        "        \"id\": \"dou-product-manager\",\n" +
+        "        \"name\": \"DOU Product Manager Jobs\",\n" +
+        "        \"type\": \"community\",\n" +
+        "        \"url\": \"https://jobs.dou.ua/vacancies/?category=Product%20Manager&from=maybe\",\n" +
+        "        \"status\": \"test\"\n" +
+        "      }\n" +
+        "    }]\n" +
+        "  }\n" +
+        "}\n" +
+        "`payload.operations[].op` is one of: add, modify, disable. " +
+        "`source.type` is one of: rss, json_api, community, greenhouse, ashby, lever, workable, imap. " +
+        "`source.status` is one of: active, test, disabled. " +
+        "For Update sources, propose kind=sources_proposal. For Tune scoring, kind=scoring_rule_proposal. " +
+        "Do not call jobhunter_apply_action until explicit user approval. " +
+        "SOURCE-FROM-URL FLOW: do NOT pre-validate scraping with web_fetch first. The Python collector has " +
+        "different headers, robots-txt handling, and fallback parsers than web_fetch; a 403/404/timeout from " +
+        "web_fetch does NOT mean the source is unusable. Propose with status=\"test\" and let the collector try. " +
+        "If web_fetch fails or you cannot determine source_type, default to type=\"community\" and propose anyway. " +
+        "MANDATORY EMIT: after this tool returns, inspect `actions[]` in the response — each entry has an `id` " +
+        "field (the action_id). Your NEXT action MUST be a `message` tool call (action=send, target=<chat_id from " +
+        "conversation metadata>) listing every action_id with a one-line human summary so the user can approve. " +
+        "Send the approval prompt as **plain text**, not as inline buttons. Approvals are low-frequency, " +
+        "high-context decisions; the user may want to qualify or amend the approval (\"approve 39 but switch " +
+        "type to rss\", \"approve 39 and run collection now\", \"what's the risk if I leave 39 as test?\"). Forcing " +
+        "a binary button cuts off that dialog. Inline buttons are for per-job digest triage only " +
+        "(Applied/Irrelevant/Snooze/Cover), NOT for proposal approval. " +
+        "If the response has `count: 0` and empty `actions[]`, that means the server REJECTED your input shape — " +
+        "still emit a `message` to the user explaining you tried to propose but the shape was wrong, then retry " +
+        "with a corrected payload. " +
+        "Do NOT continue reasoning, do NOT plan further checks, do NOT end the turn without a `message` call.",
       parameters: schema(
         {
           session_id: { type: "string" },
           user_intent: { type: "string" },
-          actions: { type: "array" },
+          actions: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["kind"],
+              properties: {
+                kind: {
+                  type: "string",
+                  enum: [
+                    "sources_proposal",
+                    "scoring_rule_proposal",
+                    "profile_edit",
+                    "directive_edit",
+                    "rescore_jobs",
+                    "bulk_update_jobs",
+                    "human_followup",
+                  ],
+                },
+                summary: { type: "string", maxLength: 300 },
+                payload: { type: "object" },
+              },
+              additionalProperties: false,
+            },
+            minItems: 1,
+          },
         },
         ["actions"],
       ),
@@ -204,7 +263,19 @@ export default definePluginEntry({
     register(api, {
       name: "jobhunter_apply_action",
       label: "Jobhunter Apply Action",
-      description: "Apply one previously proposed Jobhunter action after explicit user approval.",
+      description:
+        "Apply one previously proposed Jobhunter action after explicit user approval. " +
+        "Always pass confirm=true when the user has approved (e.g. they replied 'approve <id>', 'yes', 'ok'). " +
+        "MANDATORY EMIT: after this tool returns — regardless of success or failure — your NEXT action MUST be " +
+        "a `message` tool call (action=send, target=<chat_id from conversation metadata>) telling the user the " +
+        "outcome in plain text. " +
+        "If `ok=true`: confirm what was applied and what happens next (e.g. \"Applied action 39. Source added; " +
+        "run 'Get more jobs' to trigger a collection.\"). " +
+        "If `ok=false`: tell the user the exact error from `message` field of the response, do NOT fabricate " +
+        "optimistic status (\"applying now\", \"once it's in\") if the apply already failed — be honest. If you " +
+        "want to retry with a corrected proposal, propose a new action FIRST (via jobhunter_propose_actions), " +
+        "then emit a message asking for approval of the new id. " +
+        "Do NOT end the turn without a `message` call. Silent endings are a bug.",
       parameters: schema(
         {
           action_id: { type: "integer" },
