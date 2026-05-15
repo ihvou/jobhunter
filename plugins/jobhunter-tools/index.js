@@ -1,7 +1,15 @@
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+function definePluginEntry(entry) {
+  return {
+    id: entry.id,
+    name: entry.name,
+    description: entry.description,
+    configSchema: { type: "object", additionalProperties: false, properties: {} },
+    register: entry.register,
+  };
+}
 
 const SERVICE_URL = (process.env.JOBHUNTER_SERVICE_URL || "http://jobhunter-service:8765").replace(/\/+$/, "");
-const COLLECT_SOFT_TIMEOUT_MS = 28000;
+export const COLLECT_SOFT_TIMEOUT_MS = 28000;
 
 let activeCollection = null;
 
@@ -55,7 +63,7 @@ async function get(path) {
   return parsed;
 }
 
-async function resolveJobId(params) {
+export async function resolveJobId(params) {
   if (typeof params.job_id === "string" && params.job_id.trim()) {
     return params.job_id.trim();
   }
@@ -79,7 +87,11 @@ function runCollection() {
   return activeCollection;
 }
 
-async function collectWithSoftTimeout() {
+export function resetCollectionForTests() {
+  activeCollection = null;
+}
+
+export async function collectWithSoftTimeout(timeoutMs = COLLECT_SOFT_TIMEOUT_MS) {
   let timer = null;
   const timeout = new Promise((resolve) => {
     timer = setTimeout(() => {
@@ -88,7 +100,7 @@ async function collectWithSoftTimeout() {
         completed: false,
         message: "Collection is still running in the background. Call jobhunter_get_more_jobs again shortly.",
       });
-    }, COLLECT_SOFT_TIMEOUT_MS);
+    }, timeoutMs);
   });
   const result = await Promise.race([runCollection(), timeout]);
   if (timer) {
@@ -117,7 +129,7 @@ export default definePluginEntry({
         "If queue_is_stale is true OR queue_freshness_hours >= 6, you MUST first call jobhunter_collect_all_sources, " +
         "then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
         "\"Collecting fresh jobs, back in ~1 min.\" " +
-        "RENDERING (Telegram digest requests only): for EACH job in jobs[], emit one `message` call with " +
+        "RENDERING (Telegram digest requests only): for EACH job in jobs[], emit one `message` call using presentation.blocks with " +
         "{action: \"send\", target: <chat_id from conversation metadata, e.g. \"telegram:855127987\">, " +
         "message: <job text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
         "[{text: \"Applied\", callback_data: \"applied:<id_prefix>\", style: \"success\"}, " +
