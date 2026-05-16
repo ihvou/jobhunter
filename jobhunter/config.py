@@ -40,6 +40,7 @@ class AppConfig:
     telegram_allowed_chat_id: Optional[int] = None
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    firecrawl_api_key: str = ""
     digest_max_jobs: int = 10
     collect_interval_minutes: int = 240
     collect_stale_minutes: int = 30
@@ -138,6 +139,7 @@ def load_app_config() -> AppConfig:
         telegram_allowed_chat_id=parse_optional_int(os.getenv("TELEGRAM_ALLOWED_CHAT_ID")),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", settings.get("openai_model", "gpt-4o-mini")),
+        firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY", ""),
         digest_max_jobs=env_or_setting("JOBHUNTER_DIGEST_MAX_JOBS", settings, "digest_max_jobs", 10, int),
         collect_interval_minutes=env_or_setting(
             "JOBHUNTER_COLLECT_INTERVAL_MINUTES", settings, "collect_interval_minutes", 240, int

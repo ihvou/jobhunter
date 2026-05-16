@@ -1,5 +1,6 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 import plugin, { collectWithSoftTimeout, resetCollectionForTests, resolveJobId } from "../index.js";
 
@@ -14,6 +15,7 @@ const expectedToolNames = [
   "jobhunter_mark_job",
   "jobhunter_cover_note",
   "jobhunter_query_sql",
+  "jobhunter_process_email",
 ];
 
 const originalFetch = globalThis.fetch;
@@ -43,6 +45,8 @@ function jsonResponse(payload, status = 200) {
 test("registers the expected Jobhunter tools", () => {
   const names = registeredTools().map((tool) => tool.name);
   assert.deepEqual(names, expectedToolNames);
+  const manifest = JSON.parse(fs.readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+  assert.deepEqual(manifest.contracts.tools, expectedToolNames);
 });
 
 test("tool descriptions preserve rendering and proposal contracts", () => {
@@ -83,6 +87,11 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
       new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
       `propose_actions description must include "${phrase}"`,
     );
+  }
+
+  const processEmailDescription = tools.get("jobhunter_process_email").description;
+  for (const phrase of ["Gmail Pub/Sub", "email parser", "scores"]) {
+    assert.match(processEmailDescription, new RegExp(phrase));
   }
 });
 

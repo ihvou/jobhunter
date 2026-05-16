@@ -62,6 +62,8 @@ OpenClaw owns the Telegram connection. After onboarding, send `Get more jobs` or
 | `TELEGRAM_BOT_TOKEN` | yes | From [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_ALLOWED_CHAT_ID` | yes | Your numeric chat ID; restricts the bot to your chat only |
 | `OPENAI_API_KEY` | optional | Enables cover-note generation and the OpenAI-backed L2 relevance pass. Without it, L2 falls back to a coarser local heuristic and cover notes use a generic template. |
+| `FIRECRAWL_API_KEY` | optional | Lets OpenClaw and `jobhunter-service` handle JS-heavy or Cloudflare-blocked community pages such as DOU. |
+| `EXA_API_KEY` | optional | Lets OpenClaw search for new source candidates through Exa. |
 
 All other env vars (model, budget caps, agent quotas, IMAP credentials) have sensible defaults; see `.env.example` if you want to tune them. Source fetches use `JOBHUNTER_ROBOTS_TXT_RESPECT=ignore` by default because the bot does not crawl, index, or recursively follow links: it fetches one configured public/API/RSS/ATS URL per source on a human-triggered run, usually only a few requests per source per day. Politeness is handled by the per-host rate limiter, 30s timeout, 8MB response cap, SSRF guard, and source approval flow. If you specifically want robots.txt enforcement, set `JOBHUNTER_ROBOTS_TXT_RESPECT=trust` or `strict`.
 

@@ -442,8 +442,15 @@ def validate_source_row(row: Dict, source_reachable: Optional[Callable[[str], bo
     validate_source_url(row["url"], row["type"])
     if row["type"] != "imap":
         validate_safe_url(row["url"])
-        if source_reachable and not source_reachable(row["url"]):
+        if source_reachable and not source_row_reachable(source_reachable, row):
             raise SourceError("HEAD probe failed")
+
+
+def source_row_reachable(source_reachable: Callable, row: Dict) -> bool:
+    try:
+        return bool(source_reachable(row["url"], row.get("type", ""), row.get("status", "")))
+    except TypeError:
+        return bool(source_reachable(row["url"]))
 
 
 def archive_file(path: Path) -> Path:

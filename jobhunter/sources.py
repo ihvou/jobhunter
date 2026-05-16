@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urljoin, urlparse
 
+from .firecrawl import FirecrawlError, firecrawl_available, firecrawl_scrape_markdown
 from .logging_setup import log_context
 from .models import Job, SourceConfig
 
@@ -408,20 +409,22 @@ def collect_ashby(source: SourceConfig, organization: str) -> List[Job]:
 
 
 def collect_link_page(source: SourceConfig) -> List[Job]:
-    html = fetch_source_text(source)
+    text, used_firecrawl = fetch_link_page_text(source)
     parser = HTMLLinkExtractor()
-    parser.feed(html)
-    job_links = [(href, text) for href, text in parser.links if clean_title(text) and looks_like_job_link(text, href)]
-    if len(job_links) < 2 and len(html.encode("utf-8")) < 8192 and looks_like_spa_shell(html):
+    parser.feed(text)
+    links = parser.links + markdown_links(text)
+    job_links = [(href, link_text) for href, link_text in links if clean_title(link_text) and looks_like_job_link(link_text, href)]
+    if not used_firecrawl and len(job_links) < 2 and len(text.encode("utf-8")) < 8192 and looks_like_spa_shell(text):
         raise SourceError("Source appears to be a JavaScript SPA - not supported")
     jobs = []
     seen = set()
-    for href, text in job_links:
-        title = clean_title(text)
+    for href, link_text in job_links:
+        title = clean_title(strip_markdown(link_text))
         url = urljoin(source.url, href)
         if url in seen:
             continue
         seen.add(url)
+        description = surrounding_text(text, title, 1200)
         jobs.append(
             Job(
                 source_id=source.id,
@@ -429,10 +432,10 @@ def collect_link_page(source: SourceConfig) -> List[Job]:
                 external_id=url,
                 url=url,
                 title=title[:180],
-                company=infer_company(title, html[:2000]) if source.type == "community" else source.name,
-                location=infer_location(title),
-                remote_policy=infer_remote_policy(title),
-                description=strip_html(title),
+                company=infer_company(title, text[:4000]) if source.type == "community" else source.name,
+                location=infer_location(title + " " + description),
+                remote_policy=infer_remote_policy(title + " " + description),
+                description=strip_html(strip_markdown(description or title))[:4000],
             )
         )
         if len(jobs) >= 30:
@@ -440,10 +443,60 @@ def collect_link_page(source: SourceConfig) -> List[Job]:
     return jobs
 
 
+def fetch_link_page_text(source: SourceConfig) -> tuple:
+    try:
+        return fetch_source_text(source), False
+    except SourceError as exc:
+        if source.type != "community" or not firecrawl_available():
+            raise
+        try:
+            validate_safe_url(source.url)
+            result = firecrawl_scrape_markdown(source.url)
+            log_context(
+                LOGGER,
+                logging.INFO,
+                "community_source_firecrawl_fetch_succeeded",
+                source_id=source.id,
+                url=source.url,
+                status=result.get("status"),
+            )
+            return result["text"], True
+        except (FirecrawlError, SourceError) as firecrawl_exc:
+            log_context(
+                LOGGER,
+                logging.WARNING,
+                "community_source_firecrawl_fetch_failed",
+                source_id=source.id,
+                url=source.url,
+                direct_error=str(exc),
+                firecrawl_error=str(firecrawl_exc),
+            )
+            raise exc
+
+
+def markdown_links(text: str) -> List[tuple]:
+    links = []
+    for match in re.finditer(r"(?<!!)\[([^\]]{2,300})\]\((https?://[^)\s]+)\)", text or ""):
+        title = strip_markdown(match.group(1))
+        url = match.group(2).rstrip(".,;]")
+        if title and url:
+            links.append((url, title))
+    return links
+
+
+def strip_markdown(text: str) -> str:
+    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text or "")
+    text = re.sub(r"[*_`]+", "", text)
+    return clean_title(text)
+
+
 def looks_like_job_link(title: str, href: str) -> bool:
-    text = "%s %s" % (title.lower(), href.lower())
-    return any(
-        token in text
+    title_lower = title.lower()
+    href_lower = href.lower()
+    if is_navigation_link_title(title_lower):
+        return False
+    title_matches = any(
+        token in title_lower
         for token in (
             "job",
             "career",
@@ -458,6 +511,22 @@ def looks_like_job_link(title: str, href: str) -> bool:
             "llm",
         )
     )
+    detail_url_matches = any(token in href_lower for token in ("/jobs/", "/careers/", "/positions/", "/job/"))
+    detail_url_matches = detail_url_matches or ("/companies/" in href_lower and "/vacancies/" in href_lower)
+    return title_matches or detail_url_matches
+
+
+def is_navigation_link_title(title_lower: str) -> bool:
+    compact = clean_title(title_lower).lower()
+    if compact in {"rss", "remote", "віддалено", "без досвіду"}:
+        return True
+    if re.fullmatch(r"<?\s*\d+\s*(?:року|роки|years?)", compact):
+        return True
+    if re.fullmatch(r"\d+…\d+\s*(?:роки|років|years?)", compact):
+        return True
+    if re.fullmatch(r"\d+\+\s*(?:років|years?)", compact):
+        return True
+    return compact in {"київ", "львів", "дніпро", "odesa", "warsaw", "berlin", "london"}
 
 
 def looks_like_spa_shell(html: str) -> bool:

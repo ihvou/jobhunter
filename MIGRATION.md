@@ -730,13 +730,15 @@ All must pass. Then the DOU Telegram smoke test (§3a.6).
 - Do not touch `phase-2-cleanup`, `openclaw-phase-1-5`, or `main`.
 - After all commits land and Phase 3a acceptance passes, push the branch to `origin` and report final SHA. The user reviews and decides when to merge.
 
-### Phase 3b — Deferred (do not run without explicit go-ahead)
+### Phase 3b — Firecrawl-backed community sources and email trigger bridge
 
-Original 3b/3d items, deferred pending GCP project setup + 3a stability:
+Phase 3b keeps the GCP/OAuth setup as an operator-controlled step, but wires the local software surface needed for it:
 
-- **Gmail Pub/Sub webhook**: configure per `docs/automation/gmail-pubsub.md`; each new email triggers a webhook → skill tool `process_email(msg_id, sender, subject, body)`; service's `process_email` endpoint runs the existing template-matching pipeline. Replaces IMAP polling. Drops latency from 30+ min to seconds.
-- **`agenticmail` skill**: if its HTML→jobs extraction is stronger than our `email_parser_configs` DSL after the parser fix, swap. Otherwise keep our DSL and feed it from push events.
-- **firecrawl-backed source validation**: when a `sources_proposal` is applied, replace the existing HEAD-probe in `validate_source_row` with a firecrawl probe for community-type sources, so geo/WAF-blocked URLs can still be added if firecrawl can reach them.
+- **Firecrawl-backed source validation**: when a `sources_proposal` is applied, community sources are checked by direct HEAD/GET first and by bounded Firecrawl scrape second. RSS/API/ATS sources still use the direct probe only.
+- **Firecrawl-backed community collection**: community pages that direct HTTP cannot fetch are retried through Firecrawl. Markdown links from Firecrawl are parsed into normal job rows and scored through the existing L1/L2 path.
+- **Gmail Pub/Sub bridge**: `jobhunter-service` exposes `POST /email/process`, and the OpenClaw plugin exposes `jobhunter_process_email(sender, subject, body, message_id?, date?, source_id?)`. Gmail hooks or a future email skill should pass parsed email content to that tool.
+- **`agenticmail` decision**: the pinned OpenClaw image does not include an `agenticmail` plugin/skill. Keep the existing parser DSL and feed it from hooks for now; if a real agenticmail package is later adopted, it should call `jobhunter_process_email` instead of writing directly to the database.
+- **Operator setup still required**: run OpenClaw's Gmail Pub/Sub setup only after providing the GCP project/OAuth/public webhook details, for example `openclaw webhooks gmail setup --account <account>`. Do not enable a public hook without a dedicated token and trusted ingress.
 
 ## Phase 4 — Recurring + multi-agent for leadhunter (1 week)
 

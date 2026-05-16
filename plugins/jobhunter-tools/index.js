@@ -377,5 +377,27 @@ export default definePluginEntry({
       ),
       execute: async (_toolCallId, params) => jsonResult(await post("/query-sql", params)),
     });
+
+    register(api, {
+      name: "jobhunter_process_email",
+      label: "Jobhunter Process Email",
+      description:
+        "Ingest one job-alert email that arrived through OpenClaw Gmail Pub/Sub, hooks, or an email skill. " +
+        "Pass the parsed sender, subject, body, and optional message_id/date. The service runs its existing " +
+        "email parser templates, drops known wrapper noise, inserts any jobs, scores them, and may run capped L2 relevance. " +
+        "Use this for email-triggered job alerts only; it does not send email or access Gmail directly.",
+      parameters: schema(
+        {
+          source_id: { type: "string" },
+          sender: { type: "string" },
+          subject: { type: "string" },
+          body: { type: "string" },
+          message_id: { type: "string" },
+          date: { type: "string" },
+        },
+        ["sender", "subject", "body"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/email/process", params)),
+    });
   },
 });

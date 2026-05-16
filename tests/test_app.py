@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from jobhunter.app import JobHunter
 from jobhunter.config import AppConfig, CostConfig
@@ -98,6 +99,44 @@ class AppTests(unittest.TestCase):
             )
 
             self.assertTrue(bot.should_l2_score(source, job, 19, 0))
+
+    def test_community_source_reachability_falls_back_to_firecrawl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.firecrawl_api_key = "fc-test"
+            bot = JobHunter(config)
+
+            with mock.patch.object(bot, "source_candidate_direct_reachable", return_value=False), mock.patch(
+                "jobhunter.app.validate_safe_url"
+            ), mock.patch(
+                "jobhunter.app.firecrawl_scrape_markdown",
+                return_value={"text": "x" * 100, "status": 200},
+            ):
+                self.assertTrue(bot.source_candidate_reachable("https://jobs.dou.ua/vacancies/", "community", "test"))
+
+    def test_process_email_alert_ingests_and_scores_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.sources_path.write_text(
+                '[{"id":"email-job-alerts","name":"Email Alerts","type":"imap","url":"imap://job-alerts"}]',
+                encoding="utf-8",
+            )
+            bot = JobHunter(config)
+            bot.initialize()
+
+            result = bot.process_email_alert(
+                "email-job-alerts",
+                "jobs@example.com",
+                "Product Manager jobs",
+                '<a href="https://example.com/jobs/pm">Senior Product Manager</a>',
+                "<message-1>",
+            )
+
+            self.assertEqual(result["jobs_found"], 1)
+            self.assertEqual(result["inserted"], 1)
+            rows = bot.database.recent_jobs(5)
+            self.assertEqual(rows[0]["title"], "Senior Product Manager")
+            self.assertGreaterEqual(rows[0]["score"], 0)
 
 
 if __name__ == "__main__":

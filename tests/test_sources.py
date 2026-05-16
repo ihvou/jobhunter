@@ -100,6 +100,34 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(jobs), 2)
         self.assertEqual(jobs[0].url, "https://example.com/roles/1")
 
+    def test_collect_link_page_uses_firecrawl_for_blocked_community_source(self):
+        source = SourceConfig(
+            id="dou-product",
+            name="DOU Product",
+            type="community",
+            url="https://jobs.dou.ua/vacancies/?category=Product%20Manager",
+        )
+        markdown = """
+# 244 vacancies in Product Manager
+
+[RSS](https://jobs.dou.ua/vacancies/feeds/?category=Product%20Manager)
+[Київ](https://jobs.dou.ua/vacancies?city=Kyiv&category=Product+Manager)
+[1…3 роки](https://jobs.dou.ua/vacancies?category=Product+Manager&exp=1-3)
+[Product manager / Product Owner цифрових продуктів SAP](https://jobs.dou.ua/companies/mod-of-ukraine/vacancies/353937/?from=list_hot)
+
+Опис вакансії: We build digital tools for logistics.
+"""
+        with mock.patch("jobhunter.sources.fetch_source_text", side_effect=SourceError("HTTP 403")), mock.patch(
+            "jobhunter.sources.firecrawl_available", return_value=True
+        ), mock.patch("jobhunter.sources.validate_safe_url"), mock.patch(
+            "jobhunter.sources.firecrawl_scrape_markdown", return_value={"text": markdown, "status": 200}
+        ):
+            jobs = collect_link_page(source)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Product manager / Product Owner цифрових продуктів SAP")
+        self.assertIn("jobs.dou.ua/companies/mod-of-ukraine/vacancies/353937", jobs[0].url)
+
     def test_collect_greenhouse_ats(self):
         source = SourceConfig(id="gh", name="ExampleCo", type="ats", url="https://boards.greenhouse.io/exampleco")
         payload = '{"jobs":[{"id":1,"title":"Product Engineer","absolute_url":"https://boards.greenhouse.io/exampleco/jobs/1","location":{"name":"Remote"},"content":"Build AI products."}]}'

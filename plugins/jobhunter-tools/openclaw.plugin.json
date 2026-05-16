@@ -16,7 +16,8 @@
       "jobhunter_revert_action",
       "jobhunter_mark_job",
       "jobhunter_cover_note",
-      "jobhunter_query_sql"
+      "jobhunter_query_sql",
+      "jobhunter_process_email"
     ]
   },
   "configSchema": {

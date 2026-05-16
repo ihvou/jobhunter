@@ -28,6 +28,7 @@ services:
       EMAIL_IMAP_USERNAME: ${EMAIL_IMAP_USERNAME:-}
       EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
       EMAIL_IMAP_FOLDER: ${EMAIL_IMAP_FOLDER:-job-alerts}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
     volumes:
       - ./data:/jobhunter/data
       - ./config:/jobhunter/config

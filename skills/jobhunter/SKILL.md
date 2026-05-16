@@ -46,6 +46,7 @@ Available Jobhunter plugin tools:
 - `jobhunter_mark_job`: mark a job irrelevant, applied, or snoozed. Accepts a full `job_id` or a 12-character `id_prefix` from inline callbacks. Use only after explicit user intent.
 - `jobhunter_cover_note`: draft a cover note for one job. Accepts a full `job_id` or a 12-character `id_prefix` from inline callbacks.
 - `jobhunter_query_sql`: SELECT-only investigation against the local SQLite database.
+- `jobhunter_process_email`: ingest one parsed job-alert email from OpenClaw Gmail Pub/Sub/hooks or an email skill.
 
 Behavior rules:
 

@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List
 
@@ -23,6 +24,7 @@ from .config import (
 )
 from .coordinators import ScoringCoordinator
 from .database import Database
+from .firecrawl import FirecrawlError, firecrawl_available, firecrawl_scrape_markdown
 from .llm import BudgetExceeded, LLMClient, LLMError
 from .logging_setup import configure_logging, log_context, safe_log_text
 from .models import Job, SourceConfig, utc_now_iso
@@ -125,21 +127,10 @@ class JobHunter:
             if self.shutdown_requested:
                 raise SourceError("interrupted")
             jobs = collect_from_source(source)
-            fetched_count = len(jobs)
-            for job in jobs:
-                if self.shutdown_requested:
-                    raise SourceError("interrupted")
-                job_id, inserted = self.database.upsert_job(job)
-                if inserted:
-                    inserted_count += 1
-                result = score_job(job, self.profile, ruleset)
-                self.database.save_score(job_id, result)
-                if inserted and self.should_l2_score(source, job, result.score, len(l2_candidates)):
-                    row = self.database.get_job(job_id)
-                    if row:
-                        l2_candidates.append(row)
-            if l2_candidates:
-                self.run_l2_relevance(l2_candidates)
+            result = self.ingest_jobs(source, jobs, ruleset)
+            fetched_count = result["fetched"]
+            inserted_count = result["inserted"]
+            l2_candidates = result["l2_candidates"]
             log_context(LOGGER, logging.INFO, "source_collected", source_id=source.id, fetched=fetched_count, inserted=inserted_count)
         except SourceError as exc:
             error = str(exc)
@@ -154,6 +145,54 @@ class JobHunter:
                 error = "interrupted"
             self.database.finish_source_run(run_id, source.id, fetched_count, inserted_count, error)
         return fetched_count, inserted_count
+
+    def ingest_jobs(self, source: SourceConfig, jobs: List[Job], ruleset=None) -> Dict:
+        ruleset = ruleset or load_scoring_rules(self.config.scoring_path)
+        inserted_count = 0
+        l2_candidates = []
+        for job in jobs:
+            if self.shutdown_requested:
+                raise SourceError("interrupted")
+            job_id, inserted = self.database.upsert_job(job)
+            if inserted:
+                inserted_count += 1
+            result = score_job(job, self.profile, ruleset)
+            self.database.save_score(job_id, result)
+            if inserted and self.should_l2_score(source, job, result.score, len(l2_candidates)):
+                row = self.database.get_job(job_id)
+                if row:
+                    l2_candidates.append(row)
+        if l2_candidates:
+            self.run_l2_relevance(l2_candidates)
+        return {"fetched": len(jobs), "inserted": inserted_count, "l2_candidates": len(l2_candidates)}
+
+    def process_email_alert(self, source_id: str, sender: str, subject: str, body: str, message_id: str = "", date: str = "") -> Dict:
+        sources = {source.id: source for source in load_sources(self.config.sources_path)}
+        source = sources.get(source_id or "email-job-alerts")
+        if not source:
+            raise SourceError("Unknown email source: %s" % (source_id or "email-job-alerts"))
+        if source.type != "imap":
+            raise SourceError("Source is not an email/imap source: %s" % source.id)
+        source.email_templates = self.database.email_templates_for_source(source.id)
+        message = EmailMessage()
+        message["From"] = sender or "unknown@example.invalid"
+        message["Subject"] = subject or "Job alert"
+        message["Message-ID"] = message_id or "<openclaw-email-%s>" % int(time.time() * 1000)
+        if date:
+            message["Date"] = date
+        subtype = "html" if "<" in (body or "") and ">" in (body or "") else "plain"
+        message.set_content(body or "", subtype=subtype)
+        jobs = source_module.jobs_from_email(source, message)
+        result = self.ingest_jobs(source, jobs)
+        log_context(
+            LOGGER,
+            logging.INFO,
+            "email_alert_processed",
+            source_id=source.id,
+            fetched=result["fetched"],
+            inserted=result["inserted"],
+        )
+        return {"ok": True, "source_id": source.id, "jobs_found": result["fetched"], "inserted": result["inserted"], "l2_candidates": result["l2_candidates"]}
 
     def should_l2_score(self, source: SourceConfig, job: Job, l1_score: int, current_count: int) -> bool:
         if current_count >= self.config.l2_max_jobs:
@@ -330,7 +369,7 @@ class JobHunter:
                 validate_source_url(source_url, source_type)
                 if source_type != "imap":
                     validate_safe_url(source_url)
-                    if not self.source_candidate_reachable(source_url):
+                    if not self.source_candidate_reachable(source_url, source_type, "test"):
                         raise SourceError("HEAD probe failed")
             except (ValueError, SourceError) as exc:
                 result["skipped_invalid"] += 1
@@ -397,7 +436,14 @@ class JobHunter:
         self.shutdown_requested = True
         log_context(LOGGER, logging.WARNING, "shutdown_signal_received", signum=signum)
 
-    def source_candidate_reachable(self, url: str) -> bool:
+    def source_candidate_reachable(self, url: str, source_type: str = "", status: str = "") -> bool:
+        if self.source_candidate_direct_reachable(url):
+            return True
+        if normalize_source_type(source_type or "") == "community":
+            return self.source_candidate_firecrawl_reachable(url, status)
+        return False
+
+    def source_candidate_direct_reachable(self, url: str) -> bool:
         request = urllib.request.Request(url, headers=source_module.DEFAULT_HEADERS, method="HEAD")
         try:
             with urllib.request.urlopen(request, timeout=8) as response:
@@ -412,6 +458,30 @@ class JobHunter:
             return False
         except urllib.error.URLError as exc:
             log_context(LOGGER, logging.WARNING, "source_candidate_head_failed", url=url, error=str(exc.reason))
+            return False
+
+    def source_candidate_firecrawl_reachable(self, url: str, status: str = "") -> bool:
+        if not firecrawl_available(self.config.firecrawl_api_key):
+            log_context(LOGGER, logging.WARNING, "source_candidate_firecrawl_skipped", url=url, reason="missing_api_key")
+            return False
+        try:
+            validate_safe_url(url)
+            result = firecrawl_scrape_markdown(url, api_key=self.config.firecrawl_api_key, max_chars=5000)
+            text = result.get("text") or ""
+            ok = len(text.strip()) >= 80
+            log_context(
+                LOGGER,
+                logging.INFO if ok else logging.WARNING,
+                "source_candidate_firecrawl_probe",
+                url=url,
+                status=status,
+                firecrawl_status=result.get("status"),
+                bytes=len(text.encode("utf-8")),
+                reachable=ok,
+            )
+            return ok
+        except (FirecrawlError, SourceError) as exc:
+            log_context(LOGGER, logging.WARNING, "source_candidate_firecrawl_failed", url=url, error=str(exc))
             return False
 
     def source_candidate_get_probe(self, url: str) -> bool:

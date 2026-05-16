@@ -104,3 +104,18 @@ WHERE source_id='email-job-alerts'
 ```
 
 Run this manually through a controlled SQL path after reviewing the impact; the agent should not run it autonomously.
+
+## Phase 3b: Firecrawl-backed community sources and email trigger bridge
+
+- `jobhunter-service` now receives `FIRECRAWL_API_KEY` too, not only `openclaw-gateway`.
+- Community source approval keeps the direct HEAD/GET probe first. If that fails and the proposed source type is `community`, the service tries a bounded Firecrawl scrape before rejecting the proposal. This keeps RSS/API/ATS validation unchanged while allowing geo/WAF-blocked job pages to enter as `status=test` sources when Firecrawl can read them.
+- Community collection now uses the same fallback: direct fetch first, Firecrawl scrape second. Firecrawl markdown links are parsed alongside HTML links, so DOU-style pages can produce job rows after approval.
+- OpenClaw receives a new `jobhunter_process_email` plugin tool. It accepts one already-parsed email (`sender`, `subject`, `body`, optional `message_id`/`date`) and sends it to `jobhunter-service` for the existing email parser, noise filter, scoring, and capped L2 relevance.
+- The service endpoint behind that tool is `POST /email/process`. It does not read Gmail directly, send email, or open OAuth scopes; it only ingests message content supplied by an approved OpenClaw/Gmail hook or future email skill.
+- The bundled OpenClaw image does not include an `agenticmail` plugin/skill. The practical Phase 3b bridge is therefore OpenClaw Gmail Pub/Sub/hooks -> `jobhunter_process_email` -> existing parser DSL. If a real agenticmail package is later selected, it should call the same tool rather than bypassing the service.
+- GCP project, Gmail OAuth, Tailscale/public hook URL, and `openclaw webhooks gmail setup --account <account>` remain operator approval steps. They should be done only after verifying the local `jobhunter_process_email` trajectory works.
+- Phase 3b verification:
+  - `phase3b-dou-acceptance`: `session.started.toolCount=20`; trajectory includes `firecrawl_scrape`, `jobhunter_propose_actions`, `jobhunter_apply_action`, `jobhunter_collect_all_sources`, and `jobhunter_query_sql`.
+  - Action `62` added `dou-product-manager` as a `community` `status=test` source. Service logs show `source_candidate_firecrawl_probe reachable=true` and `community_source_firecrawl_fetch_succeeded` for the DOU URL.
+  - Collection inserted DOU rows: SQL count was `26` immediately after first collection; after parser-filter cleanup, `18` DOU rows remain `new` and `8` DOU navigation/filter rows were archived via audited action `63`.
+  - `phase3b-email-process-smoke`: trajectory includes `jobhunter_process_email` with `jobs_found=0`, `inserted=0` for a wrapper-only email body, proving the new bridge tool is visible and the noise filter is applied.

@@ -184,6 +184,16 @@ class JobHunterService:
             rows = conn.execute(sql, params).fetchmany(min(max(1, limit), 100))
         return {"rows": [row_to_dict(row) for row in rows], "count": len(rows)}
 
+    def process_email(self, body: Dict) -> Dict:
+        return self.bot.process_email_alert(
+            source_id=str(body.get("source_id") or "email-job-alerts"),
+            sender=required(body, "sender"),
+            subject=required(body, "subject"),
+            body=required(body, "body"),
+            message_id=str(body.get("message_id") or ""),
+            date=str(body.get("date") or ""),
+        )
+
     def mark_job(self, job_id: str, status: str, feedback: str, details: str = "") -> Dict:
         self.ensure_job(job_id)
         self.bot.database.update_job_status(job_id, status)
@@ -313,6 +323,8 @@ def create_handler(app: JobHunterService):
                     payload = app.revert_action(required_int(body, "action_id"))
                 elif method == "POST" and path == "/query-sql":
                     payload = app.query_sql(required(body, "sql"), body.get("params") or [], optional_int(body.get("limit")) or 50)
+                elif method == "POST" and path == "/email/process":
+                    payload = app.process_email(body)
                 else:
                     raise ServiceError(404, "Unknown endpoint: %s %s" % (method, path))
                 self.send_json(200, payload)
