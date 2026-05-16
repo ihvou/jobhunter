@@ -212,7 +212,10 @@ export default definePluginEntry({
         "SOURCE-FROM-URL FLOW: do NOT pre-validate scraping with web_fetch first. The Python collector has " +
         "different headers, robots-txt handling, and fallback parsers than web_fetch; a 403/404/timeout from " +
         "web_fetch does NOT mean the source is unusable. Propose with status=\"test\" and let the collector try. " +
-        "If web_fetch fails or you cannot determine source_type, default to type=\"community\" and propose anyway. " +
+        "If web_fetch returns 403/404 on a candidate source URL, retry once with firecrawl before defaulting to " +
+        "source_type=\"community\" + status=\"test\". If web_fetch fails or you cannot determine source_type, " +
+        "default to type=\"community\" and propose anyway. For 'find me sources for X' requests, use exa to " +
+        "search first, then propose the top results via jobhunter_propose_actions. " +
         "MANDATORY EMIT: after this tool returns, inspect `actions[]` in the response — each entry has an `id` " +
         "field (the action_id). Your NEXT action MUST be a `message` tool call (action=send, target=<chat_id from " +
         "conversation metadata>) listing every action_id with a one-line human summary so the user can approve. " +

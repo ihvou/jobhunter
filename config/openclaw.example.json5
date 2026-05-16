@@ -57,6 +57,7 @@
     ],
   },
   plugins: {
+    allow: ["codex", "telegram", "jobhunter-tools", "firecrawl", "exa", "memory-core", "openai"],
     load: {
       // Dynamic Jobhunter tools are the sole Jobhunter tool surface. Do not
       // register a duplicate mcp.servers.jobhunter entry.
@@ -78,12 +79,47 @@
       "jobhunter-tools": {
         enabled: true,
       },
+      telegram: {
+        enabled: true,
+      },
+      "memory-core": {
+        enabled: true,
+      },
+      openai: {
+        enabled: true,
+      },
+      firecrawl: {
+        enabled: true,
+        config: {
+          webFetch: {
+            onlyMainContent: true,
+            maxAgeMs: 86400000,
+            timeoutSeconds: 30,
+          },
+          webSearch: {
+            baseUrl: "https://api.firecrawl.dev",
+          },
+        },
+      },
+      exa: {
+        enabled: true,
+        config: {
+          webSearch: {
+            baseUrl: "https://api.exa.ai",
+          },
+        },
+      },
     },
   },
   tools: {
     profile: "messaging",
-    alsoAllow: ["web_search", "web_fetch", "jobhunter-tools"],
+    alsoAllow: ["web_search", "web_fetch", "jobhunter-tools", "firecrawl", "exa"],
     deny: ["group:runtime", "group:fs", "group:automation"],
+    web: {
+      fetch: {
+        provider: "firecrawl",
+      },
+    },
     fs: {
       workspaceOnly: true,
     },

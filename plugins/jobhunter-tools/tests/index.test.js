@@ -54,7 +54,7 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   }
 
   const proposalDescription = tools.get("jobhunter_propose_actions").description;
-  for (const phrase of ["MANDATORY", "message", "action_id"]) {
+  for (const phrase of ["MANDATORY", "message", "action_id", "firecrawl", "exa"]) {
     assert.match(proposalDescription, new RegExp(phrase));
   }
 });

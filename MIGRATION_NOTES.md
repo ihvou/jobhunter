@@ -75,3 +75,32 @@ Then configure OpenClaw with:
 - Phase 2 acceptance evidence: `phase2-openclaw-tool-diagnostic-3` started with `toolCount=17` and called `jobhunter_get_more_jobs`; Telegram session `8abb337f-8676-4f98-a6cf-f79565aedafc` called `jobhunter_get_more_jobs`, `jobhunter_collect_all_sources`, then emitted five `message` calls with `presentation.blocks[].buttons`.
 - `jobhunter-service` no longer publishes a host port. The OpenClaw gateway reaches it on the Compose network as `http://jobhunter-service:8765`.
 - `./bin/jobhunter` remains for one release as a deprecated wrapper that delegates to `./bin/openclaw`.
+
+## Phase 3a: Firecrawl/Exa and email-alert cleanup
+
+- Firecrawl and Exa are bundled in the pinned gateway image as `@openclaw/firecrawl-plugin@2026.5.7` and `@openclaw/exa-plugin@2026.5.7`; no community package was installed. The OpenClaw registry search returned an unrelated community wrapper (`web-search-plus-plugin-v2@2.5.3`), so the safer path is enabling the bundled official plugins pinned by `ghcr.io/openclaw/openclaw:2026.5.7-slim`.
+- `FIRECRAWL_API_KEY` and `EXA_API_KEY` are passed into `openclaw-gateway` from `.env`. With keys missing, the bundled plugins can still be configured, but live Firecrawl/Exa calls are expected to fail with a missing API-key/auth error. After the keys were provided, the gateway was recreated and both plugins loaded successfully.
+- Firecrawl is enabled for `webFetch` with conservative settings: `onlyMainContent=true`, `maxAgeMs=86400000`, `timeoutSeconds=30`. Exa is enabled as a web-search provider through its bundled plugin. Both are explicitly allowed through top-level `tools.alsoAllow`.
+- `plugins.allow` is now explicit: `codex`, `telegram`, `jobhunter-tools`, `firecrawl`, `exa`, `memory-core`, and `openai`. The Phase 3a spec listed six plugins, but live OpenClaw retained `openai` because the Codex/model stack uses the bundled OpenAI provider path. Keeping it explicit prevents the allowlist from drifting while avoiding model-routing surprises.
+- Exa is a web-search provider in OpenClaw 2026.5.7, not a direct tool provider; it may not appear as a separate `tool.call name=exa_*`. Firecrawl does expose direct `firecrawl_search` and `firecrawl_scrape` tools, which are the trajectory signal for DOU acceptance.
+- Email alert parsing now drops wrapper rows before insertion when titles are exactly `Read more`, contain `new jobs match`, contain `Top job picks`, or are shorter than 8 characters.
+- Firecrawl/Exa smoke evidence:
+  - `phase3a-firecrawl-dou-smoke`: `session.started.toolCount=19`; trajectory includes `tool.call name=firecrawl_scrape` and successful `tool.result`; DOU Product Manager page returned through Firecrawl.
+  - `phase3a-exa-smoke`: `session.started.toolCount=19`; trajectory includes `tool.call name=web_search` and successful `tool.result`; Exa is provider-backed, so no separate `exa_*` tool call is expected in this OpenClaw build.
+- DOU end-to-end acceptance did not fully pass under Phase 3a constraints:
+  - Telegram-delivered session `phase3a-dou-acceptance` proposed action `43` for `https://jobs.dou.ua/vacancies/?category=Product%20Manager&from=maybe`, then used `firecrawl_scrape` successfully before approval.
+  - `approve 43` called `jobhunter_apply_action`, but the Python service rejected the source with `SourceError: HEAD probe failed`.
+  - Direct service probes from `jobhunter-service` return `403 Forbidden` for both the DOU page URL and `https://jobs.dou.ua/vacancies/feeds/?category=Product%20Manager`; current SQL count is `0` DOU jobs.
+  - This is not a Firecrawl failure. It is the known gap that Phase 3b names as "firecrawl-backed source validation"; Phase 3a explicitly says not to hack or soften `validate_source_row`.
+
+One-shot operator cleanup SQL for existing email-alert noise rows after deploy:
+
+```sql
+UPDATE jobs SET status='irrelevant'
+WHERE source_id='email-job-alerts'
+  AND (title='Read more' OR title LIKE '%new jobs match%'
+       OR title LIKE '%Top job picks%' OR length(title) < 8)
+  AND status='new';
+```
+
+Run this manually through a controlled SQL path after reviewing the impact; the agent should not run it autonomously.

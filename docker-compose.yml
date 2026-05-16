@@ -66,6 +66,8 @@ services:
       JOBHUNTER_SERVICE_URL: http://jobhunter-service:8765
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:-}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
     volumes:
       - openclaw_home:/home/node
       - ${HOME}/.codex:/home/node/.codex:ro

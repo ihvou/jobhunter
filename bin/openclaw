@@ -85,7 +85,7 @@ config_patch() {
 }
 
 patch_jobhunter_openclaw_config() {
-  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}},"mcp":{"servers":{"jobhunter":null}},"skills":{"load":{"extraDirs":["/openclaw/skills"]}},"agents":{"defaults":{"agentRuntime":{"id":"codex"},"model":{"primary":"openai-codex/gpt-5.5"},"models":{"openai-codex/gpt-5.5":{}},"skills":["jobhunter"],"sandbox":{"mode":"off"}}},"plugins":{"allow":null,"load":{"paths":["/opt/jobhunter/plugins/jobhunter-tools"]},"entries":{"codex":{"enabled":true,"config":{"codexDynamicToolsProfile":"native-first","codexDynamicToolsExclude":[],"appServer":{"approvalPolicy":"on-request","sandbox":"read-only","serviceTier":"fast"}}},"jobhunter-tools":{"enabled":true},"jobhunter-mcp":null}},"tools":{"profile":"messaging","alsoAllow":["web_search","web_fetch","jobhunter-tools"],"deny":["group:runtime","group:fs","group:automation"],"fs":{"workspaceOnly":true},"exec":{"security":"deny","ask":"always"},"elevated":{"enabled":false}}}'
+  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}},"mcp":{"servers":{"jobhunter":null}},"skills":{"load":{"extraDirs":["/openclaw/skills"]}},"agents":{"defaults":{"agentRuntime":{"id":"codex"},"model":{"primary":"openai-codex/gpt-5.5"},"models":{"openai-codex/gpt-5.5":{}},"skills":["jobhunter"],"sandbox":{"mode":"off"}}},"plugins":{"allow":["codex","telegram","jobhunter-tools","firecrawl","exa","memory-core","openai"],"load":{"paths":["/opt/jobhunter/plugins/jobhunter-tools"]},"entries":{"codex":{"enabled":true,"config":{"codexDynamicToolsProfile":"native-first","codexDynamicToolsExclude":[],"appServer":{"approvalPolicy":"on-request","sandbox":"read-only","serviceTier":"fast"}}},"telegram":{"enabled":true},"memory-core":{"enabled":true},"openai":{"enabled":true},"firecrawl":{"enabled":true,"config":{"webFetch":{"onlyMainContent":true,"maxAgeMs":86400000,"timeoutSeconds":30},"webSearch":{"baseUrl":"https://api.firecrawl.dev"}}},"exa":{"enabled":true,"config":{"webSearch":{"baseUrl":"https://api.exa.ai"}}},"jobhunter-tools":{"enabled":true},"jobhunter-mcp":null}},"tools":{"profile":"messaging","alsoAllow":["web_search","web_fetch","jobhunter-tools","firecrawl","exa"],"deny":["group:runtime","group:fs","group:automation"],"web":{"fetch":{"provider":"firecrawl"}},"fs":{"workspaceOnly":true},"exec":{"security":"deny","ask":"always"},"elevated":{"enabled":false}}}'
   config_patch "$payload"
 }
 
@@ -139,6 +139,7 @@ print_config() {
     }
   },
   plugins: {
+    allow: ["codex", "telegram", "jobhunter-tools", "firecrawl", "exa", "memory-core", "openai"],
     load: {
       paths: ["/opt/jobhunter/plugins/jobhunter-tools"]
     },
@@ -157,13 +158,48 @@ print_config() {
       },
       "jobhunter-tools": {
         enabled: true
+      },
+      telegram: {
+        enabled: true
+      },
+      "memory-core": {
+        enabled: true
+      },
+      openai: {
+        enabled: true
+      },
+      firecrawl: {
+        enabled: true,
+        config: {
+          webFetch: {
+            onlyMainContent: true,
+            maxAgeMs: 86400000,
+            timeoutSeconds: 30
+          },
+          webSearch: {
+            baseUrl: "https://api.firecrawl.dev"
+          }
+        }
+      },
+      exa: {
+        enabled: true,
+        config: {
+          webSearch: {
+            baseUrl: "https://api.exa.ai"
+          }
+        }
       }
     }
   },
   tools: {
     profile: "messaging",
-    alsoAllow: ["web_search", "web_fetch", "jobhunter-tools"],
+    alsoAllow: ["web_search", "web_fetch", "jobhunter-tools", "firecrawl", "exa"],
     deny: ["group:runtime", "group:fs", "group:automation"],
+    web: {
+      fetch: {
+        provider: "firecrawl"
+      }
+    },
     fs: { workspaceOnly: true },
     exec: { security: "deny", ask: "always" },
     elevated: { enabled: false }

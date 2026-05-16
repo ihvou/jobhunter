@@ -174,6 +174,36 @@ Content-Type: text/html; charset=utf-8
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].title, "Product Builder")
 
+    def test_email_alert_parser_drops_linkedin_wrapper_rows(self):
+        source = SourceConfig(id="email-job-alerts", name="Email Alerts", type="imap", url="imap://job-alerts")
+        source.email_templates = [
+            {
+                "id": "linkedin",
+                "source_id": "email-job-alerts",
+                "sender_pattern": "linkedin",
+                "subject_pattern": "jobs",
+                "parser_config": {"max_jobs": 10},
+            }
+        ]
+        message = email.message_from_string(
+            """From: jobs-noreply@linkedin.com
+Subject: Product Manager jobs
+Message-ID: <linkedin-wrapper>
+Content-Type: text/html; charset=utf-8
+
+<a href="https://www.linkedin.com/jobs/view/1">Senior Product Manager</a>
+<a href="https://www.linkedin.com/jobs/view/2">Read more</a>
+<a href="https://www.linkedin.com/jobs/search/?currentJobId=3">30+ new jobs match your preferences</a>
+<a href="https://www.linkedin.com/jobs/view/4">Top job picks for you</a>
+<a href="https://www.linkedin.com/jobs/view/5">PM</a>
+"""
+        )
+
+        jobs = jobs_from_email(source, message)
+
+        self.assertEqual([job.title for job in jobs], ["Senior Product Manager"])
+        self.assertEqual(jobs[0].url, "https://www.linkedin.com/jobs/view/1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -518,8 +518,8 @@ def jobs_from_email(source: SourceConfig, message) -> List[Job]:
         if email_template_matches(template, sender, subject):
             jobs = jobs_from_email_template(source, message, subject, sender, body, template)
             if jobs:
-                return jobs
-    return generic_jobs_from_email(source, message, subject, sender, body)
+                return filter_email_alert_jobs(source, jobs)
+    return filter_email_alert_jobs(source, generic_jobs_from_email(source, message, subject, sender, body))
 
 
 def persist_email_sample(source: SourceConfig, message, sample_id: str = "") -> Optional[Path]:
@@ -656,6 +656,23 @@ def email_job(source: SourceConfig, message, idx: int, url: str, title: str, com
         description=strip_html(description[:4000]),
         posted_at=parse_date(message.get("Date")),
     )
+
+
+def filter_email_alert_jobs(source: SourceConfig, jobs: List[Job]) -> List[Job]:
+    filtered = []
+    for job in jobs:
+        if is_email_alert_noise(job.title):
+            log_context(LOGGER, logging.DEBUG, "email_alert_noise_dropped", source_id=source.id, title=job.title)
+            continue
+        filtered.append(job)
+    return filtered
+
+
+def is_email_alert_noise(title: str) -> bool:
+    normalized = clean_title(title).lower()
+    if len(normalized) < 8:
+        return True
+    return normalized == "read more" or "new jobs match" in normalized or "top job picks" in normalized
 
 
 def email_template_matches(template: Dict, sender: str, subject: str) -> bool:
