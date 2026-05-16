@@ -57,6 +57,33 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   for (const phrase of ["MANDATORY", "message", "action_id", "firecrawl", "exa"]) {
     assert.match(proposalDescription, new RegExp(phrase));
   }
+
+  // Regression guards for per-kind payload examples.
+  // Adding/changing these means the agent has to guess the payload shape
+  // again, which is what motivated this section. Update both the
+  // description AND this assertion list when an action kind's contract changes.
+  const perKindMarkers = [
+    "bulk_update_jobs",
+    "filter_sql",
+    "archived",
+    "rejected",
+    "rescore_jobs",
+    "window_hours",
+    "scoring_rule_proposal",
+    "ruleset",
+    "human_followup",
+    "suggested_approach",
+    "directive_edit",
+    "profile_edit",
+    "new_about_me",
+  ];
+  for (const phrase of perKindMarkers) {
+    assert.match(
+      proposalDescription,
+      new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      `propose_actions description must include "${phrase}"`,
+    );
+  }
 });
 
 test("resolveJobId returns an explicit job_id without fetching", async () => {

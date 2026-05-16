@@ -207,6 +207,26 @@ export default definePluginEntry({
         "`payload.operations[].op` is one of: add, modify, disable. " +
         "`source.type` is one of: rss, json_api, community, greenhouse, ashby, lever, workable, imap. " +
         "`source.status` is one of: active, test, disabled. " +
+        "\n\nOTHER KIND PAYLOADS (use these exact key names — guessing wastes a roundtrip):\n" +
+        "- `bulk_update_jobs.payload`: required `filter_sql` (SELECT-only query that returns rows to update) and " +
+        "`new_status` which MUST be \"archived\" or \"rejected\" (NOT \"irrelevant\"). Example payload: " +
+        "`{filter_sql: \"SELECT id FROM jobs WHERE source_id='email-job-alerts' AND title='Read more'\", new_status: \"archived\"}`.\n" +
+        "- `rescore_jobs.payload`: no required keys. Optional `window_hours` (int 1..168, default 24; >48 needs " +
+        "user confirm=true) and `source_ids` (array of source ids, max 20). Example: " +
+        "`{window_hours: 72, source_ids: [\"email-job-alerts\"]}`.\n" +
+        "- `scoring_rule_proposal.payload`: required `ruleset` (full new ruleset object). The agent should " +
+        "fetch the current ruleset via jobhunter_query_sql or jobhunter_get_more_jobs metadata first, copy " +
+        "the structure, mutate, and submit the entire object — not a diff. Server replaces atomically.\n" +
+        "- `human_followup.payload`: required `title` (≤200 chars). Optional `summary`, `suggested_approach`, " +
+        "`urgency` (\"low\"|\"medium\"|\"high\"). Do NOT include `evidence`, `details`, `notes`, or other keys — " +
+        "server rejects them. Example: " +
+        "`{title: \"Tighten LinkedIn email parser\", summary: \"...\", suggested_approach: \"...\", urgency: \"high\"}`. " +
+        "Use this kind when the user asks for code/parser changes the agent itself cannot apply — it files an " +
+        "entry in data/taskcandidates.md for human/Codex review.\n" +
+        "- `directive_edit.payload`: required `directive` (a one-paragraph instruction appended to the profile " +
+        "directives section). Use this only when the user explicitly asks to change their search preferences.\n" +
+        "- `profile_edit.payload`: required `new_about_me` (full replacement text, ≤12000 chars). Use sparingly; " +
+        "this overwrites the candidate's About section. Confirm intent with the user before proposing.\n\n" +
         "For Update sources, propose kind=sources_proposal. For Tune scoring, kind=scoring_rule_proposal. " +
         "Do not call jobhunter_apply_action until explicit user approval. " +
         "SOURCE-FROM-URL FLOW: do NOT pre-validate scraping with web_fetch first. The Python collector has " +
