@@ -59,8 +59,31 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   const tools = new Map(registeredTools().map((tool) => [tool.name, tool]));
 
   const digestDescription = tools.get("jobhunter_get_more_jobs").description;
-  for (const phrase of ["queue_is_stale", "callback_data", "applied:<id_prefix>", "presentation.blocks"]) {
+  for (const phrase of [
+    "queue_is_stale",
+    "callback_data",
+    "applied:<id_prefix>",
+    "presentation.blocks",
+    "CALLBACK HANDLING",
+    "action: \"edit\"",
+    "messageId",
+    "Cover note draft",
+  ]) {
     assert.match(digestDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const leadDescription = tools.get("leadhunter_get_more_leads").description;
+  for (const phrase of [
+    "reached:<id_prefix>",
+    "skip:<id_prefix>",
+    "later:<id_prefix>",
+    "pitch:<id_prefix>",
+    "CALLBACK HANDLING",
+    "Reached out",
+    "Pitch draft",
+    "Never send outreach automatically",
+  ]) {
+    assert.match(leadDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 
   const proposalDescription = tools.get("jobhunter_propose_actions").description;
@@ -103,10 +126,9 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     assert.match(processEmailDescription, new RegExp(phrase));
   }
 
-  const leadsDescription = tools.get("leadhunter_get_more_leads").description;
-  for (const phrase of ["lead_shortlist:<id_prefix>", "lead_pitch:<id_prefix>", "presentation.blocks", "Never send outreach"]) {
-    assert.match(leadsDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
+  // Old leadhunter callback_data scheme (lead_shortlist/lead_reject/lead_pitch) was replaced
+  // with the symmetric job-style scheme (reached/skip/later/pitch) per UX feedback — see
+  // the `leadhunter_get_more_leads` description and the regression guards at line ~78 above.
 
   const saveLeadsDescription = tools.get("leadhunter_save_leads").description;
   for (const phrase of ["explicit user approval", "public url", "Do not store guessed personal emails"]) {

@@ -107,13 +107,55 @@ presentation = {
 
 ### Callback dispatch
 
-When a user message arrives matching one of these patterns, treat it as a button-tap callback, not free-form text, and route immediately:
+When a user message arrives matching one of these patterns, treat it as a button-tap callback, not free-form text, and route immediately.
+
+**Job callbacks:**
 
 ```text
-applied:<12_hex>     -> call jobhunter_mark_job(id_prefix=<12_hex>, status="applied")
-irrelevant:<12_hex>  -> call jobhunter_mark_job(id_prefix=<12_hex>, status="irrelevant")
-snooze:<12_hex>      -> call jobhunter_mark_job(id_prefix=<12_hex>, status="snoozed", snooze_days=1)
-cover:<12_hex>       -> call jobhunter_cover_note(id_prefix=<12_hex>) then reply with the draft
+applied:<12_hex>     -> jobhunter_mark_job(id_prefix=<12_hex>, status="applied")
+irrelevant:<12_hex>  -> jobhunter_mark_job(id_prefix=<12_hex>, status="irrelevant")
+snooze:<12_hex>      -> jobhunter_mark_job(id_prefix=<12_hex>, status="snoozed", snooze_days=1)
+cover:<12_hex>       -> jobhunter_cover_note(id_prefix=<12_hex>)
 ```
 
-After a successful action, keep the confirmation short. Telegram already acknowledged the tap; a one-line "Marked as applied" or "Snoozed 24h" is enough.
+**Lead callbacks:**
+
+```text
+reached:<12_hex>     -> leadhunter_mark_lead(id_prefix=<12_hex>, status="reached_out")
+skip:<12_hex>        -> leadhunter_mark_lead(id_prefix=<12_hex>, status="skipped")
+later:<12_hex>       -> leadhunter_mark_lead(id_prefix=<12_hex>, status="snoozed", snooze_days=7)
+pitch:<12_hex>       -> leadhunter_draft_pitch(id_prefix=<12_hex>)
+```
+
+**After EVERY callback action, edit the original message in place** rather than sending a new confirmation message. The synthetic user message includes `message_id` in its conversation metadata — that's the digest message that had the buttons.
+
+For triage actions (applied/irrelevant/snooze/reached/skip/later): edit to strike through the item text and drop the buttons. Example:
+
+```text
+message({
+  action: "edit",
+  messageId: "<metadata message_id>",
+  target: "telegram:<chat_id>",
+  message: "~~<original item text>~~\n\n✓ <Status> at <ISO date>",
+  presentation: { blocks: [] }
+})
+```
+
+Status emoji: `✓ Applied`, `✗ Irrelevant`, `💤 Snoozed 1d`, `✓ Reached out`, `✗ Skipped`, `💤 Later (snoozed 7d)`.
+
+For draft actions (cover/pitch): edit to APPEND the draft text and keep the primary triage buttons. Example:
+
+```text
+message({
+  action: "edit",
+  messageId: "<metadata message_id>",
+  target: "telegram:<chat_id>",
+  message: "<original item text>\n\n---\n**Cover note draft:**\n<draft>",
+  presentation: { blocks: [{ type: "buttons", buttons: [[
+    { text: "Applied",    callback_data: "applied:<id_prefix>",    style: "success" },
+    { text: "Irrelevant", callback_data: "irrelevant:<id_prefix>", style: "danger"  }
+  ]]}]}
+})
+```
+
+Do NOT send a second message for the draft text. Telegram clutters fast. Edit in place.

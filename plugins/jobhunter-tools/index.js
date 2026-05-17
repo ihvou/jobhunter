@@ -152,7 +152,21 @@ export default definePluginEntry({
         "<id_prefix> is the first 12 lowercase hex characters of the job's id. " +
         "Use mark_sent=true only for rows actually shown. " +
         "For read-only diagnostics/analysis/source-or-scoring work, call with mark_sent=false and do NOT emit messages. " +
-        "Never use bash or shell for Jobhunter digest requests.",
+        "Never use bash or shell for Jobhunter digest requests. " +
+        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `applied:<12hex>`, " +
+        "`irrelevant:<12hex>`, `snooze:<12hex>`, or `cover:<12hex>`): you MUST edit the original job message in-place " +
+        "rather than sending a new bare confirmation. The synthetic user message includes a message_id in its " +
+        "conversation metadata — that is the digest message that had the buttons. Flow: " +
+        "(a) For applied/irrelevant/snooze: call `jobhunter_mark_job` with the matching status, then emit " +
+        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
+        "message: \"~~<original job text>~~\\n\\n✓ <Status> at <ISO date>\", presentation: {blocks: []}})` to " +
+        "strike through the job and drop the buttons. Status emoji: ✓ Applied, ✗ Irrelevant, 💤 Snoozed 1d. " +
+        "(b) For cover: call `jobhunter_cover_note`, then emit " +
+        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
+        "message: \"<original job text>\\n\\n---\\n**Cover note draft:**\\n<draft text>\", " +
+        "presentation: {blocks: [{type: \"buttons\", buttons: [[{text: \"Applied\", callback_data: \"applied:<id_prefix>\", style: \"success\"}, {text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>\", style: \"danger\"}]]}]}})` " +
+        "to APPEND the cover note text to the original message and keep Applied/Irrelevant buttons so the user can still mark the job. " +
+        "Do not send a second message for the cover note — Telegram clutter. Edit in place.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
@@ -438,14 +452,31 @@ export default definePluginEntry({
       name: "leadhunter_get_more_leads",
       label: "Leadhunter Get More Leads",
       description:
-        "Return saved lead candidates from the local Jobhunter service. Use this when the user sends /leads, asks for lead digest, or asks to see researched leads. " +
-        "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], emit one `message` call using presentation.blocks with " +
-        "{action: \"send\", target: <chat_id from conversation metadata>, message: <lead text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Shortlist\", callback_data: \"lead_shortlist:<id_prefix>\", style: \"success\"}, " +
-        "{text: \"Reject\", callback_data: \"lead_reject:<id_prefix>\", style: \"danger\"}], " +
-        "[{text: \"Draft pitch\", callback_data: \"lead_pitch:<id_prefix>\", style: \"primary\"}]]}]}}. " +
-        "<id_prefix> is the first 12 lowercase hex characters of the lead id. Use mark_sent=true only for rows actually shown. " +
-        "Never send outreach automatically.",
+        "Return saved lead candidates from the local Jobhunter service. Use this when the user sends /leads, says " +
+        "\"get more leads\", asks for a lead digest, or asks to see researched leads. " +
+        "If leads[] is empty, do NOT silently return — emit a single `message` explaining the empty state " +
+        "(e.g. \"no saved leads yet — first set your Leadhunter ICP via icp_edit, then add a lead_source, then research\"). " +
+        "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], emit one `message` call with " +
+        "{action: \"send\", target: <chat_id from conversation metadata>, message: <lead text>, " +
+        "presentation: {blocks: [{type: \"buttons\", buttons: [" +
+        "[{text: \"Reached out\", callback_data: \"reached:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Skip\", callback_data: \"skip:<id_prefix>\", style: \"danger\"}], " +
+        "[{text: \"Later\", callback_data: \"later:<id_prefix>\"}, " +
+        "{text: \"Pitch\", callback_data: \"pitch:<id_prefix>\", style: \"primary\"}]]}]}}. " +
+        "<id_prefix> is the first 12 lowercase hex characters of the lead id. " +
+        "Use mark_sent=true only for rows actually shown. " +
+        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `reached:<12hex>`, " +
+        "`skip:<12hex>`, `later:<12hex>`, or `pitch:<12hex>`): edit the original lead message in-place. " +
+        "(a) For reached/skip/later: call `leadhunter_mark_lead` with matching status, then emit " +
+        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
+        "message: \"~~<original lead text>~~\\n\\n✓ <Status> at <ISO date>\", presentation: {blocks: []}})`. " +
+        "Status emoji: ✓ Reached out, ✗ Skipped, 💤 Later (snoozed 7d). " +
+        "(b) For pitch: call `leadhunter_draft_pitch`, then emit " +
+        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
+        "message: \"<original lead text>\\n\\n---\\n**Pitch draft:**\\n<draft text>\", " +
+        "presentation: {blocks: [{type: \"buttons\", buttons: [[{text: \"Reached out\", callback_data: \"reached:<id_prefix>\", style: \"success\"}, {text: \"Skip\", callback_data: \"skip:<id_prefix>\", style: \"danger\"}]]}]}})` " +
+        "to APPEND the pitch to the original message and keep Reached out/Skip buttons. " +
+        "Never send outreach automatically — drafts only.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },

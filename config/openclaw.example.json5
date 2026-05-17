@@ -24,7 +24,16 @@
       },
       actions: {
         sendMessage: true,
+        editMessage: true,
+        deleteMessage: true,
       },
+      customCommands: [
+        { command: "jobs",    description: "Get fresh ranked jobs digest" },
+        { command: "leads",   description: "Get fresh ranked leads digest" },
+        { command: "sources", description: "Propose source changes for approval" },
+        { command: "scoring", description: "Propose scoring rule changes" },
+        { command: "usage",   description: "Show spend, quota, recent activity" },
+      ],
     },
   },
   skills: {
