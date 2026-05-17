@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 ALLOWED_ACTION_KINDS = {
     "directive_edit",
     "profile_edit",
+    "icp_edit",
     "sources_proposal",
     "scoring_rule_proposal",
     "data_answer",
@@ -128,6 +129,26 @@ def profile_edit(payload: Dict, context: AgentActionContext) -> ActionResult:
     archive = archive_file(context.config.profile_path)
     write_text(context.config.profile_path, compose_profile(new_about, sections["directives"]))
     return ActionResult(True, "Profile About me replaced", str(archive), str(context.config.profile_path))
+
+
+def icp_edit(payload: Dict, context: AgentActionContext) -> ActionResult:
+    """Replace the Leadhunter ICP (Ideal Customer Profile) file.
+
+    Mirror of profile_edit but targeting `input/icp.local.md` (the ICP that
+    `leadhunter_*` tools draw on). The file always exists post-init, so a
+    timestamped backup is written before overwrite.
+    """
+    validation = validate_payload_keys("icp_edit", payload, ["new_icp"])
+    if validation:
+        return validation
+    new_icp = payload.get("new_icp") or ""
+    new_icp = sanitize_text(new_icp, 12000)
+    if not new_icp:
+        return ActionResult(False, "icp_edit had no ICP content")
+    icp_path = context.config.icp_path
+    archive = archive_file(icp_path) if icp_path.exists() else icp_path
+    write_text(icp_path, new_icp.rstrip() + "\n")
+    return ActionResult(True, "Leadhunter ICP replaced", str(archive), str(icp_path))
 
 
 def sources_proposal(payload: Dict, context: AgentActionContext) -> ActionResult:
@@ -402,6 +423,7 @@ def email_parser_proposal(payload: Dict, context: AgentActionContext) -> ActionR
 KIND_HANDLERS = {
     "directive_edit": directive_edit,
     "profile_edit": profile_edit,
+    "icp_edit": icp_edit,
     "sources_proposal": sources_proposal,
     "scoring_rule_proposal": scoring_rule_proposal,
     "data_answer": data_answer,

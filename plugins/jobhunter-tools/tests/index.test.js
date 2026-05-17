@@ -86,6 +86,9 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     "directive_edit",
     "profile_edit",
     "new_about_me",
+    "icp_edit",
+    "new_icp",
+    "icp.local.md",
   ];
   for (const phrase of perKindMarkers) {
     assert.match(

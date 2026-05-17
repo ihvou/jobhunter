@@ -68,6 +68,55 @@ class AgentActionTests(unittest.TestCase):
             self.assertEqual(sections["about_me"], "New")
             self.assertEqual(sections["directives"], "Keep this")
 
+    def test_icp_edit_archives_existing_icp_and_writes_new(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.icp_path.parent.mkdir(parents=True, exist_ok=True)
+            config.icp_path.write_text("# Old ICP\nstale\n", encoding="utf-8")
+            bot = JobHunter(config)
+            context = AgentActionContext(config=config, database=bot.database, profile=bot.profile)
+
+            new_icp = "# Leadhunter ICP\n\nPre-seed/seed B2B workflow SaaS founders, 1-15 people.\n"
+            result = apply_agent_action(
+                {"kind": "icp_edit", "payload": {"new_icp": new_icp}},
+                context,
+            )
+
+            self.assertTrue(result.applied, result.message)
+            self.assertEqual(config.icp_path.read_text(encoding="utf-8"), new_icp.rstrip() + "\n")
+            self.assertTrue(result.archive_path, "icp_edit must archive the previous ICP")
+            archive = Path(result.archive_path)
+            self.assertTrue(archive.exists())
+            self.assertEqual(archive.read_text(encoding="utf-8"), "# Old ICP\nstale\n")
+
+    def test_icp_edit_creates_icp_file_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            self.assertFalse(config.icp_path.exists())  # tmp config starts without an ICP file
+            bot = JobHunter(config)
+            context = AgentActionContext(config=config, database=bot.database, profile=bot.profile)
+
+            new_icp = "# Leadhunter ICP\n\nFounders building agentic SaaS.\n"
+            result = apply_agent_action(
+                {"kind": "icp_edit", "payload": {"new_icp": new_icp}},
+                context,
+            )
+
+            self.assertTrue(result.applied, result.message)
+            self.assertTrue(config.icp_path.exists())
+            self.assertEqual(config.icp_path.read_text(encoding="utf-8"), new_icp.rstrip() + "\n")
+
+    def test_icp_edit_rejects_payload_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            bot = JobHunter(config)
+            context = AgentActionContext(config=config, database=bot.database, profile=bot.profile)
+
+            result = apply_agent_action({"kind": "icp_edit", "payload": {"icp": "x"}}, context)
+
+            self.assertFalse(result.applied)
+            self.assertIn("'new_icp'", result.message)
+
     def test_profile_and_scoring_aliases_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)

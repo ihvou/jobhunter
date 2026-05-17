@@ -207,8 +207,8 @@ export default definePluginEntry({
       description:
         "Store bounded Jobhunter actions for user approval. " +
         "`actions` MUST be an array of OBJECTS (not strings, not JSON-stringified). Each object MUST have: " +
-        "`kind` (one of: sources_proposal, scoring_rule_proposal, profile_edit, directive_edit, rescore_jobs, " +
-        "bulk_update_jobs, human_followup), optional `summary` (≤300 chars human-readable), and `payload` " +
+        "`kind` (one of: sources_proposal, scoring_rule_proposal, profile_edit, icp_edit, directive_edit, " +
+        "rescore_jobs, bulk_update_jobs, human_followup), optional `summary` (≤300 chars human-readable), and `payload` " +
         "(kind-specific object — see below). The server silently drops any element that is not a dict with a " +
         "valid `kind`, so getting the shape right matters. " +
         "\n\nEXAMPLE for adding a source (sources_proposal):\n" +
@@ -245,12 +245,22 @@ export default definePluginEntry({
         "`urgency` (\"low\"|\"medium\"|\"high\"). Do NOT include `evidence`, `details`, `notes`, or other keys — " +
         "server rejects them. Example: " +
         "`{title: \"Tighten LinkedIn email parser\", summary: \"...\", suggested_approach: \"...\", urgency: \"high\"}`. " +
-        "Use this kind when the user asks for code/parser changes the agent itself cannot apply — it files an " +
-        "entry in data/taskcandidates.md for human/Codex review.\n" +
+        "Use this kind for multi-file code/parser refactors that need a dedicated Codex session (more time, " +
+        "test runs, commit discipline). After filing the candidate AND emitting the message: STOP. Do not start " +
+        "modifying code via internal shell in the same turn — large refactors don't fit one Telegram turn and " +
+        "you'll likely run out of turn time mid-edit (this has happened). The task candidate IS the handoff to " +
+        "the next Codex run, which will pick it up with full context and time.\n" +
         "- `directive_edit.payload`: required `directive` (a one-paragraph instruction appended to the profile " +
         "directives section). Use this only when the user explicitly asks to change their search preferences.\n" +
         "- `profile_edit.payload`: required `new_about_me` (full replacement text, ≤12000 chars). Use sparingly; " +
-        "this overwrites the candidate's About section. Confirm intent with the user before proposing.\n\n" +
+        "this overwrites the candidate's About section. Confirm intent with the user before proposing.\n" +
+        "- `icp_edit.payload`: required `new_icp` (full ICP markdown content, ≤12000 chars). Writes to the " +
+        "Leadhunter ICP file at `input/icp.local.md`. Use this when the user says \"save this as my Leadhunter " +
+        "ICP\" or \"set my lead ICP to ...\". The file is the source of truth for `leadhunter_*` tools. Existing " +
+        "ICP file is backed up timestamped before overwrite. Example: " +
+        "`{kind: \"icp_edit\", summary: \"Set Leadhunter ICP to early-stage AI workflow founders\", " +
+        "payload: {new_icp: \"# Leadhunter ICP\\n\\nPre-seed/seed B2B workflow SaaS founders, 1-15 people...\"}}`. " +
+        "Do NOT use profile_edit to write the ICP — that targets the jobhunter candidate profile, not the lead ICP.\n\n" +
         "For Update sources, propose kind=sources_proposal. For Tune scoring, kind=scoring_rule_proposal. " +
         "Do not call jobhunter_apply_action until explicit user approval. " +
         "SOURCE-FROM-URL FLOW: do NOT pre-validate scraping with web_fetch first. The Python collector has " +
