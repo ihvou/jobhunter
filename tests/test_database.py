@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from jobhunter.database import Database
-from jobhunter.models import Job, ScoreResult, SourceConfig
+from jobhunter.models import Job, Lead, ScoreResult, SourceConfig
 
 
 class DatabaseTests(unittest.TestCase):
@@ -180,6 +180,50 @@ class DatabaseTests(unittest.TestCase):
             )
             self.assertEqual(first_id, second_id)
             self.assertFalse(inserted)
+
+    def test_upsert_lead_and_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            lead_id, inserted = db.upsert_lead(
+                Lead(
+                    person_name="Alex Founder",
+                    company="AgentCo",
+                    role="Founder",
+                    url="https://example.com/alex",
+                    evidence=["Raised Series A"],
+                    why_match="Building AI workflow tools",
+                    confidence=84,
+                )
+            )
+
+            self.assertTrue(inserted)
+            rows = db.leads_for_digest(10)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], lead_id)
+            self.assertEqual(rows[0]["company"], "AgentCo")
+            self.assertEqual(rows[0]["confidence"], 84)
+
+            db.update_lead_status(lead_id, "shortlisted")
+            self.assertEqual(db.get_lead(lead_id)["status"], "shortlisted")
+
+    def test_upsert_lead_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            source_id, inserted = db.upsert_lead_source(
+                {
+                    "name": "AI Founder Directory",
+                    "type": "public_directory",
+                    "url": "https://example.com/founders",
+                    "notes": "Public founder list",
+                }
+            )
+
+            self.assertTrue(inserted)
+            with db.connection() as conn:
+                row = conn.execute("select * from lead_sources where id = ?", (source_id,)).fetchone()
+            self.assertEqual(row["name"], "AI Founder Directory")
 
 
 if __name__ == "__main__":

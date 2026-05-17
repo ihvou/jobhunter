@@ -31,6 +31,7 @@ class AppConfig:
     database_path: Path
     profile_path: Path
     cv_path: Path
+    icp_path: Path
     profile_settings_path: Path
     sources_path: Path
     scoring_path: Path
@@ -99,6 +100,7 @@ def load_app_config() -> AppConfig:
     config_dir = _default_path("JOBHUNTER_CONFIG_DIR", "config")
     profile_path = Path(os.getenv("JOBHUNTER_PROFILE_PATH", str(input_dir / "profile.local.md")))
     cv_path = Path(os.getenv("JOBHUNTER_CV_PATH", str(input_dir / "cv.local.md")))
+    icp_path = Path(os.getenv("JOBHUNTER_ICP_PATH", str(input_dir / "icp.local.md")))
     profile_settings_path = Path(
         os.getenv("JOBHUNTER_PROFILE_SETTINGS_PATH", str(config_dir / "profile.local.json"))
     )
@@ -130,6 +132,7 @@ def load_app_config() -> AppConfig:
         database_path=database_path,
         profile_path=profile_path,
         cv_path=cv_path,
+        icp_path=icp_path,
         profile_settings_path=profile_settings_path,
         sources_path=sources_path,
         scoring_path=scoring_path,
@@ -261,6 +264,10 @@ def ensure_profile_file(config: AppConfig) -> None:
         example_cv = config.input_dir / "cv.example.md"
         if example_cv.exists():
             shutil.copyfile(example_cv, config.cv_path)
+    if not config.icp_path.exists():
+        example_icp = config.input_dir / "icp.example.md"
+        if example_icp.exists():
+            shutil.copyfile(example_icp, config.icp_path)
     config.config_dir.mkdir(parents=True, exist_ok=True)
     _ensure_local_config(config.config_dir / "sources.local.json", config.config_dir / "sources.example.json", config.config_dir / "sources.json")
     _ensure_local_config(config.config_dir / "scoring.local.json", config.config_dir / "scoring.example.json", config.config_dir / "scoring.json")

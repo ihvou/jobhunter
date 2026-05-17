@@ -25,6 +25,7 @@ def config_for(tmp):
         database_path=data_dir / "jobs.sqlite",
         profile_path=input_dir / "profile.local.md",
         cv_path=input_dir / "cv.local.md",
+        icp_path=input_dir / "icp.local.md",
         profile_settings_path=config_dir / "profile.local.json",
         sources_path=config_dir / "sources.local.json",
         scoring_path=config_dir / "scoring.local.json",

@@ -6,11 +6,11 @@ Orientation for AI coding agents and human contributors. Read this before the RE
 
 This project has moved the user-facing bot runtime to real OpenClaw. See [`MIGRATION.md`](MIGRATION.md) for the phased migration record.
 
-Current Phase 2 shape:
+Current Phase 4 shape:
 
 - `jobhunter-service` is the headless Python domain service.
 - `openclaw-gateway` is the Dockerized real OpenClaw runtime and owns Telegram, Codex sessions, buttons, and channel I/O.
-- [`plugins/jobhunter-tools/`](plugins/jobhunter-tools/) is the sole Jobhunter tool surface for OpenClaw/Codex. It calls the headless service over the Compose network and produces trajectory-visible `tool.call` events.
+- [`plugins/jobhunter-tools/`](plugins/jobhunter-tools/) is the sole Jobhunter and Leadhunter tool surface for OpenClaw/Codex. It calls the headless service over the Compose network and produces trajectory-visible `tool.call` events.
 - Skills live under [`skills/`](skills/); rendering and routing rules that must always work belong in plugin tool descriptions first, with `SKILL.md` as duplicate guidance.
 - The custom Node worker, Python Telegram client, and workspace file IPC are retired. Do not reintroduce `openclaw/worker/`, `jobhunter/telegram.py`, `jobhunter/agent.py`, or `openclaw/workspace/`.
 
@@ -18,8 +18,8 @@ Current Phase 2 shape:
 
 A safe, low-cost job-search assistant that runs as two Docker containers:
 
-1. **`jobhunter-service`**: stdlib Python service. Collects public/API/RSS/ATS/IMAP jobs, dedupes, scores, runs capped L2 relevance and cover-note calls, persists audits, and applies approved bounded actions.
-2. **`openclaw-gateway`**: Dockerized OpenClaw gateway. Uses Codex via the user's subscription and reaches Jobhunter only through the `jobhunter-tools` plugin. Codex auth is mounted read-only from `~/.codex`; no Docker socket is mounted.
+1. **`jobhunter-service`**: stdlib Python service. Collects public/API/RSS/ATS/IMAP jobs, dedupes, scores, runs capped L2 relevance and cover-note calls, stores approved lead candidates, persists audits, and applies approved bounded actions.
+2. **`openclaw-gateway`**: Dockerized OpenClaw gateway. Uses Codex via the user's subscription and reaches Jobhunter/Leadhunter only through the `jobhunter-tools` plugin. Codex auth is mounted read-only from `~/.codex`; no Docker socket is mounted.
 
 The user interacts through Telegram via OpenClaw. The bot never applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 
@@ -33,6 +33,9 @@ The user interacts through Telegram via OpenClaw. The bot never applies to jobs,
 | `Usage` | `jobhunter_usage` |
 | Inline `Applied` / `Irrelevant` / `Snooze` / `Cover` | Synthetic callback text routes to `jobhunter_mark_job` or `jobhunter_cover_note` using the 12-char `id_prefix` |
 | `/history`, `/revert` | `jobhunter_history`, `jobhunter_revert_action` |
+| `/leads` / `Get leads` | `leadhunter_get_more_leads`; render each lead with `presentation.blocks[].buttons` |
+| Lead research | OpenClaw/Codex researches public sources, asks for approval, then calls `leadhunter_save_leads` |
+| Lead pitch | `leadhunter_draft_pitch`; copy-paste only, no automatic outreach |
 
 Two LLM tiers stay separate:
 
@@ -77,6 +80,7 @@ config/sources.local.json
 config/scoring.local.json
 input/profile.local.md
 input/cv.local.md
+input/icp.local.md
 openclaw/config/
 openclaw/codex-home/
 ```

@@ -119,3 +119,12 @@ Run this manually through a controlled SQL path after reviewing the impact; the 
   - Action `62` added `dou-product-manager` as a `community` `status=test` source. Service logs show `source_candidate_firecrawl_probe reachable=true` and `community_source_firecrawl_fetch_succeeded` for the DOU URL.
   - Collection inserted DOU rows: SQL count was `26` immediately after first collection; after parser-filter cleanup, `18` DOU rows remain `new` and `8` DOU navigation/filter rows were archived via audited action `63`.
   - `phase3b-email-process-smoke`: trajectory includes `jobhunter_process_email` with `jobs_found=0`, `inserted=0` for a wrapper-only email body, proving the new bridge tool is visible and the noise filter is applied.
+
+## Phase 4: Recurring jobs + Leadhunter
+
+- OpenClaw config enables cron, and onboarding attempts to register CLI-backed cron jobs for collection every 4 hours, daily rescore, and monthly source discovery. The scheduled prompts call `jobhunter_collect_all_sources`, `jobhunter_rescore_recent_jobs`, or `jobhunter_propose_actions`; they do not require shell access. Live validation on OpenClaw 2026.5.7 rejected declarative `cron.jobs`, so `./bin/openclaw cron-install` is the supported path for this pinned runtime.
+- Live note: after accepting the config and restarting the gateway, `cron-install` can still be blocked by OpenClaw's gateway scope approval (`scope upgrade pending approval`). This is a real OpenClaw approval gate, not a Jobhunter failure; approve the pending scope in the OpenClaw UI and rerun `./bin/openclaw cron-install`.
+- The plugin remains the single tool surface. It now includes five `leadhunter_*` tools plus `jobhunter_rescore_recent_jobs`; there is still no Codex-native MCP registration.
+- SQLite schema v11 adds `leads`, `lead_sources`, `lead_feedback`, and `lead_drafts`. Lead URLs go through the same safe URL validator used for public source work.
+- `input/icp.local.md` is private and gitignored. It is copied from `input/icp.example.md` on first init and used for pitch drafting.
+- Leadhunter is intentionally human-in-the-loop: research can use OpenClaw web/search tools, but candidates are saved only after approval and pitch tools only draft copy-paste text.

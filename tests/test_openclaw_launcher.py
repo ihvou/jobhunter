@@ -18,7 +18,20 @@ class OpenClawLauncherTests(unittest.TestCase):
     def test_help_lists_bridge_commands(self):
         result = self.run_launcher("help")
         self.assertEqual(result.returncode, 0)
-        for command in ("start", "stop", "restart", "logs", "status", "shell", "onboard", "doctor", "migrate-codex", "config"):
+        for command in (
+            "start",
+            "stop",
+            "restart",
+            "logs",
+            "status",
+            "shell",
+            "onboard",
+            "cron-install",
+            "cron-list",
+            "doctor",
+            "migrate-codex",
+            "config",
+        ):
             self.assertIn(command, result.stdout)
 
     def test_config_prints_plugin_and_skill_paths(self):
@@ -31,8 +44,11 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn('mode: "off"', result.stdout)
         self.assertIn('inlineButtons: "dm"', result.stdout)
         self.assertIn("sendMessage: true", result.stdout)
+        self.assertIn("cron", result.stdout)
         self.assertIn('agentRuntime', result.stdout)
         self.assertIn('id: "codex"', result.stdout)
+        self.assertIn('id: "leads"', result.stdout)
+        self.assertIn('skills: ["leadhunter"]', result.stdout)
         self.assertIn('primary: "openai-codex/gpt-5.5"', result.stdout)
         self.assertIn('alsoAllow: ["web_search", "web_fetch", "jobhunter-tools", "firecrawl", "exa"]', result.stdout)
         self.assertIn('allow: ["codex", "telegram", "jobhunter-tools", "firecrawl", "exa", "memory-core", "openai"]', result.stdout)
@@ -52,6 +68,9 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("jobhunter-tools", result.stdout)
         self.assertIn("firecrawl", result.stdout)
         self.assertIn("exa", result.stdout)
+        self.assertIn("jobs-collection", result.stdout)
+        self.assertIn("jobhunter_rescore_recent_jobs", result.stdout)
+        self.assertIn("leadhunter", result.stdout)
         self.assertIn("mcp remove jobhunter", result.stdout)
         self.assertNotIn("jobhunter.openclaw_mcp", result.stdout)
         self.assertNotIn("default_tools_approval_mode", result.stdout)

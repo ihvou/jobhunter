@@ -30,3 +30,5 @@ Return candidates with:
 - contact surface, if public
 - risk level
 - confidence
+
+After the user approves candidates, store them with `leadhunter_save_leads`. After the user approves a repeatable source, store it with `leadhunter_add_lead_source`.

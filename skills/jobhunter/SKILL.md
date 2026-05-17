@@ -19,6 +19,7 @@ Decision tree for any user question:
 | "How many jobs / how many applied / show me top N" | `jobhunter_query_sql` with a SELECT |
 | "Get fresh jobs / show me new matches" | `jobhunter_get_more_jobs` (uses cached digest, fast) |
 | "Run collection / pull new jobs / refresh sources" | `jobhunter_collect_all_sources` (slow, ~30-60s) |
+| "Rescore recent jobs / refresh scoring" | `jobhunter_rescore_recent_jobs` |
 | "What's my spend / quota / usage" | `jobhunter_usage` |
 | "What did I approve recently" | `jobhunter_history` |
 | "Mark this job applied / irrelevant / snooze" | `jobhunter_mark_job` |
@@ -38,6 +39,7 @@ Available Jobhunter plugin tools:
 
 - `jobhunter_get_more_jobs`: return ranked job matches. Use `mark_sent=true` only after the jobs have been shown to the user.
 - `jobhunter_collect_all_sources`: run collection/indexing from configured sources.
+- `jobhunter_rescore_recent_jobs`: rescore recent indexed jobs after feedback or profile/scoring changes.
 - `jobhunter_usage`: show local spend and quota counters.
 - `jobhunter_history`: show recent approved/applied agent action rows.
 - `jobhunter_propose_actions`: store bounded source/scoring/profile/email-parser actions for user approval.

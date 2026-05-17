@@ -809,6 +809,15 @@ Each agent has its own session, history, prompt cache. They share the jobhunter-
 - `/agent find me 5 founders who raised Series A this week building AI products` produces a multi-turn research flow ending in lead candidates.
 - Approving lead candidates lands them in the DB; `Draft pitch` produces a personalized DM you copy to LinkedIn manually.
 
+### Phase 4 implementation notes
+
+- OpenClaw config enables cron, and `./bin/openclaw onboard` / `./bin/openclaw cron-install` register three CLI-backed jobs: `jobs-collection`, `jobs-rescore-on-feedback-change`, and `jobs-discovery-monthly`. They all route through the `jobs` agent and plugin tools; no shell or filesystem access is used.
+- `agents.list` now defines `jobs` and `leads` agents. Both still share the same Dockerized gateway and the same `jobhunter-service`; domain separation comes from skill instructions and tool descriptions.
+- `plugins/jobhunter-tools/` now exposes leadhunter tools in the same trajectory-visible plugin surface: `leadhunter_get_more_leads`, `leadhunter_save_leads`, `leadhunter_add_lead_source`, `leadhunter_mark_lead`, and `leadhunter_draft_pitch`.
+- SQLite schema v11 adds `leads`, `lead_sources`, `lead_feedback`, and `lead_drafts`. Lead candidates must have a public URL, pass the same SSRF-safe URL validation, and are stored only when the user has approved the candidate list.
+- `input/icp.local.md` is the private ICP input for lead research and pitch drafting. It is gitignored like the profile and CV.
+- Outreach remains manual: lead pitch tools draft copy-paste text only and never send email, LinkedIn messages, or any automatic outreach.
+
 ## Security configuration (mandatory)
 
 OpenClaw's default is FULL host access for main session. We override to match-or-exceed our current safety.

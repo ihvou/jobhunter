@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from jobhunter.app import JobHunter
 from jobhunter.models import Job, ScoreResult, SourceConfig
@@ -114,6 +115,71 @@ class ServiceTests(unittest.TestCase):
             reverted = service.revert_action(action_id)
             self.assertTrue(reverted["ok"])
             self.assertEqual(bot.config.profile_path.read_text(encoding="utf-8"), before)
+
+    def test_lead_research_digest_mark_and_pitch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.icp_path.write_text("I help AI-first SaaS teams with workflow automation.", encoding="utf-8")
+            service = JobHunterService(bot)
+
+            with mock.patch("jobhunter.service.validate_safe_url"):
+                saved = service.research_leads(
+                    {
+                        "session_id": "lead-session",
+                        "user_intent": "find AI founders",
+                        "leads": [
+                            {
+                                "person_name": "Alex Founder",
+                                "company": "AgentCo",
+                                "role": "Founder",
+                                "url": "https://example.com/alex",
+                                "evidence": ["Raised Series A for an AI workflow product"],
+                                "why_match": "Building AI workflow automation",
+                                "confidence": 88,
+                            }
+                        ],
+                    }
+                )
+                source = service.add_lead_source(
+                    {
+                        "session_id": "lead-session",
+                        "name": "AI Founder Directory",
+                        "url": "https://example.com/founders",
+                    }
+                )
+
+            self.assertEqual(saved["count"], 1)
+            self.assertTrue(source["ok"])
+            lead_id = saved["saved"][0]["id"]
+            digest = service.leads_digest(limit=5)
+            self.assertEqual(digest["count"], 1)
+            self.assertEqual(digest["leads"][0]["id"], lead_id)
+
+            marked = service.mark_lead(lead_id, "shortlisted")
+            self.assertEqual(marked["status"], "shortlisted")
+
+            pitch = service.draft_lead_pitch(lead_id)
+            self.assertIn("Hi Alex", pitch["draft"])
+            self.assertIn("AgentCo", pitch["draft"])
+
+    def test_resolve_lead_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            service = JobHunterService(bot)
+            with mock.patch("jobhunter.service.validate_safe_url"):
+                saved = service.research_leads(
+                    {
+                        "leads": [
+                            {
+                                "company": "PrefixCo",
+                                "url": "https://example.com/prefixco",
+                            }
+                        ]
+                    }
+                )
+            lead_id = saved["saved"][0]["id"]
+
+            self.assertEqual(service.resolve_lead_prefix(lead_id[:12])["lead_id"], lead_id)
 
 
 if __name__ == "__main__":

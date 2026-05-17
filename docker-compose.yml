@@ -17,6 +17,7 @@ services:
       JOBHUNTER_HEARTBEAT_PATH: /jobhunter/data/heartbeat
       JOBHUNTER_PROFILE_PATH: /jobhunter/input/profile.local.md
       JOBHUNTER_CV_PATH: /jobhunter/input/cv.local.md
+      JOBHUNTER_ICP_PATH: /jobhunter/input/icp.local.md
       JOBHUNTER_PROFILE_SETTINGS_PATH: /jobhunter/config/profile.local.json
       JOBHUNTER_SOURCES_PATH: /jobhunter/config/sources.local.json
       JOBHUNTER_SCORING_PATH: /jobhunter/config/scoring.local.json

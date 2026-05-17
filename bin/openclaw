@@ -20,6 +20,8 @@ Commands:
   status    Show service and gateway status
   shell     Open a shell; use "shell gateway" or "shell service"
   onboard   Run Dockerized OpenClaw onboarding without host daemon install
+  cron-install  Register the Phase 4 OpenClaw cron jobs
+  cron-list     List OpenClaw cron jobs
   doctor    Run OpenClaw doctor inside the gateway image
   migrate-codex  Run OpenClaw Codex auth migration inside the gateway image
   config    Print suggested OpenClaw config snippet
@@ -54,7 +56,7 @@ import sys
 import urllib.request
 
 try:
-    with urllib.request.urlopen(sys.argv[1].rstrip("/") + "/healthz", timeout=2) as response:
+    with urllib.request.urlopen(sys.argv[1].rstrip("/") + "/health", timeout=2) as response:
         print("ok" if 200 <= response.status < 300 else "bad")
 except Exception:
     print("down")
@@ -85,7 +87,84 @@ config_patch() {
 }
 
 patch_jobhunter_openclaw_config() {
-  local payload='{"channels":{"telegram":{"capabilities":{"inlineButtons":"dm"},"actions":{"sendMessage":true}}},"mcp":{"servers":{"jobhunter":null}},"skills":{"load":{"extraDirs":["/openclaw/skills"]}},"agents":{"defaults":{"agentRuntime":{"id":"codex"},"model":{"primary":"openai-codex/gpt-5.5"},"models":{"openai-codex/gpt-5.5":{}},"skills":["jobhunter"],"sandbox":{"mode":"off"}}},"plugins":{"allow":["codex","telegram","jobhunter-tools","firecrawl","exa","memory-core","openai"],"load":{"paths":["/opt/jobhunter/plugins/jobhunter-tools"]},"entries":{"codex":{"enabled":true,"config":{"codexDynamicToolsProfile":"native-first","codexDynamicToolsExclude":[],"appServer":{"approvalPolicy":"on-request","sandbox":"read-only","serviceTier":"fast"}}},"telegram":{"enabled":true},"memory-core":{"enabled":true},"openai":{"enabled":true},"firecrawl":{"enabled":true,"config":{"webFetch":{"onlyMainContent":true,"maxAgeMs":86400000,"timeoutSeconds":30},"webSearch":{"baseUrl":"https://api.firecrawl.dev"}}},"exa":{"enabled":true,"config":{"webSearch":{"baseUrl":"https://api.exa.ai"}}},"jobhunter-tools":{"enabled":true},"jobhunter-mcp":null}},"tools":{"profile":"messaging","alsoAllow":["web_search","web_fetch","jobhunter-tools","firecrawl","exa"],"deny":["group:runtime","group:fs","group:automation"],"web":{"fetch":{"provider":"firecrawl"}},"fs":{"workspaceOnly":true},"exec":{"security":"deny","ask":"always"},"elevated":{"enabled":false}}}'
+  local payload
+  payload="$(cat <<'JSON'
+{
+  "channels": {
+    "telegram": {
+      "capabilities": { "inlineButtons": "dm" },
+      "actions": { "sendMessage": true }
+    }
+  },
+  "cron": {
+    "enabled": true,
+    "maxConcurrentRuns": 1
+  },
+  "mcp": { "servers": { "jobhunter": null } },
+  "skills": { "load": { "extraDirs": ["/openclaw/skills"] } },
+  "agents": {
+    "defaults": {
+      "agentRuntime": { "id": "codex" },
+      "model": { "primary": "openai-codex/gpt-5.5" },
+      "models": { "openai-codex/gpt-5.5": {} },
+      "skills": ["jobhunter"],
+      "sandbox": { "mode": "off" }
+    },
+    "list": [
+      { "id": "jobs", "name": "Jobhunter", "skills": ["jobhunter"] },
+      { "id": "leads", "name": "Leadhunter", "skills": ["leadhunter"] }
+    ]
+  },
+  "plugins": {
+    "allow": ["codex", "telegram", "jobhunter-tools", "firecrawl", "exa", "memory-core", "openai"],
+    "load": { "paths": ["/opt/jobhunter/plugins/jobhunter-tools"] },
+    "entries": {
+      "codex": {
+        "enabled": true,
+        "config": {
+          "codexDynamicToolsProfile": "native-first",
+          "codexDynamicToolsExclude": [],
+          "appServer": {
+            "approvalPolicy": "on-request",
+            "sandbox": "read-only",
+            "serviceTier": "fast"
+          }
+        }
+      },
+      "telegram": { "enabled": true },
+      "memory-core": { "enabled": true },
+      "openai": { "enabled": true },
+      "firecrawl": {
+        "enabled": true,
+        "config": {
+          "webFetch": {
+            "onlyMainContent": true,
+            "maxAgeMs": 86400000,
+            "timeoutSeconds": 30
+          },
+          "webSearch": { "baseUrl": "https://api.firecrawl.dev" }
+        }
+      },
+      "exa": {
+        "enabled": true,
+        "config": { "webSearch": { "baseUrl": "https://api.exa.ai" } }
+      },
+      "jobhunter-tools": { "enabled": true },
+      "jobhunter-mcp": null
+    }
+  },
+  "tools": {
+    "profile": "messaging",
+    "alsoAllow": ["web_search", "web_fetch", "jobhunter-tools", "firecrawl", "exa"],
+    "deny": ["group:runtime", "group:fs", "group:automation"],
+    "web": { "fetch": { "provider": "firecrawl" } },
+    "fs": { "workspaceOnly": true },
+    "exec": { "security": "deny", "ask": "always" },
+    "elevated": { "enabled": false }
+  }
+}
+JSON
+)"
   config_patch "$payload"
 }
 
@@ -98,6 +177,73 @@ remove_codex_mcp_jobhunter() {
   else
     "${COMPOSE[@]}" exec -T openclaw-gateway "${cmd[@]}" || true
   fi
+}
+
+cron_exec() {
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+'
+    printf ' %q' "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js cron "$@"
+    printf '\n'
+  else
+    "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js cron "$@"
+  fi
+}
+
+cron_upsert_agent_job() {
+  local name="$1"
+  local schedule="$2"
+  local agent="$3"
+  local timeout_seconds="$4"
+  local deliver="$5"
+  local message="$6"
+  if [ "$DRY_RUN" = "1" ]; then
+    cron_exec rm "$name"
+    cron_exec add --name "$name" --cron "$schedule" --agent "$agent" --session isolated --light-context --timeout-seconds "$timeout_seconds" --message "$message" --no-deliver --json
+    return
+  fi
+  "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js cron rm "$name" >/dev/null 2>&1 || true
+  if [ "$deliver" = "telegram" ]; then
+    "${COMPOSE[@]}" exec -T openclaw-gateway sh -c '
+      set -eu
+      if [ -n "${TELEGRAM_ALLOWED_CHAT_ID:-}" ]; then
+        exec node /app/dist/index.js cron add \
+          --name "$1" --cron "$2" --agent "$3" --session isolated --light-context \
+          --timeout-seconds "$4" --message "$5" \
+          --announce --best-effort-deliver --channel telegram --to "$TELEGRAM_ALLOWED_CHAT_ID" --json
+      fi
+      exec node /app/dist/index.js cron add \
+        --name "$1" --cron "$2" --agent "$3" --session isolated --light-context \
+        --timeout-seconds "$4" --message "$5" --no-deliver --json
+    ' sh "$name" "$schedule" "$agent" "$timeout_seconds" "$message"
+  else
+    "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js cron add \
+      --name "$name" --cron "$schedule" --agent "$agent" --session isolated --light-context \
+      --timeout-seconds "$timeout_seconds" --message "$message" --no-deliver --json
+  fi
+}
+
+install_cron_jobs() {
+  cron_upsert_agent_job \
+    "jobs-collection" \
+    "0 */4 * * *" \
+    "jobs" \
+    "900" \
+    "none" \
+    "Scheduled maintenance: call jobhunter_collect_all_sources, then call jobhunter_get_more_jobs with mark_sent=false and summarize only counts. Do not render job cards unless a human asked."
+  cron_upsert_agent_job \
+    "jobs-rescore-on-feedback-change" \
+    "0 6 * * *" \
+    "jobs" \
+    "900" \
+    "none" \
+    "Scheduled maintenance: call jobhunter_rescore_recent_jobs with limit=500, then send a concise diagnostic only if the tool reports an error."
+  cron_upsert_agent_job \
+    "jobs-discovery-monthly" \
+    "0 0 1 * *" \
+    "jobs" \
+    "1800" \
+    "telegram" \
+    "Scheduled source review: use exa/firecrawl/web tools to look for better job aggregators or public boards for the current profile. If changes are warranted, call jobhunter_propose_actions with sources_proposal. Do not apply changes without user approval."
 }
 
 print_config() {
@@ -115,6 +261,10 @@ print_config() {
         sendMessage: true
       }
     }
+  },
+  cron: {
+    enabled: true,
+    maxConcurrentRuns: 1
   },
   skills: {
     load: {
@@ -136,7 +286,19 @@ print_config() {
       sandbox: {
         mode: "off"
       }
-    }
+    },
+    list: [
+      {
+        id: "jobs",
+        name: "Jobhunter",
+        skills: ["jobhunter"]
+      },
+      {
+        id: "leads",
+        name: "Leadhunter",
+        skills: ["leadhunter"]
+      }
+    ]
   },
   plugins: {
     allow: ["codex", "telegram", "jobhunter-tools", "firecrawl", "exa", "memory-core", "openai"],
@@ -267,7 +429,18 @@ case "${1:-help}" in
     gateway_node_live config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
     patch_jobhunter_openclaw_config
     remove_codex_mcp_jobhunter
-    printf "\nOnboarding finished. Jobhunter OpenClaw plugin, skill, Telegram, and Codex runtime are configured.\n"
+    if install_cron_jobs; then
+      printf "\nOnboarding finished. Jobhunter OpenClaw plugin, skills, Telegram, Codex runtime, and cron jobs are configured.\n"
+    else
+      printf "\nOnboarding finished, but cron registration needs one more step.\n"
+      printf "Approve any pending OpenClaw gateway scope prompt, then run './bin/openclaw cron-install'.\n"
+    fi
+    ;;
+  cron-install)
+    install_cron_jobs
+    ;;
+  cron-list)
+    cron_exec list
     ;;
   doctor)
     shift

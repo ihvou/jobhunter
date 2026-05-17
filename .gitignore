@@ -9,6 +9,7 @@ config/*.bak
 config/scoring.v*.json
 input/profile.local.md
 input/cv.local.md
+input/icp.local.md
 input/*.private.md
 input/*.bak
 openclaw/config/

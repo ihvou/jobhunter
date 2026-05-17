@@ -3,6 +3,9 @@
 //   ./bin/openclaw onboard
 // Validate with:
 //   ./bin/openclaw config
+// Cron job definitions are installed through `./bin/openclaw cron-install`
+// because OpenClaw 2026.5.7 stores cron jobs via the gateway cron CLI, not
+// declarative `cron.jobs` config.
 //
 // Phase 1.5 keeps the gateway itself in Docker, so per-agent sandboxing is off:
 // mounting /var/run/docker.sock into the gateway is explicitly forbidden.
@@ -29,6 +32,10 @@
       extraDirs: ["/openclaw/skills"],
     },
   },
+  cron: {
+    enabled: true,
+    maxConcurrentRuns: 1,
+  },
   agents: {
     defaults: {
       agentRuntime: {
@@ -48,10 +55,12 @@
     list: [
       {
         id: "jobs",
+        name: "Jobhunter",
         skills: ["jobhunter"],
       },
       {
         id: "leads",
+        name: "Leadhunter",
         skills: ["leadhunter"],
       },
     ],

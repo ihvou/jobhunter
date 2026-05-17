@@ -9,6 +9,7 @@
     "tools": [
       "jobhunter_get_more_jobs",
       "jobhunter_collect_all_sources",
+      "jobhunter_rescore_recent_jobs",
       "jobhunter_usage",
       "jobhunter_history",
       "jobhunter_propose_actions",
@@ -17,7 +18,12 @@
       "jobhunter_mark_job",
       "jobhunter_cover_note",
       "jobhunter_query_sql",
-      "jobhunter_process_email"
+      "jobhunter_process_email",
+      "leadhunter_get_more_leads",
+      "leadhunter_save_leads",
+      "leadhunter_add_lead_source",
+      "leadhunter_mark_lead",
+      "leadhunter_draft_pitch"
     ]
   },
   "configSchema": {

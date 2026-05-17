@@ -2,11 +2,12 @@ import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-import plugin, { collectWithSoftTimeout, resetCollectionForTests, resolveJobId } from "../index.js";
+import plugin, { collectWithSoftTimeout, resetCollectionForTests, resolveJobId, resolveLeadId } from "../index.js";
 
 const expectedToolNames = [
   "jobhunter_get_more_jobs",
   "jobhunter_collect_all_sources",
+  "jobhunter_rescore_recent_jobs",
   "jobhunter_usage",
   "jobhunter_history",
   "jobhunter_propose_actions",
@@ -16,6 +17,11 @@ const expectedToolNames = [
   "jobhunter_cover_note",
   "jobhunter_query_sql",
   "jobhunter_process_email",
+  "leadhunter_get_more_leads",
+  "leadhunter_save_leads",
+  "leadhunter_add_lead_source",
+  "leadhunter_mark_lead",
+  "leadhunter_draft_pitch",
 ];
 
 const originalFetch = globalThis.fetch;
@@ -93,6 +99,16 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   for (const phrase of ["Gmail Pub/Sub", "email parser", "scores"]) {
     assert.match(processEmailDescription, new RegExp(phrase));
   }
+
+  const leadsDescription = tools.get("leadhunter_get_more_leads").description;
+  for (const phrase of ["lead_shortlist:<id_prefix>", "lead_pitch:<id_prefix>", "presentation.blocks", "Never send outreach"]) {
+    assert.match(leadsDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const saveLeadsDescription = tools.get("leadhunter_save_leads").description;
+  for (const phrase of ["explicit user approval", "public url", "Do not store guessed personal emails"]) {
+    assert.match(saveLeadsDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
 });
 
 test("resolveJobId returns an explicit job_id without fetching", async () => {
@@ -120,6 +136,18 @@ test("resolveJobId resolves a 12-character id_prefix through the service", async
 
 test("resolveJobId rejects missing identifiers", async () => {
   await assert.rejects(() => resolveJobId({}), /job_id or id_prefix is required/);
+});
+
+test("resolveLeadId resolves id_prefix through the service", async () => {
+  let request = null;
+  globalThis.fetch = async (url, options) => {
+    request = { url: String(url), body: JSON.parse(options.body) };
+    return jsonResponse({ lead_id: "resolved-lead-id" });
+  };
+
+  assert.equal(await resolveLeadId({ id_prefix: "abcdef123456" }), "resolved-lead-id");
+  assert.equal(request.url, "http://jobhunter-service:8765/leads/resolve_prefix");
+  assert.deepEqual(request.body, { id_prefix: "abcdef123456" });
 });
 
 test("collectWithSoftTimeout returns running while collection is still pending", async () => {

@@ -76,6 +76,19 @@ export async function resolveJobId(params) {
   throw new Error("job_id or id_prefix is required");
 }
 
+export async function resolveLeadId(params) {
+  if (typeof params.lead_id === "string" && params.lead_id.trim()) {
+    return params.lead_id.trim();
+  }
+  if (typeof params.id_prefix === "string" && params.id_prefix.trim()) {
+    const resolved = await post("/leads/resolve_prefix", { id_prefix: params.id_prefix.trim() });
+    if (typeof resolved.lead_id === "string" && resolved.lead_id) {
+      return resolved.lead_id;
+    }
+  }
+  throw new Error("lead_id or id_prefix is required");
+}
+
 function runCollection() {
   if (!activeCollection) {
     activeCollection = post("/collect", {})
@@ -154,6 +167,17 @@ export default definePluginEntry({
         "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly.",
       parameters: schema({}),
       execute: async () => jsonResult(await collectWithSoftTimeout()),
+    });
+
+    register(api, {
+      name: "jobhunter_rescore_recent_jobs",
+      label: "Jobhunter Rescore Recent Jobs",
+      description:
+        "Rescore recent indexed jobs after profile/directive/scoring feedback changes. Intended for scheduled maintenance or explicit user requests. This uses cached job rows and bounded L2 rules; it does not collect new sources.",
+      parameters: schema({
+        limit: intSchema(1, 1000),
+      }),
+      execute: async (_toolCallId, params) => jsonResult(await post("/rescore", params)),
     });
 
     register(api, {
@@ -398,6 +422,133 @@ export default definePluginEntry({
         ["sender", "subject", "body"],
       ),
       execute: async (_toolCallId, params) => jsonResult(await post("/email/process", params)),
+    });
+
+    register(api, {
+      name: "leadhunter_get_more_leads",
+      label: "Leadhunter Get More Leads",
+      description:
+        "Return saved lead candidates from the local Jobhunter service. Use this when the user sends /leads, asks for lead digest, or asks to see researched leads. " +
+        "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], emit one `message` call using presentation.blocks with " +
+        "{action: \"send\", target: <chat_id from conversation metadata>, message: <lead text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
+        "[{text: \"Shortlist\", callback_data: \"lead_shortlist:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Reject\", callback_data: \"lead_reject:<id_prefix>\", style: \"danger\"}], " +
+        "[{text: \"Draft pitch\", callback_data: \"lead_pitch:<id_prefix>\", style: \"primary\"}]]}]}}. " +
+        "<id_prefix> is the first 12 lowercase hex characters of the lead id. Use mark_sent=true only for rows actually shown. " +
+        "Never send outreach automatically.",
+      parameters: schema({
+        limit: intSchema(1, 25),
+        mark_sent: { type: "boolean" },
+      }),
+      execute: async (_toolCallId, params) => jsonResult(await post("/leads/digest", params)),
+    });
+
+    register(api, {
+      name: "leadhunter_save_leads",
+      label: "Leadhunter Save Leads",
+      description:
+        "Save researched lead candidates after explicit user approval. Do NOT call this immediately after web_search/firecrawl/exa research unless the user has approved the candidate list. " +
+        "Lead objects need a public url plus person_name or company. Optional fields: role, source_name, source_url, contact_surface, evidence[], why_match, confidence 0-100, risk_level low|medium|high, notes. " +
+        "Use public professional evidence only. Do not store guessed personal emails, private LinkedIn/cookie data, or hidden contact details.",
+      parameters: schema(
+        {
+          session_id: { type: "string" },
+          user_intent: { type: "string" },
+          leads: {
+            type: "array",
+            minItems: 1,
+            maxItems: 25,
+            items: {
+              type: "object",
+              properties: {
+                person_name: { type: "string" },
+                name: { type: "string" },
+                company: { type: "string" },
+                role: { type: "string" },
+                title: { type: "string" },
+                url: { type: "string" },
+                profile_url: { type: "string" },
+                evidence_url: { type: "string" },
+                source_name: { type: "string" },
+                source_url: { type: "string" },
+                contact_surface: { type: "string" },
+                evidence: { type: "array", items: { type: "string" } },
+                why_match: { type: "string" },
+                confidence: intSchema(0, 100),
+                risk_level: { type: "string", enum: ["low", "medium", "high"] },
+                notes: { type: "string" },
+              },
+              additionalProperties: true,
+            },
+          },
+        },
+        ["leads"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/leads/research", params)),
+    });
+
+    register(api, {
+      name: "leadhunter_add_lead_source",
+      label: "Leadhunter Add Lead Source",
+      description:
+        "Save one public lead-source candidate after user approval. Good source types: public_directory, company_page, funding_news, conference, community, api, other. " +
+        "Use for repeatable public places where future lead research should look. Do not add logged-in LinkedIn, browser-cookie, or scraped private data sources.",
+      parameters: schema(
+        {
+          session_id: { type: "string" },
+          user_intent: { type: "string" },
+          id: { type: "string" },
+          name: { type: "string" },
+          type: {
+            type: "string",
+            enum: ["public_directory", "company_page", "funding_news", "conference", "community", "api", "other"],
+          },
+          url: { type: "string" },
+          status: { type: "string", enum: ["test", "active", "disabled"] },
+          risk_level: { type: "string", enum: ["low", "medium", "high"] },
+          notes: { type: "string" },
+        },
+        ["url"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/leads/source/add", params)),
+    });
+
+    register(api, {
+      name: "leadhunter_mark_lead",
+      label: "Leadhunter Mark Lead",
+      description:
+        "Mark a lead as shortlisted, rejected, pitched, or archived. Use lead_id or the 12-character id_prefix from lead inline callback data. This records status only; it never sends outreach.",
+      parameters: schema({
+        lead_id: { type: "string" },
+        id_prefix: { type: "string", pattern: "^[0-9a-f]{12}$" },
+        action: { type: "string", enum: ["shortlisted", "rejected", "pitch", "pitched", "archived"] },
+        status: { type: "string", enum: ["shortlisted", "rejected", "pitched", "archived"] },
+        details: { type: "string" },
+      }),
+      execute: async (_toolCallId, params) => {
+        const lead_id = await resolveLeadId(params);
+        let status = params.status || params.action;
+        if (status === "pitch") {
+          status = "pitched";
+        }
+        return jsonResult(await post("/leads/mark", { lead_id, status, details: params.details || "" }));
+      },
+    });
+
+    register(api, {
+      name: "leadhunter_draft_pitch",
+      label: "Leadhunter Draft Pitch",
+      description:
+        "Draft a short copy-paste DM for one lead. Use lead_id or id_prefix from an inline button. This tool only drafts text; it must never send messages, email, or LinkedIn outreach.",
+      parameters: schema({
+        lead_id: { type: "string" },
+        id_prefix: { type: "string", pattern: "^[0-9a-f]{12}$" },
+        ask: { type: "string" },
+      }),
+      execute: async (_toolCallId, params) => {
+        const lead_id = await resolveLeadId(params);
+        return jsonResult(await post("/leads/pitch", { lead_id, ask: params.ask || "" }));
+      },
     });
   },
 });

@@ -1,6 +1,6 @@
 # Jobhunter
 
-A safe, low-cost Telegram job-search assistant. It collects jobs from approved sources, ranks them against your profile, sends a short digest, and lets you improve the search by replying in plain English.
+A safe, low-cost Telegram job-search assistant. It collects jobs from approved sources, ranks them against your profile, sends a short digest, and lets you improve the search by replying in plain English. It can also research sales leads from an ICP, but stores candidates only after you approve them.
 
 Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor instructions in [`AGENTS.md`](AGENTS.md). Open work in [`tasks.md`](tasks.md).
 
@@ -22,6 +22,7 @@ Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - Your feedback changes future results. Button clicks and plain-English comments become training signals for source selection and scoring.
 - You can say things like `skip jobs requiring German`, `deprioritize Product Marketing Manager`, or `prioritize product builder roles using Claude/Codex`.
 - The agent can propose updated sources or scoring rules from that feedback; you approve changes before they are saved.
+- The same OpenClaw setup can research leads from `input/icp.local.md`: it searches public sources, shows candidates, saves only approved leads, and drafts copy-paste pitches without sending anything.
 
 ## What It Does
 
@@ -29,6 +30,8 @@ Architecture and detailed contracts live in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - Ranks jobs in two layers: fast local rules, then an optional bounded LLM relevance pass that reads your free-form profile and skips obvious mismatches such as wrong role family, required language, or seniority.
 - Sends a Telegram digest of new jobs with per-job buttons: **Irrelevant**, **Remind me tomorrow**, **Give me cover note**, **Applied**.
 - Refines itself through chat: type `/agent <request>` or any normal free-form message and Codex, via OpenClaw and your subscription, investigates, answers, and proposes bounded changes you approve per action.
+- Runs scheduled OpenClaw maintenance: source collection every 4 hours, daily rescore, and monthly source review.
+- Researches lead candidates from your ICP through public sources and stores only approved candidates.
 - Generates tailored cover notes via OpenAI (paid, budget-gated).
 - **Never** applies to jobs, messages recruiters, sends email, logs into LinkedIn, or mounts browser cookies.
 - Every change the agent proposes is approval-gated, auto-archived, and one-tap reversible via `/revert <id>`.
@@ -53,7 +56,7 @@ cp .env.example .env
 ./bin/openclaw status
 ```
 
-OpenClaw owns the Telegram connection. After onboarding, send `Get more jobs` or `/jobs` to the Telegram bot.
+OpenClaw owns the Telegram connection. After onboarding, send `Get more jobs` or `/jobs` to the Telegram bot. For leads, send `/leads` or a request such as `find me 5 founders who raised Series A this week building AI products`.
 
 ### Required environment variables
 
@@ -85,6 +88,7 @@ After `./bin/openclaw start` and `./bin/openclaw onboard`:
 3. **React to each card** — tap `Irrelevant` / `Remind me tomorrow` / `Give me cover note` / `Applied`.
 4. **Teach the system in plain English** — type `skip jobs that mention German required` or `prioritize Product Builder roles building with Claude or Codex`. The agent proposes a directive change; you approve; the next `Get more jobs` reflects it.
 5. **Refine sources and scoring when needed** — tap `Update sources` or `Tune scoring`. The agent proposes changes; you approve per-candidate or per-rule.
+6. **Research leads when needed** — write your ICP in `input/icp.local.md`, then type `/leads` to see saved leads or ask for new research. Example: `find me 5 founders who raised Series A this week building AI products`. The agent shows candidates first; it saves them only after you approve.
 
 ### Operator commands
 
@@ -94,6 +98,8 @@ After `./bin/openclaw start` and `./bin/openclaw onboard`:
 ./bin/openclaw stop       # stop both containers
 ./bin/openclaw restart    # rebuild and recreate both containers
 ./bin/openclaw config     # print the container-relative plugin + skill config snippet
+./bin/openclaw cron-install # register/refresh the scheduled OpenClaw jobs; may ask for OpenClaw scope approval
+./bin/openclaw cron-list  # list registered OpenClaw cron jobs
 ./bin/openclaw status     # check service and gateway health
 ./bin/openclaw logs       # follow both logs; use "logs gateway" or "logs service"
 ./bin/openclaw shell      # shell into jobhunter-service; use "shell gateway" for OpenClaw
@@ -112,6 +118,7 @@ The gateway exposes Jobhunter through the local `jobhunter-tools` OpenClaw plugi
 | `/applied`, `/snoozed`, `/irrelevant` | Retrieve recent jobs by status (since cards leave the chat after each action) |
 | `/jobs`, `/sources`, `/tune`, `/usage` | Slash equivalents of the four reply-keyboard buttons |
 | `/refresh` | Force a background source refresh without waiting for the stale gate |
+| `/leads` | Show saved lead candidates; for new research, ask in plain English |
 
 ## Agent Examples
 
@@ -215,6 +222,7 @@ You usually don't need to touch these. Telegram covers everything once the bot i
 |---|---|---|
 | `input/profile.local.md` | Your profile (`# About me` + `# Directives`). Required to bootstrap before you can talk to Telegram. | Use normal agent chat after bootstrap. Direct file edits also work. |
 | `input/cv.local.md` | Optional CV text, used only for cover notes. | Edit the file; no Telegram command for CV today. |
+| `input/icp.local.md` | Optional ICP for lead research and pitch drafting. | Edit the file before asking for leads. |
 | `config/sources.json` | Source registry. Ships with sensible defaults (Remotive, RemoteOK, Arbeitnow, WeWorkRemotely, optional IMAP). | Tap `Update sources` in Telegram or `/agent please add ...`. Direct edits also work. |
 | `config/scoring.json` | Active scoring ruleset. Ships with a baseline. | Tap `Tune scoring` in Telegram. Direct edits work but the agent's shadow-test path is safer. |
 | `config/jobhunter.json` | Budgets and runtime config. | Edit only if the defaults don't fit. |
@@ -226,9 +234,10 @@ For the very first run, copy the example files:
 cp .env.example .env
 cp input/profile.example.md input/profile.local.md   # optional; init copies the example if missing
 cp input/cv.example.md input/cv.local.md             # optional, only for cover notes
+cp input/icp.example.md input/icp.local.md           # optional, only for lead research
 ```
 
-The bot auto-copies `input/profile.example.md` and `input/cv.example.md` into the local files if you skip the copy. If you have a legacy `config/profile.local.json`, the bot folds it into `# About me` on first init and backs the JSON up.
+The bot auto-copies `input/profile.example.md`, `input/cv.example.md`, and `input/icp.example.md` into local files if you skip the copy. If you have a legacy `config/profile.local.json`, the bot folds it into `# About me` on first init and backs the JSON up.
 
 ## Source Lifecycle and Priority
 
@@ -244,6 +253,7 @@ For day-to-day use, prefer Telegram + `./bin/openclaw`. The Python CLI is for de
 python3 -m jobhunter init           # init schema, sources, local profile files
 python3 -m jobhunter collect        # fetch from enabled sources, L1-score, and index capped L2 relevance
 python3 -m jobhunter digest         # print current ranked digest rows as JSON
+python3 -m jobhunter leads          # print current lead digest rows as JSON
 python3 -m jobhunter run-once       # init + collect once
 python3 -m jobhunter service        # local HTTP service used by OpenClaw plugin tools
 python3 -m jobhunter usage          # local OpenAI usage summary
@@ -266,12 +276,12 @@ docker compose --profile openclaw config --quiet
 
 | Path | Contents | Gitignored? |
 |---|---|---|
-| `data/jobs.sqlite` | Jobs, L1 scores, L2 verdicts, feedback, digests, drafts, usage, agent_actions audit | yes |
+| `data/jobs.sqlite` | Jobs, leads, scores, verdicts, feedback, digests, drafts, usage, agent_actions audit | yes |
 | `data/backup/` | Archives produced by `/agent backup ...` and your manual SQLite snapshots | yes |
 | `data/email_samples/` | Recent IMAP alert bodies that the agent can inspect to propose better email parsers | yes |
 | `config/sources.json`, `config/scoring.json`, `config/jobhunter.json` | Source registry, scoring rules, runtime config | committed |
 | `config/scoring.v<n>.json` | Auto-archived previous scoring versions (used by `/revert`) | committed |
-| `input/profile.local.md`, `input/cv.local.md` | Your private profile + optional CV | yes |
+| `input/profile.local.md`, `input/cv.local.md`, `input/icp.local.md` | Your private profile, optional CV, and optional ICP | yes |
 | `input/profile.<ts>.md.bak` | Auto-archived previous profile versions | yes |
 | Docker volume `openclaw_home` | OpenClaw state, sessions, trajectories, and per-agent Codex config | docker-managed |
 | `~/.codex` | Codex auth mounted read-only into the gateway | outside repo |

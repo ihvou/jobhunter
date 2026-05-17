@@ -15,9 +15,13 @@ from .app import JobHunter
 from .config import load_app_config, load_sources
 from .database import tomorrow_iso
 from .logging_setup import configure_logging, log_context, safe_log_text
+from .models import Lead
+from .sources import SourceError, validate_safe_url
 
 LOGGER = logging.getLogger(__name__)
 JOB_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
+LEAD_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
+LEAD_STATUS_VALUES = {"new", "shortlisted", "rejected", "pitched", "archived"}
 
 
 class JobHunterService:
@@ -44,6 +48,11 @@ class JobHunterService:
         self.bot.collect()
         after = self.count_jobs()
         return {"ok": True, "jobs_before": before, "jobs_after": after, "inserted_estimate": max(0, after - before)}
+
+    def rescore_recent_jobs(self, limit: int = 500) -> Dict:
+        limit = min(max(1, limit or 500), 1000)
+        self.bot.rescore_recent_jobs(limit)
+        return {"ok": True, "rescored_limit": limit}
 
     def digest(self, limit: int = None, mark_sent: bool = False) -> Dict:
         limit = limit or self.bot.config.digest_max_jobs
@@ -194,6 +203,85 @@ class JobHunterService:
             date=str(body.get("date") or ""),
         )
 
+    def leads_digest(self, limit: int = None, mark_sent: bool = False) -> Dict:
+        limit = min(max(1, limit or 10), 25)
+        rows = self.bot.database.leads_for_digest(limit)
+        leads = [lead_digest_row(row) for row in rows]
+        digest_id = ""
+        if mark_sent and leads:
+            digest_id = self.bot.database.mark_leads_digested([lead["id"] for lead in leads])
+        return {"ok": True, "leads": leads, "count": len(leads), "digest_id": digest_id, "marked_sent": bool(digest_id)}
+
+    def research_leads(self, body: Dict) -> Dict:
+        candidates = body.get("leads") or body.get("candidates") or []
+        if not isinstance(candidates, list):
+            raise ServiceError(400, "leads/candidates must be an array")
+        if len(candidates) > 25:
+            raise ServiceError(400, "At most 25 leads can be saved per approval")
+        saved = []
+        skipped = []
+        for index, candidate in enumerate(candidates):
+            try:
+                lead = normalize_lead_candidate(candidate)
+                lead_id, inserted = self.bot.database.upsert_lead(lead)
+                saved.append(
+                    {
+                        "id": lead_id,
+                        "id_prefix": lead_id[:12],
+                        "inserted": inserted,
+                        "person_name": lead.person_name,
+                        "company": lead.company,
+                    }
+                )
+            except ServiceError as exc:
+                skipped.append({"index": index, "reason": exc.message})
+        session_id = str(body.get("session_id") or "openclaw-leads-%s" % int(time.time() * 1000))
+        self.bot.database.record_agent_action(
+            session_id,
+            "lead_research",
+            safe_log_text(body.get("user_intent") or body.get("query") or "", 1000),
+            "Saved %s lead candidates" % len(saved),
+            {"saved": saved, "skipped": skipped},
+            "applied",
+            result_message="Lead candidates saved: %s" % len(saved),
+        )
+        return {"ok": True, "saved": saved, "skipped": skipped, "count": len(saved)}
+
+    def add_lead_source(self, body: Dict) -> Dict:
+        source = normalize_lead_source(body)
+        source_id, inserted = self.bot.database.upsert_lead_source(source)
+        self.bot.database.record_agent_action(
+            str(body.get("session_id") or "openclaw-leads-%s" % int(time.time() * 1000)),
+            "lead_source",
+            safe_log_text(body.get("user_intent") or "", 1000),
+            "Added lead source %s" % source.get("name", source_id),
+            {"source": source, "source_id": source_id},
+            "applied",
+            result_message="Lead source saved: %s" % source_id,
+        )
+        return {"ok": True, "source_id": source_id, "inserted": inserted, "source": source}
+
+    def mark_lead(self, lead_id: str, status: str, details: str = "") -> Dict:
+        self.ensure_lead(lead_id)
+        status = normalize_lead_status(status)
+        self.bot.database.update_lead_status(lead_id, status, details)
+        self.bot.database.record_agent_action(
+            "openclaw-lead-button",
+            "mark_lead",
+            "inline lead action",
+            "Marked lead %s as %s" % (lead_id[:12], status),
+            {"lead_id": lead_id, "status": status, "details": details or ""},
+            "applied",
+            result_message="Lead %s marked as %s" % (lead_id[:12], status),
+        )
+        return {"ok": True, "lead_id": lead_id, "status": status}
+
+    def draft_lead_pitch(self, lead_id: str, ask: str = "") -> Dict:
+        lead = self.ensure_lead(lead_id)
+        draft = build_lead_pitch(lead, read_text_if_exists(self.bot.config.icp_path), ask)
+        self.bot.database.save_lead_draft(lead_id, "dm_pitch", draft)
+        return {"ok": True, "lead_id": lead_id, "draft": draft}
+
     def mark_job(self, job_id: str, status: str, feedback: str, details: str = "") -> Dict:
         self.ensure_job(job_id)
         self.bot.database.update_job_status(job_id, status)
@@ -213,6 +301,18 @@ class JobHunterService:
             raise ServiceError(409, "Job id prefix is ambiguous: %s" % prefix)
         return {"ok": True, "id_prefix": prefix, "job_id": rows[0]["id"]}
 
+    def resolve_lead_prefix(self, id_prefix: str) -> Dict:
+        prefix = str(id_prefix or "").strip().lower()
+        if not LEAD_ID_PREFIX_RE.match(prefix):
+            raise ServiceError(400, "Lead id prefix must be exactly 12 lowercase hex characters")
+        with self.bot.database.connection() as conn:
+            rows = list(conn.execute("select id from leads where id like ? order by id asc limit 2", (prefix + "%",)))
+        if not rows:
+            raise ServiceError(404, "No lead matched prefix: %s" % prefix)
+        if len(rows) > 1:
+            raise ServiceError(409, "Lead id prefix is ambiguous: %s" % prefix)
+        return {"ok": True, "id_prefix": prefix, "lead_id": rows[0]["id"]}
+
     def audit_mark_job(self, job_id: str, status: str, feedback: str, details: str = "") -> int:
         return self.bot.database.record_agent_action(
             "openclaw-inline-button",
@@ -229,6 +329,12 @@ class JobHunterService:
         if not job:
             raise ServiceError(404, "Job not found: %s" % safe_log_text(job_id, 120))
         return job
+
+    def ensure_lead(self, lead_id: str):
+        lead = self.bot.database.get_lead(lead_id)
+        if not lead:
+            raise ServiceError(404, "Lead not found: %s" % safe_log_text(lead_id, 120))
+        return lead
 
     def action_context(self, confirmed: bool = False) -> AgentActionContext:
         self.bot.refresh_profile()
@@ -303,6 +409,8 @@ def create_handler(app: JobHunterService):
                     payload = app.history(int(first(query, "limit", "10")))
                 elif method == "POST" and path == "/collect":
                     payload = app.collect()
+                elif method == "POST" and path == "/rescore":
+                    payload = app.rescore_recent_jobs(optional_int(body.get("limit")) or 500)
                 elif method == "POST" and path == "/digest":
                     payload = app.digest(optional_int(body.get("limit")), bool(body.get("mark_sent", False)))
                 elif method == "POST" and path == "/irrelevant":
@@ -315,6 +423,8 @@ def create_handler(app: JobHunterService):
                     payload = app.cover_note(required(body, "job_id"), bool(body.get("override_budget", False)))
                 elif method == "POST" and path == "/jobs/resolve_prefix":
                     payload = app.resolve_job_prefix(required(body, "id_prefix"))
+                elif method == "POST" and path == "/leads/resolve_prefix":
+                    payload = app.resolve_lead_prefix(required(body, "id_prefix"))
                 elif method == "POST" and path == "/action/propose":
                     payload = app.propose_actions(body.get("actions") or [], str(body.get("user_intent") or ""), str(body.get("session_id") or ""))
                 elif method == "POST" and path == "/action/apply":
@@ -325,6 +435,16 @@ def create_handler(app: JobHunterService):
                     payload = app.query_sql(required(body, "sql"), body.get("params") or [], optional_int(body.get("limit")) or 50)
                 elif method == "POST" and path == "/email/process":
                     payload = app.process_email(body)
+                elif method == "POST" and path == "/leads/digest":
+                    payload = app.leads_digest(optional_int(body.get("limit")), bool(body.get("mark_sent", False)))
+                elif method == "POST" and path in ("/leads/research", "/leads/save"):
+                    payload = app.research_leads(body)
+                elif method == "POST" and path == "/leads/source/add":
+                    payload = app.add_lead_source(body)
+                elif method == "POST" and path == "/leads/mark":
+                    payload = app.mark_lead(required(body, "lead_id"), required(body, "status"), str(body.get("details") or ""))
+                elif method == "POST" and path == "/leads/pitch":
+                    payload = app.draft_lead_pitch(required(body, "lead_id"), str(body.get("ask") or ""))
                 else:
                     raise ServiceError(404, "Unknown endpoint: %s %s" % (method, path))
                 self.send_json(200, payload)
@@ -404,6 +524,161 @@ def job_digest_row(row) -> Dict:
         "concerns": data.get("concerns", []),
         "fired_rules": data.get("fired_rules", []),
     }
+
+
+def lead_digest_row(row) -> Dict:
+    data = row_to_dict(row)
+    try:
+        evidence = json.loads(data.get("evidence_json") or "[]")
+    except json.JSONDecodeError:
+        evidence = []
+    return {
+        "id": data.get("id"),
+        "id_prefix": str(data.get("id") or "")[:12],
+        "person_name": data.get("person_name") or "",
+        "company": data.get("company") or "",
+        "role": data.get("role") or "",
+        "url": data.get("url") or "",
+        "source_name": data.get("source_name") or "",
+        "source_url": data.get("source_url") or "",
+        "contact_surface": data.get("contact_surface") or "",
+        "evidence": evidence,
+        "why_match": data.get("why_match") or "",
+        "confidence": int(data.get("confidence") or 0),
+        "risk_level": data.get("risk_level") or "low",
+        "status": data.get("status") or "new",
+        "last_seen_at": data.get("last_seen_at") or "",
+    }
+
+
+def normalize_lead_candidate(candidate) -> Lead:
+    if not isinstance(candidate, dict):
+        raise ServiceError(400, "Lead candidate must be an object")
+    url = first_non_empty(candidate, "url", "profile_url", "evidence_url", "company_url")
+    if not url:
+        raise ServiceError(400, "Lead candidate needs a public URL")
+    validate_lead_url(url)
+    source_url = first_non_empty(candidate, "source_url", "source")
+    if source_url:
+        validate_lead_url(source_url)
+    person_name = safe_log_text(first_non_empty(candidate, "person_name", "name"), 160)
+    company = safe_log_text(first_non_empty(candidate, "company", "account"), 160)
+    role = safe_log_text(first_non_empty(candidate, "role", "title"), 160)
+    if not person_name and not company:
+        raise ServiceError(400, "Lead candidate needs person_name or company")
+    evidence = candidate.get("evidence") or candidate.get("evidence_urls") or []
+    if isinstance(evidence, str):
+        evidence = [evidence]
+    if not isinstance(evidence, list):
+        evidence = []
+    return Lead(
+        person_name=person_name,
+        company=company,
+        role=role,
+        url=url.strip(),
+        source_name=safe_log_text(first_non_empty(candidate, "source_name"), 160),
+        source_url=source_url.strip() if source_url else "",
+        contact_surface=safe_log_text(first_non_empty(candidate, "contact_surface", "contact"), 240),
+        evidence=[safe_log_text(item, 500) for item in evidence[:8] if str(item).strip()],
+        why_match=safe_log_text(first_non_empty(candidate, "why_match", "why", "reason"), 1000),
+        confidence=clamp_int(candidate.get("confidence"), 0, 100, 50),
+        risk_level=normalize_risk(candidate.get("risk_level") or candidate.get("risk")),
+        status=normalize_lead_status(candidate.get("status") or "new"),
+        notes=safe_log_text(candidate.get("notes") or "", 1000),
+    )
+
+
+def normalize_lead_source(body: Dict) -> Dict:
+    url = required(body, "url")
+    validate_lead_url(url)
+    source_type = str(body.get("type") or "public_directory").strip().lower()
+    allowed = {"public_directory", "company_page", "funding_news", "conference", "community", "api", "other"}
+    if source_type not in allowed:
+        source_type = "other"
+    status = str(body.get("status") or "test").strip().lower()
+    if status not in {"test", "active", "disabled"}:
+        status = "test"
+    return {
+        "id": safe_log_text(body.get("id") or "", 80),
+        "name": safe_log_text(body.get("name") or url, 160),
+        "type": source_type,
+        "url": url,
+        "status": status,
+        "risk_level": normalize_risk(body.get("risk_level") or body.get("risk")),
+        "notes": safe_log_text(body.get("notes") or body.get("why") or "", 1000),
+        "created_by": "agent",
+    }
+
+
+def normalize_lead_status(value) -> str:
+    status = str(value or "new").strip().lower()
+    if status == "irrelevant":
+        status = "rejected"
+    if status not in LEAD_STATUS_VALUES:
+        raise ServiceError(400, "Invalid lead status: %s" % safe_log_text(value, 80))
+    return status
+
+
+def validate_lead_url(url: str) -> None:
+    try:
+        validate_safe_url(url)
+    except SourceError as exc:
+        raise ServiceError(400, str(exc))
+
+
+def normalize_risk(value) -> str:
+    risk = str(value or "low").strip().lower()
+    return risk if risk in {"low", "medium", "high"} else "low"
+
+
+def first_non_empty(data: Dict, *keys: str) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def clamp_int(value, minimum: int, maximum: int, default: int) -> int:
+    try:
+        return max(minimum, min(maximum, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def read_text_if_exists(path: Path) -> str:
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
+
+
+def build_lead_pitch(lead, icp_text: str, ask: str = "") -> str:
+    person = lead["person_name"] or "there"
+    company = lead["company"] or "your team"
+    role = lead["role"] or "your work"
+    why = lead["why_match"] or "the public signals around your company look relevant"
+    try:
+        evidence = json.loads(lead["evidence_json"] or "[]")
+    except json.JSONDecodeError:
+        evidence = []
+    signal = evidence[0] if evidence else why
+    icp_hint = first_sentence(icp_text) or "I work on practical AI automation and product workflows"
+    ask_text = ask.strip() or "Worth comparing notes for 15 minutes?"
+    return (
+        "Hi %s,\n\n"
+        "I noticed %s at %s, especially: %s\n\n"
+        "%s. It made me think there may be a useful fit around %s.\n\n"
+        "%s"
+    ) % (person.split()[0], role, company, signal, icp_hint, why, ask_text)
+
+
+def first_sentence(text: str) -> str:
+    cleaned = " ".join((text or "").replace("#", " ").split())
+    if not cleaned:
+        return ""
+    if ". " in cleaned:
+        return cleaned.split(". ", 1)[0].strip()[:220]
+    return cleaned[:220]
 
 
 def is_select_only(sql: str) -> bool:

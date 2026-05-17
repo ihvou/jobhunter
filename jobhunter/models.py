@@ -61,6 +61,23 @@ class Job:
 
 
 @dataclass
+class Lead:
+    person_name: str = ""
+    company: str = ""
+    role: str = ""
+    url: str = ""
+    source_name: str = ""
+    source_url: str = ""
+    contact_surface: str = ""
+    evidence: List[str] = field(default_factory=list)
+    why_match: str = ""
+    confidence: int = 0
+    risk_level: str = "low"
+    status: str = "new"
+    notes: str = ""
+
+
+@dataclass
 class ScoreResult:
     score: int
     hard_reject: bool

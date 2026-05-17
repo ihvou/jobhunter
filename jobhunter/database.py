@@ -9,10 +9,10 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .logging_setup import log_context
-from .models import Job, ScoreResult, SourceConfig, utc_now_iso
+from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 10
+LATEST_SCHEMA_VERSION = 11
 
 
 class Database:
@@ -66,6 +66,9 @@ class Database:
             if current < 10:
                 migrate_v10(conn)
                 set_schema_version(conn, 10)
+            if current < 11:
+                migrate_v11(conn)
+                set_schema_version(conn, 11)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -965,6 +968,132 @@ class Database:
                     (row["parser_config_id"], row["parser_config_id"]),
                 )
 
+    def upsert_lead_source(self, source: Dict) -> Tuple[str, bool]:
+        source_id = source.get("id") or stable_lead_source_id(source)
+        now = utc_now_iso()
+        with self.connection() as conn:
+            existing = conn.execute("select id from lead_sources where id = ?", (source_id,)).fetchone()
+            conn.execute(
+                """
+                insert into lead_sources (
+                    id, name, type, url, status, risk_level, notes, created_by,
+                    first_seen_at, last_seen_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(id) do update set
+                    name = excluded.name,
+                    type = excluded.type,
+                    url = excluded.url,
+                    status = excluded.status,
+                    risk_level = excluded.risk_level,
+                    notes = excluded.notes,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    source_id,
+                    source.get("name") or source_id,
+                    source.get("type") or "public_directory",
+                    canonicalize_url(source.get("url") or ""),
+                    source.get("status") or "test",
+                    source.get("risk_level") or "low",
+                    source.get("notes") or "",
+                    source.get("created_by") or "agent",
+                    now,
+                    now,
+                ),
+            )
+            return source_id, existing is None
+
+    def upsert_lead(self, lead: Lead) -> Tuple[str, bool]:
+        lead_id = stable_lead_id(lead)
+        now = utc_now_iso()
+        evidence_json = json.dumps(lead.evidence or [])
+        with self.connection() as conn:
+            existing = conn.execute("select id from leads where id = ?", (lead_id,)).fetchone()
+            conn.execute(
+                """
+                insert into leads (
+                    id, person_name, company, role, url, source_name, source_url,
+                    contact_surface, evidence_json, why_match, confidence,
+                    risk_level, status, notes, first_seen_at, last_seen_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(id) do update set
+                    person_name = case when excluded.person_name != '' then excluded.person_name else person_name end,
+                    company = case when excluded.company != '' then excluded.company else company end,
+                    role = case when excluded.role != '' then excluded.role else role end,
+                    source_name = case when excluded.source_name != '' then excluded.source_name else source_name end,
+                    source_url = case when excluded.source_url != '' then excluded.source_url else source_url end,
+                    contact_surface = case when excluded.contact_surface != '' then excluded.contact_surface else contact_surface end,
+                    evidence_json = case when excluded.evidence_json != '[]' then excluded.evidence_json else evidence_json end,
+                    why_match = case when excluded.why_match != '' then excluded.why_match else why_match end,
+                    confidence = max(confidence, excluded.confidence),
+                    risk_level = excluded.risk_level,
+                    notes = case when excluded.notes != '' then excluded.notes else notes end,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    lead_id,
+                    lead.person_name,
+                    lead.company,
+                    lead.role,
+                    canonicalize_url(lead.url),
+                    lead.source_name,
+                    canonicalize_url(lead.source_url),
+                    lead.contact_surface,
+                    evidence_json,
+                    lead.why_match,
+                    int(lead.confidence or 0),
+                    lead.risk_level or "low",
+                    lead.status or "new",
+                    lead.notes,
+                    now,
+                    now,
+                ),
+            )
+            return lead_id, existing is None
+
+    def leads_for_digest(self, limit: int = 10) -> List[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """
+                    select *
+                    from leads
+                    where status not in ('rejected', 'archived')
+                    order by confidence desc, last_seen_at desc
+                    limit ?
+                    """,
+                    (limit,),
+                )
+            )
+
+    def mark_leads_digested(self, lead_ids: List[str]) -> str:
+        digest_id = hashlib.sha256(("|".join(lead_ids) + utc_now_iso()).encode("utf-8")).hexdigest()[:16]
+        if not lead_ids:
+            return digest_id
+        now = utc_now_iso()
+        with self.connection() as conn:
+            conn.executemany("update leads set last_digest_at = ? where id = ?", [(now, lead_id) for lead_id in lead_ids])
+        return digest_id
+
+    def get_lead(self, lead_id: str) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute("select * from leads where id = ?", (lead_id,)).fetchone()
+
+    def update_lead_status(self, lead_id: str, status: str, details: str = "") -> None:
+        with self.connection() as conn:
+            conn.execute("update leads set status = ? where id = ?", (status, lead_id))
+            conn.execute(
+                "insert into lead_feedback (lead_id, action, details, created_at) values (?, ?, ?, ?)",
+                (lead_id, status, details, utc_now_iso()),
+            )
+
+    def save_lead_draft(self, lead_id: str, draft_type: str, content: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "insert into lead_drafts (lead_id, draft_type, content, created_at) values (?, ?, ?, ?)",
+                (lead_id, draft_type, content, utc_now_iso()),
+            )
+
 
 def migrate_v1(conn) -> None:
     conn.executescript(
@@ -1363,6 +1492,65 @@ def migrate_v10(conn) -> None:
     )
 
 
+def migrate_v11(conn) -> None:
+    conn.executescript(
+        """
+        create table if not exists lead_sources (
+            id text primary key,
+            name text not null,
+            type text not null default 'public_directory',
+            url text not null,
+            status text not null default 'test',
+            risk_level text not null default 'low',
+            notes text,
+            created_by text not null default 'agent',
+            first_seen_at text not null,
+            last_seen_at text not null
+        );
+        create index if not exists idx_lead_sources_status on lead_sources(status, last_seen_at desc);
+
+        create table if not exists leads (
+            id text primary key,
+            person_name text not null default '',
+            company text not null default '',
+            role text not null default '',
+            url text not null,
+            source_name text,
+            source_url text,
+            contact_surface text,
+            evidence_json text not null default '[]',
+            why_match text,
+            confidence integer not null default 0,
+            risk_level text not null default 'low',
+            status text not null default 'new',
+            notes text,
+            first_seen_at text not null,
+            last_seen_at text not null,
+            last_digest_at text
+        );
+        create index if not exists idx_leads_digest on leads(status, confidence desc, last_seen_at desc);
+        create index if not exists idx_leads_company on leads(company, person_name);
+
+        create table if not exists lead_feedback (
+            id integer primary key autoincrement,
+            lead_id text not null,
+            action text not null,
+            details text,
+            created_at text not null
+        );
+        create index if not exists idx_lead_feedback_lead on lead_feedback(lead_id, created_at desc);
+
+        create table if not exists lead_drafts (
+            id integer primary key autoincrement,
+            lead_id text not null,
+            draft_type text not null,
+            content text not null,
+            created_at text not null
+        );
+        """
+    )
+
+
 def set_schema_version(conn, version: int) -> None:
     conn.execute("insert or ignore into schema_version (version, applied_at) values (?, ?)", (version, utc_now_iso()))
 
@@ -1399,6 +1587,23 @@ def trim_usage_logs(conn) -> None:
 def stable_job_id(job: Job) -> str:
     basis = "|".join([canonicalize_url(job.url), normalize_key(job.company), normalize_key(job.title)])
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+
+
+def stable_lead_id(lead: Lead) -> str:
+    basis = "|".join(
+        [
+            canonicalize_url(lead.url),
+            normalize_key(lead.person_name),
+            normalize_key(lead.company),
+            normalize_key(lead.role),
+        ]
+    )
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+
+
+def stable_lead_source_id(source: Dict) -> str:
+    basis = "|".join([canonicalize_url(source.get("url") or ""), normalize_key(source.get("name") or "")])
+    return "lead-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
 def canonicalize_url(url: str) -> str:
