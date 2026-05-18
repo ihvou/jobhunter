@@ -40,9 +40,10 @@ Route `Get more leads` to `leadhunter_get_more_leads` and `My ICP profile` to `l
 Callback routing:
 
 ```text
-lead_shortlist:<12_hex> -> call leadhunter_mark_lead(id_prefix=<12_hex>, status="shortlisted")
-lead_reject:<12_hex>    -> call leadhunter_mark_lead(id_prefix=<12_hex>, status="rejected")
-lead_pitch:<12_hex>     -> call leadhunter_draft_pitch(id_prefix=<12_hex>) and reply with the draft
+lead_reached:<12_hex>:<messageId>    -> call leadhunter_mark_lead(id_prefix=<12_hex>, status="reached_out"), then delete messageId
+lead_irrelevant:<12_hex>:<messageId> -> call leadhunter_mark_lead(id_prefix=<12_hex>, status="irrelevant"), then delete messageId
+lead_snooze:<12_hex>:<messageId>     -> call leadhunter_mark_lead(id_prefix=<12_hex>, status="snoozed", snooze_days=7), then delete messageId
+lead_pitch:<12_hex>:<messageId>      -> call leadhunter_draft_pitch(id_prefix=<12_hex>) and reply with the draft
 ```
 
 Read `{baseDir}/prompts/lead_discovery.md` for source discovery strategy and `{baseDir}/prompts/lead_agent.md` for the candidate approval flow.

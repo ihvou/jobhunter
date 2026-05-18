@@ -94,26 +94,16 @@ If stale, do this without asking:
 
 When the user asks for fresh jobs, for example "Get more jobs", after calling `jobhunter_get_more_jobs` you MUST emit the response via the OpenClaw `message` tool with per-job inline buttons. Do NOT just return a text reply.
 
-For each job in the returned shortlist, emit one `message` action with:
+For each job in the returned shortlist, use the two-call `messageId` workaround:
 
 ```text
-target = "telegram:<chat_id_from_conversation_metadata>"
-message = "<rank>. <title> — <company> — score <total_score>\n<url>"
-presentation = {
-  blocks: [{
-    type: "buttons",
-    buttons: [
-      [
-        { text: "Applied", callback_data: "applied:<job_id_first_12>", style: "success" },
-        { text: "Irrelevant", callback_data: "irrelevant:<job_id_first_12>", style: "danger" }
-      ],
-      [
-        { text: "Snooze", callback_data: "snooze:<job_id_first_12>" },
-        { text: "Cover", callback_data: "cover:<job_id_first_12>", style: "primary" }
-      ]
-    ]
-  }]
-}
+1. Send the job card with placeholder buttons: pending:<job_id_first_12>.
+2. Capture the returned messageId.
+3. Immediately edit the same message with real callback_data:
+   applied:<job_id_first_12>:<messageId>
+   irrelevant:<job_id_first_12>:<messageId>
+   snooze:<job_id_first_12>:<messageId>
+   cover:<job_id_first_12>:<messageId>
 ```
 
 `job_id_first_12` is the first 12 lowercase hex characters of the `jobs.id` value returned by `jobhunter_get_more_jobs`.
@@ -125,34 +115,34 @@ When a user message arrives matching one of these patterns, treat it as a button
 **Job callbacks:**
 
 ```text
-applied:<12_hex>     -> jobhunter_mark_job(id_prefix=<12_hex>, status="applied")
-irrelevant:<12_hex>  -> jobhunter_mark_job(id_prefix=<12_hex>, status="irrelevant")
-snooze:<12_hex>      -> jobhunter_mark_job(id_prefix=<12_hex>, status="snoozed", snooze_days=1)
-cover:<12_hex>       -> jobhunter_cover_note(id_prefix=<12_hex>)
+applied:<12_hex>:<messageId>     -> jobhunter_mark_job(id_prefix=<12_hex>, status="applied")
+irrelevant:<12_hex>:<messageId>  -> jobhunter_mark_job(id_prefix=<12_hex>, status="irrelevant")
+snooze:<12_hex>:<messageId>      -> jobhunter_mark_job(id_prefix=<12_hex>, status="snoozed", snooze_days=1)
+cover:<12_hex>:<messageId>       -> jobhunter_cover_note(id_prefix=<12_hex>)
 ```
 
 **Lead callbacks:**
 
 ```text
-lead_reached:<12_hex>     -> leadhunter_mark_lead(id_prefix=<12_hex>, status="reached_out")
-lead_irrelevant:<12_hex>  -> leadhunter_mark_lead(id_prefix=<12_hex>, status="irrelevant")
-lead_snooze:<12_hex>      -> leadhunter_mark_lead(id_prefix=<12_hex>, status="snoozed", snooze_days=7)
-lead_pitch:<12_hex>       -> leadhunter_draft_pitch(id_prefix=<12_hex>)
+lead_reached:<12_hex>:<messageId>     -> leadhunter_mark_lead(id_prefix=<12_hex>, status="reached_out")
+lead_irrelevant:<12_hex>:<messageId>  -> leadhunter_mark_lead(id_prefix=<12_hex>, status="irrelevant")
+lead_snooze:<12_hex>:<messageId>      -> leadhunter_mark_lead(id_prefix=<12_hex>, status="snoozed", snooze_days=7)
+lead_pitch:<12_hex>:<messageId>       -> leadhunter_draft_pitch(id_prefix=<12_hex>)
 ```
 
 The job/lead callback prefixes are deliberately distinct (`applied:` vs `lead_reached:`, `irrelevant:` vs `lead_irrelevant:`, `snooze:` vs `lead_snooze:`) so the dispatcher can route by prefix even if a job and a lead happen to share an `id_prefix`.
 
-**After triage actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads): send ONE short confirmation message.**
+**After triage actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads): delete the original card.**
 
 ```text
 message({
-  action: "send",
+  action: "delete",
   target: "telegram:<chat_id>",
-  message: "✓ Applied"   // or "✗ Irrelevant", "💤 Snoozed 1d", "✓ Reached out", "✗ Marked irrelevant", "💤 Snoozed 7d"
+  messageId: "<messageId_from_callback_data>"
 })
 ```
 
-> **OpenClaw 2026.5.7 callback gap (tracked):** the synthetic callback prompt's `message_id` is the callback_query id, NOT the message that had the button. `message(action="delete")` and `message(action="edit", messageId=…)` therefore cannot target the original digest message. Confirmation reply is the workaround until upstream OpenClaw exposes `callback_origin_message_id` or a `delete-callback-message` action. Phase 5 work item.
+The encoded `:<messageId>` is mandatory because OpenClaw 2026.5.7's synthetic callback prompt uses the callback_query id, not the button message id.
 
 Snoozed items automatically reappear in the next `/jobs` or `/leads` digest after the snooze window expires (1 day for jobs, 7 days for leads). DB rows persist for audit.
 
@@ -166,4 +156,4 @@ message({
 })
 ```
 
-Same caveat — we can't edit the original message in place under the current callback metadata. Phase 5 work item to encode message_id in callback_data so edit works.
+Keep the original card for draft actions unless the user also tapped a triage action.

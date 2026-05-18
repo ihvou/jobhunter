@@ -128,7 +128,7 @@ function register(api, tool) {
 
 const intSchema = (minimum, maximum) => ({ type: "integer", minimum, maximum });
 const PERSISTENT_KEYBOARD_CONTRACT =
-  "PERSISTENT TELEGRAM KEYBOARD: after any user-visible Telegram reply, include a reply-keyboard presentation block " +
+  "PERSISTENT TELEGRAM KEYBOARD: after any user-visible Telegram reply, include a reply-keyboard presentation.blocks block " +
   "alongside any inline buttons: {type: \"keyboard\", keyboard: [[\"Get more jobs\", \"My job profile\"], " +
   "[\"Get more leads\", \"My ICP profile\"]], resize_keyboard: true, persistent: true}. " +
   "These are reply-keyboard buttons, not inline callback buttons. Route `Get more jobs` to jobhunter_get_more_jobs, " +
@@ -151,31 +151,35 @@ export default definePluginEntry({
         "If queue_is_stale is true OR queue_freshness_hours >= 6, you MUST first call jobhunter_collect_all_sources, " +
         "then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
         "\"Collecting fresh jobs, back in ~1 min.\" " +
-        "RENDERING (Telegram digest requests only): for EACH job in jobs[], emit one `message` call using presentation.blocks with " +
-        "{action: \"send\", target: <chat_id from conversation metadata, e.g. \"telegram:855127987\">, " +
+        "RENDERING (Telegram digest requests only): for EACH job in jobs[], use the two-call messageId workaround. " +
+        "CALL 1: emit `message({action: \"send\", target: <chat_id from conversation metadata, e.g. \"telegram:855127987\">, " +
         "message: <job text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Applied\", callback_data: \"applied:<id_prefix>\", style: \"success\"}, " +
-        "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>\", style: \"danger\"}], " +
-        "[{text: \"Snooze\", callback_data: \"snooze:<id_prefix>\"}, " +
-        "{text: \"Cover\", callback_data: \"cover:<id_prefix>\", style: \"primary\"}]]}]}}. " +
+        "[{text: \"Applied\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}], " +
+        "[{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
+        "{text: \"Cover\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]]}]}})`. " +
+        "Capture the returned `messageId`. CALL 2: immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
+        "message: <same job text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
+        "[{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}], " +
+        "[{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]]}]}})`. " +
         "<id_prefix> is the first 12 lowercase hex characters of the job's id. " +
         "Use mark_sent=true only for rows actually shown. " +
         "For read-only diagnostics/analysis/source-or-scoring work, call with mark_sent=false and do NOT emit messages. " +
         "Never use bash or shell for Jobhunter digest requests. " +
-        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `applied:<12hex>`, " +
-        "`irrelevant:<12hex>`, `snooze:<12hex>`, or `cover:<12hex>`): " +
+        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `applied:<12hex>:<messageId>`, " +
+        "`irrelevant:<12hex>:<messageId>`, `snooze:<12hex>:<messageId>`, or `cover:<12hex>:<messageId>`): " +
         "(a) For applied/irrelevant/snooze (triage actions): call `jobhunter_mark_job` with the matching " +
-        "status, then emit ONE short `message(action=\"send\")` with a one-line confirmation: " +
-        "`\"✓ Applied\"`, `\"✗ Irrelevant\"`, or `\"💤 Snoozed 1d\"`. " +
+        "status, then emit `message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. " +
+        "Do not send a separate confirmation; the disappearing digest card is the confirmation. " +
         "Snoozed jobs automatically reappear in the next `/jobs` digest after their snooze window expires " +
         "(default 1 day). The DB row persists for audit. " +
         "NOTE on deleting the original digest message: OpenClaw 2026.5.7's callback synthetic-prompt metadata " +
-        "does NOT include the underlying Telegram message_id of the message that had the buttons — only the " +
-        "callback_query id — so `message(action=\"delete\")` cannot target it correctly. Confirmation reply " +
-        "is the working workaround until upstream fixes that. Do not attempt the delete. " +
+        "uses callback_query id, not the button message id; the encoded `:<messageId>` is mandatory. " +
         "(b) For cover (draft action — user wants the cover text attached): call `jobhunter_cover_note`, then " +
         "emit `message({action: \"send\", target: <chat_id>, message: \"**Cover note draft:**\\n<draft text>\"})`. " +
-        "Same caveat about the original message — we can't edit it in place; send the cover note as a fresh reply.",
+        "Keep the original digest card unless the user also tapped a triage action.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
@@ -480,26 +484,30 @@ export default definePluginEntry({
         " " +
         "If leads[] is empty, do NOT silently return — emit a single `message` explaining the empty state " +
         "(e.g. \"no saved leads yet — first set your Leadhunter ICP via icp_edit, then add a lead_source, then research\"). " +
-        "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], emit one `message` call with " +
-        "{action: \"send\", target: <chat_id from conversation metadata>, message: <lead text>, " +
+        "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], use the same two-call messageId workaround as jobs. " +
+        "CALL 1: emit `message({action: \"send\", target: <chat_id from conversation metadata>, message: <lead text>, " +
         "presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>\", style: \"success\"}, " +
-        "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>\", style: \"danger\"}], " +
-        "[{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>\"}, " +
-        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>\", style: \"primary\"}]]}]}}. " +
+        "[{text: \"Reached out\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}], " +
+        "[{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
+        "{text: \"Pitch\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]]}]}})`. " +
+        "Capture the returned `messageId`. CALL 2: immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
+        "message: <same lead text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
+        "[{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}], " +
+        "[{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]]}]}})`. " +
         "<id_prefix> is the first 12 lowercase hex characters of the lead id. " +
         "Button labels are intentionally symmetric with the job triage buttons. " +
         "Use mark_sent=true only for rows actually shown. " +
-        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `lead_reached:<12hex>`, " +
-        "`lead_irrelevant:<12hex>`, `lead_snooze:<12hex>`, or `lead_pitch:<12hex>`): " +
+        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `lead_reached:<12hex>:<messageId>`, " +
+        "`lead_irrelevant:<12hex>:<messageId>`, `lead_snooze:<12hex>:<messageId>`, or `lead_pitch:<12hex>:<messageId>`): " +
         "(a) For reached/irrelevant/snooze (triage actions): call `leadhunter_mark_lead` with the matching " +
-        "status (reached_out / irrelevant / snoozed; default snooze_days=7), then emit ONE short " +
-        "`message(action=\"send\")` with a one-line confirmation: `\"✓ Reached out\"`, `\"✗ Marked irrelevant\"`, " +
-        "or `\"💤 Snoozed 7d\"`. " +
+        "status (reached_out / irrelevant / snoozed; default snooze_days=7), then emit " +
+        "`message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. Do not send a separate confirmation. " +
         "Snoozed leads automatically reappear in the next `/leads` digest after their snooze window expires " +
         "(default 7 days; outreach cycles are longer than job triage). The DB row persists for audit. " +
-        "NOTE: same OpenClaw 2026.5.7 callback metadata gap as the job triage — do NOT call " +
-        "message(action=\"delete\"); confirmation reply is the workaround until upstream fix. " +
+        "The encoded `:<messageId>` is mandatory because the synthetic callback prompt does not carry the button message id. " +
         "(b) For pitch (draft action — user wants the pitch text): call `leadhunter_draft_pitch`, then emit " +
         "`message({action: \"send\", target: <chat_id>, message: \"**Pitch draft:**\\n<draft text>\"})`. " +
         "Never send outreach automatically — drafts only.",
