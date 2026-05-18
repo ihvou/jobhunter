@@ -154,22 +154,19 @@ export default definePluginEntry({
         "For read-only diagnostics/analysis/source-or-scoring work, call with mark_sent=false and do NOT emit messages. " +
         "Never use bash or shell for Jobhunter digest requests. " +
         "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `applied:<12hex>`, " +
-        "`irrelevant:<12hex>`, `snooze:<12hex>`, or `cover:<12hex>`). The synthetic user message includes a " +
-        "message_id in its conversation metadata — that is the digest message that had the buttons. Flow: " +
-        "(a) For applied/irrelevant/snooze (triage actions — user wants the job OFF their visible queue): call " +
-        "`jobhunter_mark_job` with the matching status, then emit " +
-        "`message({action: \"delete\", messageId: <metadata message_id>, target: <chat_id>})` " +
-        "to remove the job from the chat. Do NOT send a confirmation message — Telegram already animated the " +
-        "tap. The user wants a clean chat. " +
-        "Snoozed jobs automatically reappear in the NEXT `/jobs` digest after their snooze window expires " +
-        "(default 1 day) — no extra action needed; this is the persistence model. The DB row stays; " +
-        "`jobhunter_history` and SQL queries can still find triaged items for audit. " +
+        "`irrelevant:<12hex>`, `snooze:<12hex>`, or `cover:<12hex>`): " +
+        "(a) For applied/irrelevant/snooze (triage actions): call `jobhunter_mark_job` with the matching " +
+        "status, then emit ONE short `message(action=\"send\")` with a one-line confirmation: " +
+        "`\"✓ Applied\"`, `\"✗ Irrelevant\"`, or `\"💤 Snoozed 1d\"`. " +
+        "Snoozed jobs automatically reappear in the next `/jobs` digest after their snooze window expires " +
+        "(default 1 day). The DB row persists for audit. " +
+        "NOTE on deleting the original digest message: OpenClaw 2026.5.7's callback synthetic-prompt metadata " +
+        "does NOT include the underlying Telegram message_id of the message that had the buttons — only the " +
+        "callback_query id — so `message(action=\"delete\")` cannot target it correctly. Confirmation reply " +
+        "is the working workaround until upstream fixes that. Do not attempt the delete. " +
         "(b) For cover (draft action — user wants the cover text attached): call `jobhunter_cover_note`, then " +
-        "emit `message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
-        "message: \"<original job text>\\n\\n---\\n**Cover note draft:**\\n<draft text>\", " +
-        "presentation: {blocks: [{type: \"buttons\", buttons: [[{text: \"Applied\", callback_data: \"applied:<id_prefix>\", style: \"success\"}, {text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>\", style: \"danger\"}]]}]}})` " +
-        "to APPEND the cover note to the original message and keep Applied/Irrelevant buttons so the user can " +
-        "still triage from the same message. Do not send a second message for the cover note — edit in place.",
+        "emit `message({action: \"send\", target: <chat_id>, message: \"**Cover note draft:**\\n<draft text>\"})`. " +
+        "Same caveat about the original message — we can't edit it in place; send the cover note as a fresh reply.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
@@ -470,20 +467,17 @@ export default definePluginEntry({
         "Button labels are intentionally symmetric with the job triage buttons. " +
         "Use mark_sent=true only for rows actually shown. " +
         "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `lead_reached:<12hex>`, " +
-        "`lead_irrelevant:<12hex>`, `lead_snooze:<12hex>`, or `lead_pitch:<12hex>`). The synthetic user message " +
-        "includes a message_id in its conversation metadata — that is the digest message that had the buttons. " +
-        "(a) For reached/irrelevant/snooze (triage actions — user wants the lead OFF their visible queue): call " +
-        "`leadhunter_mark_lead` with the matching status (reached_out / irrelevant / snoozed; default snooze_days=7), " +
-        "then emit `message({action: \"delete\", messageId: <metadata message_id>, target: <chat_id>})` " +
-        "to remove the lead from the chat. Do NOT send a confirmation — Telegram animated the tap. " +
-        "Snoozed leads automatically reappear in the NEXT `/leads` digest after their snooze window expires " +
-        "(default 7 days for leads vs 1 day for jobs — outreach cycles are longer). The DB row stays; " +
-        "`jobhunter_history` and SQL queries can still find triaged leads for audit. " +
-        "(b) For pitch (draft action — user wants the pitch attached): call `leadhunter_draft_pitch`, then emit " +
-        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
-        "message: \"<original lead text>\\n\\n---\\n**Pitch draft:**\\n<draft text>\", " +
-        "presentation: {blocks: [{type: \"buttons\", buttons: [[{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>\", style: \"success\"}, {text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>\", style: \"danger\"}]]}]}})` " +
-        "to APPEND the pitch and keep Reached out/Irrelevant buttons so the user can triage from the same message. " +
+        "`lead_irrelevant:<12hex>`, `lead_snooze:<12hex>`, or `lead_pitch:<12hex>`): " +
+        "(a) For reached/irrelevant/snooze (triage actions): call `leadhunter_mark_lead` with the matching " +
+        "status (reached_out / irrelevant / snoozed; default snooze_days=7), then emit ONE short " +
+        "`message(action=\"send\")` with a one-line confirmation: `\"✓ Reached out\"`, `\"✗ Marked irrelevant\"`, " +
+        "or `\"💤 Snoozed 7d\"`. " +
+        "Snoozed leads automatically reappear in the next `/leads` digest after their snooze window expires " +
+        "(default 7 days; outreach cycles are longer than job triage). The DB row persists for audit. " +
+        "NOTE: same OpenClaw 2026.5.7 callback metadata gap as the job triage — do NOT call " +
+        "message(action=\"delete\"); confirmation reply is the workaround until upstream fix. " +
+        "(b) For pitch (draft action — user wants the pitch text): call `leadhunter_draft_pitch`, then emit " +
+        "`message({action: \"send\", target: <chat_id>, message: \"**Pitch draft:**\\n<draft text>\"})`. " +
         "Never send outreach automatically — drafts only.",
       parameters: schema({
         limit: intSchema(1, 25),

@@ -818,6 +818,72 @@ Each agent has its own session, history, prompt cache. They share the jobhunter-
 - `input/icp.local.md` is the private ICP input for lead research and pitch drafting. It is gitignored like the profile and CV.
 - Outreach remains manual: lead pitch tools draft copy-paste text only and never send email, LinkedIn messages, or any automatic outreach.
 
+## Phase 5 — UX polish: persistent keyboard, callback message_id, parser fixes
+
+Three items surfaced during Phase 4 live testing. Each is a focused chunk of work and can be merged independently.
+
+### 5a. Persistent reply-keyboard at the bottom of the chat
+
+Phase 4 added `customCommands` slash entries (visible in Telegram's `/` menu), but the user wants a *persistent reply-keyboard* — the 2x2 button surface that sits below the message input field and is always visible. The four buttons are:
+
+| | |
+|---|---|
+| `Get more jobs` | `My job profile` |
+| `Get more leads` | `My ICP profile` |
+
+Behavior:
+- `Get more jobs` — triggers `jobhunter_get_more_jobs` (with staleness self-heal as documented)
+- `My job profile` — bot replies with the current contents of `input/profile.local.md` (uses the existing `jobhunter_query_sql` against `candidate_profile`, OR reads the file via a new `jobhunter_show_profile` tool wrapping a service `/profile/show` endpoint)
+- `Get more leads` — triggers `leadhunter_get_more_leads`
+- `My ICP profile` — bot replies with the current contents of `input/icp.local.md` (new `leadhunter_show_icp` tool wrapping a service `/leads/icp/show` endpoint)
+
+Implementation paths to investigate:
+1. **OpenClaw `channels.telegram` config** — re-check the schema for a `replyKeyboard` / `persistentKeyboard` block. Earlier Phase 1.5b survey didn't find one but the schema may have been extended.
+2. **Per-message reply_markup.keyboard** — attach `reply_markup: { keyboard: [[...]], resize_keyboard: true, persistent: true }` to every outgoing message via the `presentation` block. Investigate if `presentation` supports a `keyboard` block type (vs the existing `buttons` block for inline). If not, plugin-level workaround: extend the `jobhunter-tools` plugin's `message` action wrapper to inject the reply-keyboard markup.
+3. **setMyCommands fallback** — not equivalent UX (slash menu vs always-on keyboard) so do not substitute.
+
+Acceptance: after sending any agent reply, the 2x2 keyboard is visible at the bottom of the chat. Tapping `Get more jobs` triggers the digest. Tapping `My job profile` returns the profile contents in chat. Tapping `My ICP profile` returns the ICP contents. Tapping `Get more leads` triggers the leads digest.
+
+### 5b. Callback message_id workaround — make delete/edit on tap actually work
+
+Phase 4 live testing exposed: OpenClaw 2026.5.7 routes `callback_query` taps to the agent as a synthetic user message but uses `callback.id` (the Telegram callback_query identifier) as the synthetic `message_id`, NOT `callback.message.message_id` (the message that had the buttons). Result: `message(action="delete", messageId=...)` and `message(action="edit", messageId=...)` cannot target the original digest message — Telegram returns `Bad Request: message identifier is not specified`.
+
+Two-call workaround (this phase implements it):
+
+1. Agent emits each digest message via `message({action: "send", target, message, presentation: {blocks: [{type: "buttons", buttons: [PLACEHOLDER_BUTTONS]}]}})`. The placeholder buttons have a temporary `callback_data` like `pending:<id_prefix>`.
+2. The send returns `{ok: true, messageId: "913", chatId: "855127987"}` — capture the real Telegram `messageId`.
+3. Agent immediately emits a second call `message({action: "edit", messageId: "913", target, ...})` with the REAL buttons whose `callback_data` encodes the Telegram message_id: `applied:<id_prefix>:913` etc.
+4. When the user taps `[Applied]`, the synthetic callback prompt now contains both the `id_prefix` AND the Telegram message_id. Agent parses both from `callback_data`, calls `jobhunter_mark_job`, then calls `message(action="delete", messageId="913", target)` — Telegram accepts because the id is now correct.
+
+Cost: doubles the API calls per digest item (10-job digest = 20 calls instead of 10). Latency increases by ~10s on slower connections. Acceptable for the UX win.
+
+Alternative path also evaluated:
+- **Upstream OpenClaw issue**: ask for `callback_origin_message_id` in synthetic prompt metadata, or a `message(action="delete-callback-source")` tool that uses implicit context. File the issue; track separately. If upstream lands first, retire the two-call pattern.
+
+Acceptance: tapping `[Applied]` / `[Irrelevant]` / `[Snooze]` (or the lead equivalents) on a digest item **removes that message from chat**. Confirmation message no longer needed (the disappearance IS the confirmation). DB updates audited as today.
+
+### 5c. Per-source parser fix — addresses task candidate #3
+
+Email-alert wrapper noise was solved in Phase 3a. Several other parser gaps remain, surfaced during Phase 4 digest review:
+
+- **YC (`yc-jobs-product-manager-remote`)**: parser is grabbing company-description headers (`Confido (S21) • AI-enabled financial automation`) as job titles. Every YC row has `company="Unknown company"` because the company slug from the URL path (`/companies/<slug>/jobs/<id>`) isn't being extracted.
+- **DOU (`dou-product-manager`)**: same `company="Unknown company"` problem. URL pattern `/companies/<slug>/vacancies/<id>` should yield the company slug.
+- **WeWorkRemotely**: `"Company: Title"` prefix in titles (e.g., `"Instacart: Principal Product Manager"`). Strip company prefix when the company field is already populated.
+- **LinkedIn email alerts**: template artifacts in titles (`"role at X is available"`) and company fields (`"X is available LinkedIn"`).
+
+Implementation: source-specific parser functions in `jobhunter/sources.py`, one per problematic source, with fixture tests in `tests/test_sources.py` (HTML snippet → expected `{title, company, location, ...}`).
+
+Acceptance: a fresh `/jobs` digest after this lands shows real company names for YC, DOU, WeWorkRemotely rows; LinkedIn titles no longer have `"role at X is available"` artifacts; YC and DOU rows have non-`"Unknown company"` company fields.
+
+### 5d. Time and branch policy
+
+Each sub-phase is independent and can be merged separately. Suggested order:
+1. **5b** (two-call digest) — unblocks the delete UX users complain about. ~3-4h Codex.
+2. **5a** (persistent reply-keyboard) — quality-of-life. ~2-3h Codex. Depends on schema investigation.
+3. **5c** (parser fixes) — already filed as task candidate #3. ~3-4h Codex. Independent of 5a/5b.
+
+All sub-phases on dedicated branches off `codex/phase-4-recurring-leadhunter` (or its merged successor). Verification is trajectory-based, same discipline as Phase 3a/3b/4.
+
 ## Security configuration (mandatory)
 
 OpenClaw's default is FULL host access for main session. We override to match-or-exceed our current safety.

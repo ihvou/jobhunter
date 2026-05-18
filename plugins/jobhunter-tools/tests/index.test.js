@@ -65,9 +65,9 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     "applied:<id_prefix>",
     "presentation.blocks",
     "CALLBACK HANDLING",
-    "action: \"edit\"",
-    "messageId",
+    "✓ Applied",
     "Cover note draft",
+    "OpenClaw 2026.5.7's callback synthetic-prompt metadata",
   ]) {
     assert.match(digestDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -79,7 +79,6 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     "lead_snooze:<id_prefix>",
     "lead_pitch:<id_prefix>",
     "CALLBACK HANDLING",
-    "action: \"delete\"",
     "Reached out",
     "Pitch draft",
     "Snoozed leads automatically reappear",

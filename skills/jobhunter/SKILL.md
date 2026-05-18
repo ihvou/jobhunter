@@ -129,33 +129,28 @@ lead_pitch:<12_hex>       -> leadhunter_draft_pitch(id_prefix=<12_hex>)
 
 The job/lead callback prefixes are deliberately distinct (`applied:` vs `lead_reached:`, `irrelevant:` vs `lead_irrelevant:`, `snooze:` vs `lead_snooze:`) so the dispatcher can route by prefix even if a job and a lead happen to share an `id_prefix`.
 
-**After triage actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads): DELETE the original message.** The user wants the item off their visible queue. Telegram already animated the tap, so don't send a separate confirmation.
+**After triage actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads): send ONE short confirmation message.**
 
 ```text
 message({
-  action: "delete",
-  messageId: "<metadata message_id>",
-  target: "telegram:<chat_id>"
-})
-```
-
-Snoozed items automatically reappear in the next `/jobs` or `/leads` digest after the snooze window expires (1 day for jobs, 7 days for leads). The DB row stays — `jobhunter_history` and SQL queries can still find triaged items for audit.
-
-**After draft actions (cover on jobs, lead_pitch on leads): EDIT the original message to APPEND the draft and keep the primary triage buttons.**
-
-```text
-message({
-  action: "edit",
-  messageId: "<metadata message_id>",
+  action: "send",
   target: "telegram:<chat_id>",
-  message: "<original item text>\n\n---\n**Cover note draft:**\n<draft>",
-  presentation: { blocks: [{ type: "buttons", buttons: [[
-    { text: "Applied",    callback_data: "applied:<id_prefix>",    style: "success" },
-    { text: "Irrelevant", callback_data: "irrelevant:<id_prefix>", style: "danger"  }
-  ]]}]}
+  message: "✓ Applied"   // or "✗ Irrelevant", "💤 Snoozed 1d", "✓ Reached out", "✗ Marked irrelevant", "💤 Snoozed 7d"
 })
 ```
 
-For leads, use `lead_reached:` / `lead_irrelevant:` callback_data on the kept buttons.
+> **OpenClaw 2026.5.7 callback gap (tracked):** the synthetic callback prompt's `message_id` is the callback_query id, NOT the message that had the button. `message(action="delete")` and `message(action="edit", messageId=…)` therefore cannot target the original digest message. Confirmation reply is the workaround until upstream OpenClaw exposes `callback_origin_message_id` or a `delete-callback-message` action. Phase 5 work item.
 
-Do NOT send a second message for the draft text. Telegram clutters fast. Edit in place.
+Snoozed items automatically reappear in the next `/jobs` or `/leads` digest after the snooze window expires (1 day for jobs, 7 days for leads). DB rows persist for audit.
+
+**After draft actions (cover on jobs, lead_pitch on leads): send the draft as a NEW reply.**
+
+```text
+message({
+  action: "send",
+  target: "telegram:<chat_id>",
+  message: "**Cover note draft:**\n<draft text>"      // or "**Pitch draft:**\n…"
+})
+```
+
+Same caveat — we can't edit the original message in place under the current callback metadata. Phase 5 work item to encode message_id in callback_data so edit works.
