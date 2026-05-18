@@ -18,6 +18,7 @@ Decision tree for any user question:
 |---|---|
 | "How many jobs / how many applied / show me top N" | `jobhunter_query_sql` with a SELECT |
 | "Get fresh jobs / show me new matches" | `jobhunter_get_more_jobs` (uses cached digest, fast) |
+| "My job profile / show my job preferences" | `jobhunter_show_profile` |
 | "Run collection / pull new jobs / refresh sources" | `jobhunter_collect_all_sources` (slow, ~30-60s) |
 | "Rescore recent jobs / refresh scoring" | `jobhunter_rescore_recent_jobs` |
 | "What's my spend / quota / usage" | `jobhunter_usage` |
@@ -41,6 +42,7 @@ Available Jobhunter plugin tools:
 - `jobhunter_collect_all_sources`: run collection/indexing from configured sources.
 - `jobhunter_rescore_recent_jobs`: rescore recent indexed jobs after feedback or profile/scoring changes.
 - `jobhunter_usage`: show local spend and quota counters.
+- `jobhunter_show_profile`: show the current `input/profile.local.md` job-search profile.
 - `jobhunter_history`: show recent approved/applied agent action rows.
 - `jobhunter_propose_actions`: store bounded source/scoring/profile/email-parser actions for user approval.
 - `jobhunter_apply_action`: apply one proposed action after explicit user approval.
@@ -62,6 +64,17 @@ Behavior rules:
 - Reject Product Marketing Manager, MLOps, DevOps, pure engineering, and jobs requiring languages other than English, Ukrainian, or Russian unless the user overrides that.
 
 Install notes live in `{baseDir}/README.md`.
+
+## Persistent reply keyboard
+
+Keep the 2x2 Telegram reply keyboard visible on user-facing replies whenever the channel accepts it:
+
+```text
+Get more jobs | My job profile
+Get more leads | My ICP profile
+```
+
+Route `Get more jobs` to `jobhunter_get_more_jobs`, `My job profile` to `jobhunter_show_profile`, `Get more leads` to `leadhunter_get_more_leads`, and `My ICP profile` to `leadhunter_show_icp`.
 
 ## Digest rendering with inline buttons
 

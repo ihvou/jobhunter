@@ -88,6 +88,24 @@ class ServiceTests(unittest.TestCase):
                 service.query_sql("delete from jobs")
             self.assertEqual(raised.exception.status, 400)
 
+    def test_show_profile_and_icp_return_local_markdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.profile_path.write_text("# About me\n\nAI PM.\n\n# Directives\n\nPrefer Claude.\n", encoding="utf-8")
+            bot.config.icp_path.write_text("# ICP\n\nAI workflow founders.\n", encoding="utf-8")
+            service = JobHunterService(bot)
+
+            profile = service.show_profile()
+            self.assertTrue(profile["ok"])
+            self.assertIn("AI PM", profile["text"])
+            self.assertEqual(profile["about_me"], "AI PM.")
+            self.assertEqual(profile["directives"], "Prefer Claude.")
+
+            icp = service.show_icp()
+            self.assertTrue(icp["ok"])
+            self.assertTrue(icp["exists"])
+            self.assertIn("AI workflow founders", icp["text"])
+
     def test_propose_apply_and_revert_agent_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot, _job_id = self.seeded_bot(tmp)

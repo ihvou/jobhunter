@@ -11,6 +11,7 @@ The local service now has a small lead backend. Use the `leadhunter_*` tools fro
 | User asks | Tool path |
 |---|---|
 | `/leads`, `Get leads`, `show lead digest` | `leadhunter_get_more_leads`; render each lead with Telegram inline buttons |
+| `My ICP profile`, `show my lead ICP` | `leadhunter_show_icp`; reply with the current ICP markdown |
 | `find me leads for <ICP>` | Research with `exa`/`firecrawl`/`web_search`, present candidates, then wait for approval before `leadhunter_save_leads` |
 | `remember this source for leads` | `leadhunter_add_lead_source` after user approval |
 | `shortlist/reject/archive this lead` or callback text | `leadhunter_mark_lead` |
@@ -26,6 +27,15 @@ Rules:
 - Return lead candidates with evidence, confidence, and contact surface. Make clear whether the data is public, inferred, or needs manual verification.
 - Draft pitches only for user copy/paste.
 - Save candidates only after explicit user approval.
+
+Persistent reply keyboard:
+
+```text
+Get more jobs | My job profile
+Get more leads | My ICP profile
+```
+
+Route `Get more leads` to `leadhunter_get_more_leads` and `My ICP profile` to `leadhunter_show_icp`. The other two buttons belong to the Jobhunter skill.
 
 Callback routing:
 

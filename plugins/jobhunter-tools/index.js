@@ -127,6 +127,13 @@ function register(api, tool) {
 }
 
 const intSchema = (minimum, maximum) => ({ type: "integer", minimum, maximum });
+const PERSISTENT_KEYBOARD_CONTRACT =
+  "PERSISTENT TELEGRAM KEYBOARD: after any user-visible Telegram reply, include a reply-keyboard presentation block " +
+  "alongside any inline buttons: {type: \"keyboard\", keyboard: [[\"Get more jobs\", \"My job profile\"], " +
+  "[\"Get more leads\", \"My ICP profile\"]], resize_keyboard: true, persistent: true}. " +
+  "These are reply-keyboard buttons, not inline callback buttons. Route `Get more jobs` to jobhunter_get_more_jobs, " +
+  "`My job profile` to jobhunter_show_profile, `Get more leads` to leadhunter_get_more_leads, and `My ICP profile` " +
+  "to leadhunter_show_icp. If the channel rejects an unknown keyboard block, still send the reply; the slash menu remains the fallback.";
 
 export default definePluginEntry({
   id: "jobhunter-tools",
@@ -138,6 +145,8 @@ export default definePluginEntry({
       label: "Jobhunter Get More Jobs",
       description:
         "Return ranked job matches from Jobhunter. " +
+        PERSISTENT_KEYBOARD_CONTRACT +
+        " " +
         "STALENESS RULE: response includes queue_freshness_hours, queue_last_collected, queue_is_stale. " +
         "If queue_is_stale is true OR queue_freshness_hours >= 6, you MUST first call jobhunter_collect_all_sources, " +
         "then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
@@ -200,6 +209,19 @@ export default definePluginEntry({
       description: "Return local spend, quota, and recent activity counters.",
       parameters: schema({}),
       execute: async () => jsonResult(await get("/usage")),
+    });
+
+    register(api, {
+      name: "jobhunter_show_profile",
+      label: "Jobhunter Show Profile",
+      description:
+        "Return the current job-search profile markdown from input/profile.local.md. " +
+        PERSISTENT_KEYBOARD_CONTRACT +
+        " Use this when the user taps `My job profile`, asks what profile/preferences Jobhunter is using, or wants to review " +
+        "their # About me and # Directives sections. Emit a Telegram message containing the returned `text`; do not summarize " +
+        "away user-authored directives unless the user explicitly asks for a summary.",
+      parameters: schema({}),
+      execute: async () => jsonResult(await get("/profile/show")),
     });
 
     register(api, {
@@ -454,6 +476,8 @@ export default definePluginEntry({
       description:
         "Return saved lead candidates from the local Jobhunter service. Use this when the user sends /leads, says " +
         "\"get more leads\", asks for a lead digest, or asks to see researched leads. " +
+        PERSISTENT_KEYBOARD_CONTRACT +
+        " " +
         "If leads[] is empty, do NOT silently return — emit a single `message` explaining the empty state " +
         "(e.g. \"no saved leads yet — first set your Leadhunter ICP via icp_edit, then add a lead_source, then research\"). " +
         "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], emit one `message` call with " +
@@ -484,6 +508,18 @@ export default definePluginEntry({
         mark_sent: { type: "boolean" },
       }),
       execute: async (_toolCallId, params) => jsonResult(await post("/leads/digest", params)),
+    });
+
+    register(api, {
+      name: "leadhunter_show_icp",
+      label: "Leadhunter Show ICP",
+      description:
+        "Return the current Leadhunter ICP markdown from input/icp.local.md. " +
+        PERSISTENT_KEYBOARD_CONTRACT +
+        " Use this when the user taps `My ICP profile`, asks what lead ICP is active, or wants to review lead-search targeting. " +
+        "Emit a Telegram message containing the returned `text`; if `exists` is false or `text` is empty, ask the user to provide the ICP.",
+      parameters: schema({}),
+      execute: async () => jsonResult(await get("/leads/icp/show")),
     });
 
     register(api, {

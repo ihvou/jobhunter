@@ -9,6 +9,7 @@ const expectedToolNames = [
   "jobhunter_collect_all_sources",
   "jobhunter_rescore_recent_jobs",
   "jobhunter_usage",
+  "jobhunter_show_profile",
   "jobhunter_history",
   "jobhunter_propose_actions",
   "jobhunter_apply_action",
@@ -18,6 +19,7 @@ const expectedToolNames = [
   "jobhunter_query_sql",
   "jobhunter_process_email",
   "leadhunter_get_more_leads",
+  "leadhunter_show_icp",
   "leadhunter_save_leads",
   "leadhunter_add_lead_source",
   "leadhunter_mark_lead",
@@ -68,6 +70,9 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     "✓ Applied",
     "Cover note draft",
     "OpenClaw 2026.5.7's callback synthetic-prompt metadata",
+    "PERSISTENT TELEGRAM KEYBOARD",
+    "My job profile",
+    "My ICP profile",
   ]) {
     assert.match(digestDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -83,6 +88,8 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     "Pitch draft",
     "Snoozed leads automatically reappear",
     "Never send outreach automatically",
+    "PERSISTENT TELEGRAM KEYBOARD",
+    "My ICP profile",
   ]) {
     assert.match(leadDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -125,6 +132,16 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   const processEmailDescription = tools.get("jobhunter_process_email").description;
   for (const phrase of ["Gmail Pub/Sub", "email parser", "scores"]) {
     assert.match(processEmailDescription, new RegExp(phrase));
+  }
+
+  const showProfileDescription = tools.get("jobhunter_show_profile").description;
+  for (const phrase of ["input/profile.local.md", "My job profile", "# About me", "# Directives"]) {
+    assert.match(showProfileDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const showIcpDescription = tools.get("leadhunter_show_icp").description;
+  for (const phrase of ["input/icp.local.md", "My ICP profile", "PERSISTENT TELEGRAM KEYBOARD"]) {
+    assert.match(showIcpDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 
   // Old leadhunter callback_data scheme (lead_shortlist/lead_reject/lead_pitch) was replaced
@@ -202,4 +219,21 @@ test("tool execute maps HTTP JSON errors into Error messages", async () => {
   const usage = registeredTools().find((tool) => tool.name === "jobhunter_usage");
 
   await assert.rejects(() => usage.execute("tool-call-id", {}), /service down/);
+});
+
+test("profile and ICP tools call the read-only service endpoints", async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return jsonResponse({ ok: true, text: "hello" });
+  };
+  const tools = new Map(registeredTools().map((tool) => [tool.name, tool]));
+
+  await tools.get("jobhunter_show_profile").execute("tool-call-id", {});
+  await tools.get("leadhunter_show_icp").execute("tool-call-id", {});
+
+  assert.deepEqual(calls, [
+    "http://jobhunter-service:8765/profile/show",
+    "http://jobhunter-service:8765/leads/icp/show",
+  ]);
 });

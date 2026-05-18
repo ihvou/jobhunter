@@ -28,12 +28,14 @@ The user interacts through Telegram via OpenClaw. The bot never applies to jobs,
 | Entry Point | Expected Tool Path |
 |---|---|
 | `Get more jobs` | `jobhunter_get_more_jobs`; if stale, `jobhunter_collect_all_sources`, then `jobhunter_get_more_jobs` again; render each job with `message` + `presentation.blocks[].buttons` |
+| `My job profile` | `jobhunter_show_profile`; reply with the current profile markdown |
 | `Update sources` | OpenClaw/Codex investigates, calls `jobhunter_propose_actions` with `sources_proposal`; user approval calls `jobhunter_apply_action` |
 | `Tune scoring` | Same as sources, using `scoring_rule_proposal` |
 | `Usage` | `jobhunter_usage` |
 | Inline `Applied` / `Irrelevant` / `Snooze` / `Cover` | Synthetic callback text routes to `jobhunter_mark_job` or `jobhunter_cover_note` using the 12-char `id_prefix` |
 | `/history`, `/revert` | `jobhunter_history`, `jobhunter_revert_action` |
 | `/leads` / `Get leads` | `leadhunter_get_more_leads`; render each lead with `presentation.blocks[].buttons` |
+| `My ICP profile` | `leadhunter_show_icp`; reply with the current ICP markdown |
 | Lead research | OpenClaw/Codex researches public sources, asks for approval, then calls `leadhunter_save_leads` |
 | Lead pitch | `leadhunter_draft_pitch`; copy-paste only, no automatic outreach |
 

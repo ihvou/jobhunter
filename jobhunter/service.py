@@ -41,6 +41,27 @@ class JobHunterService:
     def usage(self) -> Dict:
         return self.bot.database.usage_summary()
 
+    def show_profile(self) -> Dict:
+        self.bot.refresh_profile()
+        profile = self.bot.profile
+        return {
+            "ok": True,
+            "path": str(self.bot.config.profile_path),
+            "text": profile.raw_text,
+            "about_me": profile.about_me,
+            "directives": profile.directives,
+            "cv_present": bool(profile.cv_text.strip()),
+        }
+
+    def show_icp(self) -> Dict:
+        text = read_text_if_exists(self.bot.config.icp_path)
+        return {
+            "ok": True,
+            "path": str(self.bot.config.icp_path),
+            "text": text,
+            "exists": self.bot.config.icp_path.exists(),
+        }
+
     def history(self, limit: int = 10) -> Dict:
         return {"actions": [row_to_dict(row) for row in self.bot.database.recent_agent_actions(limit)]}
 
@@ -415,6 +436,8 @@ def create_handler(app: JobHunterService):
                     payload = app.health()
                 elif method == "GET" and path == "/usage":
                     payload = app.usage()
+                elif method == "GET" and path == "/profile/show":
+                    payload = app.show_profile()
                 elif method == "GET" and path == "/history":
                     payload = app.history(int(first(query, "limit", "10")))
                 elif method == "POST" and path == "/collect":
@@ -447,6 +470,8 @@ def create_handler(app: JobHunterService):
                     payload = app.process_email(body)
                 elif method == "POST" and path == "/leads/digest":
                     payload = app.leads_digest(optional_int(body.get("limit")), bool(body.get("mark_sent", False)))
+                elif method == "GET" and path == "/leads/icp/show":
+                    payload = app.show_icp()
                 elif method == "POST" and path in ("/leads/research", "/leads/save"):
                     payload = app.research_leads(body)
                 elif method == "POST" and path == "/leads/source/add":
