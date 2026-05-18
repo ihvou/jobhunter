@@ -423,24 +423,44 @@ def collect_link_page(source: SourceConfig) -> List[Job]:
         url = urljoin(source.url, href)
         if url in seen:
             continue
-        seen.add(url)
         description = surrounding_text(text, title, 1200)
-        jobs.append(
-            Job(
-                source_id=source.id,
-                source_name=source.name,
-                external_id=url,
-                url=url,
-                title=title[:180],
-                company=infer_company(title, text[:4000]) if source.type == "community" else source.name,
-                location=infer_location(title + " " + description),
-                remote_policy=infer_remote_policy(title + " " + description),
-                description=strip_html(strip_markdown(description or title))[:4000],
-            )
-        )
+        job = link_page_job(source, url, title, description, text)
+        if not job:
+            continue
+        seen.add(url)
+        jobs.append(job)
         if len(jobs) >= 30:
             break
     return jobs
+
+
+def link_page_job(source: SourceConfig, url: str, title: str, description: str, page_text: str) -> Optional[Job]:
+    parsed = urlparse(url)
+    if is_yc_source(source):
+        company = company_from_yc_job_url(parsed.path)
+        if not company:
+            return None
+    elif is_dou_source(source):
+        company = company_from_dou_job_url(parsed.path)
+        if not company:
+            return None
+    elif source.type == "community":
+        company = infer_company(title, page_text[:4000])
+    else:
+        company = source.name
+    if is_weworkremotely_source(source, parsed.netloc):
+        title = strip_company_prefix(title, company)
+    return Job(
+        source_id=source.id,
+        source_name=source.name,
+        external_id=url,
+        url=url,
+        title=title[:180],
+        company=company,
+        location=infer_location(title + " " + description),
+        remote_policy=infer_remote_policy(title + " " + description),
+        description=strip_html(strip_markdown(description or title))[:4000],
+    )
 
 
 def fetch_link_page_text(source: SourceConfig) -> tuple:
@@ -514,6 +534,56 @@ def looks_like_job_link(title: str, href: str) -> bool:
     detail_url_matches = any(token in href_lower for token in ("/jobs/", "/careers/", "/positions/", "/job/"))
     detail_url_matches = detail_url_matches or ("/companies/" in href_lower and "/vacancies/" in href_lower)
     return title_matches or detail_url_matches
+
+
+def is_yc_source(source: SourceConfig) -> bool:
+    haystack = "%s %s %s" % (source.id, source.name, source.url)
+    return "ycombinator.com" in haystack.lower() or source.id.lower().startswith("yc-")
+
+
+def is_dou_source(source: SourceConfig) -> bool:
+    haystack = "%s %s %s" % (source.id, source.name, source.url)
+    return "jobs.dou.ua" in haystack.lower() or source.id.lower().startswith("dou-")
+
+
+def is_weworkremotely_source(source: SourceConfig, host: str = "") -> bool:
+    haystack = "%s %s %s %s" % (source.id, source.name, source.url, host)
+    return "weworkremotely.com" in haystack.lower() or source.id.lower().startswith(("wwr-", "weworkremotely"))
+
+
+def company_from_yc_job_url(path: str) -> str:
+    match = re.search(r"/companies/([^/]+)/jobs/[^/?#]+", path or "", re.IGNORECASE)
+    return titleize_slug(match.group(1)) if match else ""
+
+
+def company_from_dou_job_url(path: str) -> str:
+    match = re.search(r"/companies/([^/]+)/vacancies/[^/?#]+", path or "", re.IGNORECASE)
+    return titleize_slug(match.group(1)) if match else ""
+
+
+def titleize_slug(value: str) -> str:
+    words = [word for word in re.split(r"[-_]+", value or "") if word]
+    small_words = {"a", "an", "and", "for", "in", "of", "or", "the", "to"}
+    titled = []
+    for index, word in enumerate(words):
+        lower = word.lower()
+        if index and lower in small_words:
+            titled.append(lower)
+        else:
+            titled.append(lower.upper() if len(lower) <= 3 and lower in {"ai", "ml", "ui", "ux", "api"} else lower.capitalize())
+    return " ".join(titled)
+
+
+def strip_company_prefix(title: str, company: str) -> str:
+    title = clean_title(title)
+    company = clean_title(company)
+    if not title or not company:
+        return title
+    pattern = r"^%s\s*:\s*(.+)$" % re.escape(company)
+    match = re.match(pattern, title, re.IGNORECASE)
+    if match:
+        return clean_title(match.group(1))
+    return title
 
 
 def is_navigation_link_title(title_lower: str) -> bool:
@@ -713,18 +783,51 @@ def jobs_from_link_config(source: SourceConfig, message, subject: str, sender: s
 
 
 def email_job(source: SourceConfig, message, idx: int, url: str, title: str, company: str, description: str) -> Job:
+    title, company = normalize_email_job_fields(source, url, title, company)
     return Job(
         source_id=source.id,
         source_name=source.name,
         external_id=message.get("Message-ID", "") + str(idx),
         url=url,
-        title=clean_title(title),
+        title=title,
         company=company or "Unknown company",
         location=infer_location(description),
         remote_policy=infer_remote_policy(description),
         description=strip_html(description[:4000]),
         posted_at=parse_date(message.get("Date")),
     )
+
+
+def normalize_email_job_fields(source: SourceConfig, url: str, title: str, company: str) -> tuple:
+    title = clean_title(title)
+    company = clean_title(company)
+    if not is_linkedin_email_job(source, url):
+        return title, company
+    match = re.match(r"(.+?)\s+at\s+(.+?)\s+is available(?:\s+LinkedIn)?$", title, re.IGNORECASE)
+    if match:
+        title = re.sub(r"\s+role$", "", clean_title(match.group(1)), flags=re.IGNORECASE)
+        if not company or is_linkedin_company_artifact(company):
+            company = clean_linkedin_company(match.group(2))
+    company = clean_linkedin_company(company)
+    return title, company
+
+
+def is_linkedin_email_job(source: SourceConfig, url: str) -> bool:
+    host = urlparse(url or "").netloc.lower()
+    haystack = "%s %s %s" % (source.id, source.name, host)
+    return "linkedin" in haystack.lower()
+
+
+def is_linkedin_company_artifact(company: str) -> bool:
+    normalized = clean_title(company).lower()
+    return " is available" in normalized or normalized.endswith(" linkedin") or normalized == "linkedin"
+
+
+def clean_linkedin_company(company: str) -> str:
+    company = clean_title(company)
+    company = re.sub(r"\s+is available(?:\s+on)?(?:\s+LinkedIn)?$", "", company, flags=re.IGNORECASE)
+    company = re.sub(r"\s+LinkedIn$", "", company, flags=re.IGNORECASE)
+    return clean_title(company)
 
 
 def filter_email_alert_jobs(source: SourceConfig, jobs: List[Job]) -> List[Job]:

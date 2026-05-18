@@ -126,7 +126,42 @@ class SourceTests(unittest.TestCase):
 
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].title, "Product manager / Product Owner цифрових продуктів SAP")
+        self.assertEqual(jobs[0].company, "Mod of Ukraine")
         self.assertIn("jobs.dou.ua/companies/mod-of-ukraine/vacancies/353937", jobs[0].url)
+
+    def test_yc_link_page_skips_company_cards_and_derives_company_from_url(self):
+        source = SourceConfig(
+            id="yc-jobs-product-manager-remote",
+            name="YC Product Jobs",
+            type="community",
+            url="https://www.ycombinator.com/jobs?role=product",
+        )
+        html = """
+<a href="/companies/confido">Confido (S21) • AI-enabled financial automation</a>
+<a href="/companies/confido/jobs/123-product-manager">Product Manager, AI Automation</a>
+"""
+        with mock.patch("jobhunter.sources.fetch_text", return_value=html):
+            jobs = collect_link_page(source)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Product Manager, AI Automation")
+        self.assertEqual(jobs[0].company, "Confido")
+        self.assertEqual(jobs[0].url, "https://www.ycombinator.com/companies/confido/jobs/123-product-manager")
+
+    def test_weworkremotely_strips_company_prefix_when_company_is_known(self):
+        source = SourceConfig(
+            id="weworkremotely-product",
+            name="We Work Remotely Product",
+            type="community",
+            url="https://weworkremotely.com/categories/remote-product-jobs",
+        )
+        html = '<a href="/remote-jobs/instacart-principal-product-manager">Instacart: Principal Product Manager</a>'
+        with mock.patch("jobhunter.sources.fetch_text", return_value=html):
+            jobs = collect_link_page(source)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Principal Product Manager")
+        self.assertEqual(jobs[0].company, "Instacart")
 
     def test_collect_greenhouse_ats(self):
         source = SourceConfig(id="gh", name="ExampleCo", type="ats", url="https://boards.greenhouse.io/exampleco")
@@ -231,6 +266,33 @@ Content-Type: text/html; charset=utf-8
 
         self.assertEqual([job.title for job in jobs], ["Senior Product Manager"])
         self.assertEqual(jobs[0].url, "https://www.linkedin.com/jobs/view/1")
+
+    def test_linkedin_email_artifacts_are_removed_from_title_and_company(self):
+        source = SourceConfig(id="email-job-alerts", name="LinkedIn Email Alerts", type="imap", url="imap://job-alerts")
+        source.email_templates = [
+            {
+                "id": "linkedin",
+                "source_id": "email-job-alerts",
+                "sender_pattern": "linkedin",
+                "subject_pattern": "jobs",
+                "parser_config": {"max_jobs": 5},
+            }
+        ]
+        message = email.message_from_string(
+            """From: jobs-noreply@linkedin.com
+Subject: Product jobs
+Message-ID: <linkedin-artifacts>
+Content-Type: text/html; charset=utf-8
+
+<a href="https://www.linkedin.com/jobs/view/42">Senior Product Manager role at Anthropic is available</a>
+"""
+        )
+
+        jobs = jobs_from_email(source, message)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Senior Product Manager")
+        self.assertEqual(jobs[0].company, "Anthropic")
 
 
 if __name__ == "__main__":
