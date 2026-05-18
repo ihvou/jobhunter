@@ -74,13 +74,15 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
 
   const leadDescription = tools.get("leadhunter_get_more_leads").description;
   for (const phrase of [
-    "reached:<id_prefix>",
-    "skip:<id_prefix>",
-    "later:<id_prefix>",
-    "pitch:<id_prefix>",
+    "lead_reached:<id_prefix>",
+    "lead_irrelevant:<id_prefix>",
+    "lead_snooze:<id_prefix>",
+    "lead_pitch:<id_prefix>",
     "CALLBACK HANDLING",
+    "action: \"delete\"",
     "Reached out",
     "Pitch draft",
+    "Snoozed leads automatically reappear",
     "Never send outreach automatically",
   ]) {
     assert.match(leadDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

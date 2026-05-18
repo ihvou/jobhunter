@@ -12,7 +12,7 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 11
+LATEST_SCHEMA_VERSION = 12
 
 
 class Database:
@@ -69,6 +69,9 @@ class Database:
             if current < 11:
                 migrate_v11(conn)
                 set_schema_version(conn, 11)
+            if current < 12:
+                migrate_v12(conn)
+                set_schema_version(conn, 12)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -1052,17 +1055,19 @@ class Database:
             return lead_id, existing is None
 
     def leads_for_digest(self, limit: int = 10) -> List[sqlite3.Row]:
+        now = utc_now_iso()
         with self.connection() as conn:
             return list(
                 conn.execute(
                     """
                     select *
                     from leads
-                    where status not in ('rejected', 'archived')
+                    where status not in ('rejected', 'archived', 'reached_out', 'pitched')
+                      and (snoozed_until is null or snoozed_until <= ?)
                     order by confidence desc, last_seen_at desc
                     limit ?
                     """,
-                    (limit,),
+                    (now, limit),
                 )
             )
 
@@ -1079,9 +1084,19 @@ class Database:
         with self.connection() as conn:
             return conn.execute("select * from leads where id = ?", (lead_id,)).fetchone()
 
-    def update_lead_status(self, lead_id: str, status: str, details: str = "") -> None:
+    def update_lead_status(self, lead_id: str, status: str, details: str = "", snoozed_until: Optional[str] = None) -> None:
         with self.connection() as conn:
-            conn.execute("update leads set status = ? where id = ?", (status, lead_id))
+            if status == "snoozed":
+                conn.execute(
+                    "update leads set status = ?, snoozed_until = ? where id = ?",
+                    (status, snoozed_until or "", lead_id),
+                )
+            else:
+                # Non-snooze transitions clear any prior snooze so a re-shortlisted lead doesn't stay hidden.
+                conn.execute(
+                    "update leads set status = ?, snoozed_until = null where id = ?",
+                    (status, lead_id),
+                )
             conn.execute(
                 "insert into lead_feedback (lead_id, action, details, created_at) values (?, ?, ?, ?)",
                 (lead_id, status, details, utc_now_iso()),
@@ -1547,6 +1562,22 @@ def migrate_v11(conn) -> None:
             content text not null,
             created_at text not null
         );
+        """
+    )
+
+
+def migrate_v12(conn) -> None:
+    # Lead snooze support: snoozed_until column mirrors the jobs table. Snoozed leads stay
+    # in the DB but the digest filter hides them until the timestamp passes (default 7 days
+    # after `leadhunter_mark_lead(status="snoozed")`). Existing rows default to NULL.
+    try:
+        conn.execute("alter table leads add column snoozed_until text")
+    except sqlite3.OperationalError:
+        pass  # idempotent: column already present (re-run, or pre-12.4 fresh schema)
+    conn.executescript(
+        """
+        create index if not exists idx_leads_snooze on leads(snoozed_until)
+            where snoozed_until is not null;
         """
     )
 

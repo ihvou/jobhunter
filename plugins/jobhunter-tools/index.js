@@ -154,19 +154,22 @@ export default definePluginEntry({
         "For read-only diagnostics/analysis/source-or-scoring work, call with mark_sent=false and do NOT emit messages. " +
         "Never use bash or shell for Jobhunter digest requests. " +
         "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `applied:<12hex>`, " +
-        "`irrelevant:<12hex>`, `snooze:<12hex>`, or `cover:<12hex>`): you MUST edit the original job message in-place " +
-        "rather than sending a new bare confirmation. The synthetic user message includes a message_id in its " +
-        "conversation metadata — that is the digest message that had the buttons. Flow: " +
-        "(a) For applied/irrelevant/snooze: call `jobhunter_mark_job` with the matching status, then emit " +
-        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
-        "message: \"~~<original job text>~~\\n\\n✓ <Status> at <ISO date>\", presentation: {blocks: []}})` to " +
-        "strike through the job and drop the buttons. Status emoji: ✓ Applied, ✗ Irrelevant, 💤 Snoozed 1d. " +
-        "(b) For cover: call `jobhunter_cover_note`, then emit " +
-        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
+        "`irrelevant:<12hex>`, `snooze:<12hex>`, or `cover:<12hex>`). The synthetic user message includes a " +
+        "message_id in its conversation metadata — that is the digest message that had the buttons. Flow: " +
+        "(a) For applied/irrelevant/snooze (triage actions — user wants the job OFF their visible queue): call " +
+        "`jobhunter_mark_job` with the matching status, then emit " +
+        "`message({action: \"delete\", messageId: <metadata message_id>, target: <chat_id>})` " +
+        "to remove the job from the chat. Do NOT send a confirmation message — Telegram already animated the " +
+        "tap. The user wants a clean chat. " +
+        "Snoozed jobs automatically reappear in the NEXT `/jobs` digest after their snooze window expires " +
+        "(default 1 day) — no extra action needed; this is the persistence model. The DB row stays; " +
+        "`jobhunter_history` and SQL queries can still find triaged items for audit. " +
+        "(b) For cover (draft action — user wants the cover text attached): call `jobhunter_cover_note`, then " +
+        "emit `message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
         "message: \"<original job text>\\n\\n---\\n**Cover note draft:**\\n<draft text>\", " +
         "presentation: {blocks: [{type: \"buttons\", buttons: [[{text: \"Applied\", callback_data: \"applied:<id_prefix>\", style: \"success\"}, {text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>\", style: \"danger\"}]]}]}})` " +
-        "to APPEND the cover note text to the original message and keep Applied/Irrelevant buttons so the user can still mark the job. " +
-        "Do not send a second message for the cover note — Telegram clutter. Edit in place.",
+        "to APPEND the cover note to the original message and keep Applied/Irrelevant buttons so the user can " +
+        "still triage from the same message. Do not send a second message for the cover note — edit in place.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
@@ -459,23 +462,28 @@ export default definePluginEntry({
         "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], emit one `message` call with " +
         "{action: \"send\", target: <chat_id from conversation metadata>, message: <lead text>, " +
         "presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Reached out\", callback_data: \"reached:<id_prefix>\", style: \"success\"}, " +
-        "{text: \"Skip\", callback_data: \"skip:<id_prefix>\", style: \"danger\"}], " +
-        "[{text: \"Later\", callback_data: \"later:<id_prefix>\"}, " +
-        "{text: \"Pitch\", callback_data: \"pitch:<id_prefix>\", style: \"primary\"}]]}]}}. " +
+        "[{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>\", style: \"danger\"}], " +
+        "[{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>\"}, " +
+        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>\", style: \"primary\"}]]}]}}. " +
         "<id_prefix> is the first 12 lowercase hex characters of the lead id. " +
+        "Button labels are intentionally symmetric with the job triage buttons. " +
         "Use mark_sent=true only for rows actually shown. " +
-        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `reached:<12hex>`, " +
-        "`skip:<12hex>`, `later:<12hex>`, or `pitch:<12hex>`): edit the original lead message in-place. " +
-        "(a) For reached/skip/later: call `leadhunter_mark_lead` with matching status, then emit " +
-        "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
-        "message: \"~~<original lead text>~~\\n\\n✓ <Status> at <ISO date>\", presentation: {blocks: []}})`. " +
-        "Status emoji: ✓ Reached out, ✗ Skipped, 💤 Later (snoozed 7d). " +
-        "(b) For pitch: call `leadhunter_draft_pitch`, then emit " +
+        "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `lead_reached:<12hex>`, " +
+        "`lead_irrelevant:<12hex>`, `lead_snooze:<12hex>`, or `lead_pitch:<12hex>`). The synthetic user message " +
+        "includes a message_id in its conversation metadata — that is the digest message that had the buttons. " +
+        "(a) For reached/irrelevant/snooze (triage actions — user wants the lead OFF their visible queue): call " +
+        "`leadhunter_mark_lead` with the matching status (reached_out / irrelevant / snoozed; default snooze_days=7), " +
+        "then emit `message({action: \"delete\", messageId: <metadata message_id>, target: <chat_id>})` " +
+        "to remove the lead from the chat. Do NOT send a confirmation — Telegram animated the tap. " +
+        "Snoozed leads automatically reappear in the NEXT `/leads` digest after their snooze window expires " +
+        "(default 7 days for leads vs 1 day for jobs — outreach cycles are longer). The DB row stays; " +
+        "`jobhunter_history` and SQL queries can still find triaged leads for audit. " +
+        "(b) For pitch (draft action — user wants the pitch attached): call `leadhunter_draft_pitch`, then emit " +
         "`message({action: \"edit\", messageId: <metadata message_id>, target: <chat_id>, " +
         "message: \"<original lead text>\\n\\n---\\n**Pitch draft:**\\n<draft text>\", " +
-        "presentation: {blocks: [{type: \"buttons\", buttons: [[{text: \"Reached out\", callback_data: \"reached:<id_prefix>\", style: \"success\"}, {text: \"Skip\", callback_data: \"skip:<id_prefix>\", style: \"danger\"}]]}]}})` " +
-        "to APPEND the pitch to the original message and keep Reached out/Skip buttons. " +
+        "presentation: {blocks: [{type: \"buttons\", buttons: [[{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>\", style: \"success\"}, {text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>\", style: \"danger\"}]]}]}})` " +
+        "to APPEND the pitch and keep Reached out/Irrelevant buttons so the user can triage from the same message. " +
         "Never send outreach automatically — drafts only.",
       parameters: schema({
         limit: intSchema(1, 25),
@@ -558,13 +566,16 @@ export default definePluginEntry({
       name: "leadhunter_mark_lead",
       label: "Leadhunter Mark Lead",
       description:
-        "Mark a lead as shortlisted, rejected, pitched, or archived. Use lead_id or the 12-character id_prefix from lead inline callback data. This records status only; it never sends outreach.",
+        "Mark a lead as reached_out, irrelevant (= rejected internally), snoozed, shortlisted, pitched, or archived. " +
+        "Use lead_id or the 12-character id_prefix from lead inline callback data. This records status only; it never sends outreach. " +
+        "For snoozed status, pass snooze_days (1..90, default 7). Snoozed leads automatically reappear in the next /leads digest after the window expires.",
       parameters: schema({
         lead_id: { type: "string" },
         id_prefix: { type: "string", pattern: "^[0-9a-f]{12}$" },
-        action: { type: "string", enum: ["shortlisted", "rejected", "pitch", "pitched", "archived"] },
-        status: { type: "string", enum: ["shortlisted", "rejected", "pitched", "archived"] },
+        action: { type: "string", enum: ["reached_out", "irrelevant", "snoozed", "shortlisted", "rejected", "pitch", "pitched", "archived"] },
+        status: { type: "string", enum: ["reached_out", "irrelevant", "snoozed", "shortlisted", "rejected", "pitched", "archived"] },
         details: { type: "string" },
+        snooze_days: intSchema(1, 90),
       }),
       execute: async (_toolCallId, params) => {
         const lead_id = await resolveLeadId(params);
@@ -572,7 +583,9 @@ export default definePluginEntry({
         if (status === "pitch") {
           status = "pitched";
         }
-        return jsonResult(await post("/leads/mark", { lead_id, status, details: params.details || "" }));
+        const body = { lead_id, status, details: params.details || "" };
+        if (Number.isInteger(params.snooze_days)) body.snooze_days = params.snooze_days;
+        return jsonResult(await post("/leads/mark", body));
       },
     });
 

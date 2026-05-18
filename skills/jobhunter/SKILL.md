@@ -121,29 +121,27 @@ cover:<12_hex>       -> jobhunter_cover_note(id_prefix=<12_hex>)
 **Lead callbacks:**
 
 ```text
-reached:<12_hex>     -> leadhunter_mark_lead(id_prefix=<12_hex>, status="reached_out")
-skip:<12_hex>        -> leadhunter_mark_lead(id_prefix=<12_hex>, status="skipped")
-later:<12_hex>       -> leadhunter_mark_lead(id_prefix=<12_hex>, status="snoozed", snooze_days=7)
-pitch:<12_hex>       -> leadhunter_draft_pitch(id_prefix=<12_hex>)
+lead_reached:<12_hex>     -> leadhunter_mark_lead(id_prefix=<12_hex>, status="reached_out")
+lead_irrelevant:<12_hex>  -> leadhunter_mark_lead(id_prefix=<12_hex>, status="irrelevant")
+lead_snooze:<12_hex>      -> leadhunter_mark_lead(id_prefix=<12_hex>, status="snoozed", snooze_days=7)
+lead_pitch:<12_hex>       -> leadhunter_draft_pitch(id_prefix=<12_hex>)
 ```
 
-**After EVERY callback action, edit the original message in place** rather than sending a new confirmation message. The synthetic user message includes `message_id` in its conversation metadata — that's the digest message that had the buttons.
+The job/lead callback prefixes are deliberately distinct (`applied:` vs `lead_reached:`, `irrelevant:` vs `lead_irrelevant:`, `snooze:` vs `lead_snooze:`) so the dispatcher can route by prefix even if a job and a lead happen to share an `id_prefix`.
 
-For triage actions (applied/irrelevant/snooze/reached/skip/later): edit to strike through the item text and drop the buttons. Example:
+**After triage actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads): DELETE the original message.** The user wants the item off their visible queue. Telegram already animated the tap, so don't send a separate confirmation.
 
 ```text
 message({
-  action: "edit",
+  action: "delete",
   messageId: "<metadata message_id>",
-  target: "telegram:<chat_id>",
-  message: "~~<original item text>~~\n\n✓ <Status> at <ISO date>",
-  presentation: { blocks: [] }
+  target: "telegram:<chat_id>"
 })
 ```
 
-Status emoji: `✓ Applied`, `✗ Irrelevant`, `💤 Snoozed 1d`, `✓ Reached out`, `✗ Skipped`, `💤 Later (snoozed 7d)`.
+Snoozed items automatically reappear in the next `/jobs` or `/leads` digest after the snooze window expires (1 day for jobs, 7 days for leads). The DB row stays — `jobhunter_history` and SQL queries can still find triaged items for audit.
 
-For draft actions (cover/pitch): edit to APPEND the draft text and keep the primary triage buttons. Example:
+**After draft actions (cover on jobs, lead_pitch on leads): EDIT the original message to APPEND the draft and keep the primary triage buttons.**
 
 ```text
 message({
@@ -157,5 +155,7 @@ message({
   ]]}]}
 })
 ```
+
+For leads, use `lead_reached:` / `lead_irrelevant:` callback_data on the kept buttons.
 
 Do NOT send a second message for the draft text. Telegram clutters fast. Edit in place.

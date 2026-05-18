@@ -5,6 +5,7 @@ import re
 import shutil
 import sqlite3
 import time
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List
@@ -21,7 +22,7 @@ from .sources import SourceError, validate_safe_url
 LOGGER = logging.getLogger(__name__)
 JOB_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
 LEAD_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
-LEAD_STATUS_VALUES = {"new", "shortlisted", "rejected", "pitched", "archived"}
+LEAD_STATUS_VALUES = {"new", "shortlisted", "reached_out", "rejected", "snoozed", "pitched", "archived"}
 
 
 class JobHunterService:
@@ -261,20 +262,29 @@ class JobHunterService:
         )
         return {"ok": True, "source_id": source_id, "inserted": inserted, "source": source}
 
-    def mark_lead(self, lead_id: str, status: str, details: str = "") -> Dict:
+    def mark_lead(self, lead_id: str, status: str, details: str = "", snooze_days: int = 7) -> Dict:
         self.ensure_lead(lead_id)
         status = normalize_lead_status(status)
-        self.bot.database.update_lead_status(lead_id, status, details)
+        snoozed_until = None
+        if status == "snoozed":
+            days = max(1, min(int(snooze_days or 7), 90))
+            snoozed_until = (datetime.utcnow() + timedelta(days=days)).replace(microsecond=0).isoformat() + "Z"
+        self.bot.database.update_lead_status(lead_id, status, details, snoozed_until=snoozed_until)
         self.bot.database.record_agent_action(
             "openclaw-lead-button",
             "mark_lead",
             "inline lead action",
             "Marked lead %s as %s" % (lead_id[:12], status),
-            {"lead_id": lead_id, "status": status, "details": details or ""},
+            {
+                "lead_id": lead_id,
+                "status": status,
+                "details": details or "",
+                "snoozed_until": snoozed_until or "",
+            },
             "applied",
             result_message="Lead %s marked as %s" % (lead_id[:12], status),
         )
-        return {"ok": True, "lead_id": lead_id, "status": status}
+        return {"ok": True, "lead_id": lead_id, "status": status, "snoozed_until": snoozed_until or ""}
 
     def draft_lead_pitch(self, lead_id: str, ask: str = "") -> Dict:
         lead = self.ensure_lead(lead_id)
@@ -442,7 +452,12 @@ def create_handler(app: JobHunterService):
                 elif method == "POST" and path == "/leads/source/add":
                     payload = app.add_lead_source(body)
                 elif method == "POST" and path == "/leads/mark":
-                    payload = app.mark_lead(required(body, "lead_id"), required(body, "status"), str(body.get("details") or ""))
+                    payload = app.mark_lead(
+                        required(body, "lead_id"),
+                        required(body, "status"),
+                        str(body.get("details") or ""),
+                        optional_int(body.get("snooze_days")) or 7,
+                    )
                 elif method == "POST" and path == "/leads/pitch":
                     payload = app.draft_lead_pitch(required(body, "lead_id"), str(body.get("ask") or ""))
                 else:
