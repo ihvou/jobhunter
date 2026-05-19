@@ -21,6 +21,7 @@ Commands:
   shell     Open a shell; use "shell gateway" or "shell service"
   onboard   Run Dockerized OpenClaw onboarding without host daemon install
   set-keyboard  Apply the persistent Telegram 2x2 reply keyboard
+  reset-sessions  Clear cached Telegram direct sessions for fresh tool prompts
   cron-install  Register the Phase 4 OpenClaw cron jobs
   cron-list     List OpenClaw cron jobs
   doctor    Run OpenClaw doctor inside the gateway image
@@ -62,6 +63,20 @@ try:
 except Exception:
     print("down")
 PY
+}
+
+wait_gateway_health() {
+  local attempt status
+  for attempt in $(seq 1 60); do
+    status="$(gateway_health)"
+    if [ "$status" = "ok" ]; then
+      printf "openclaw-gateway health: ok\n"
+      return 0
+    fi
+    sleep 2
+  done
+  printf "openclaw-gateway health: %s after restart timeout\n" "$status" >&2
+  return 1
 }
 
 container_state() {
@@ -147,6 +162,64 @@ request.on("error", (error) => {
 });
 request.end(payload);
 NODE
+}
+
+reset_sessions() {
+  local chat_id=""
+  case "${1:-}" in
+    "")
+      ;;
+    --chat)
+      if [ -z "${2:-}" ]; then
+        printf "reset-sessions: --chat requires a chat id\n" >&2
+        return 2
+      fi
+      chat_id="$2"
+      ;;
+    *)
+      printf "reset-sessions: unknown argument: %s\n" "$1" >&2
+      printf "usage: ./bin/openclaw reset-sessions [--chat <chat_id>]\n" >&2
+      return 2
+      ;;
+  esac
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker exec -i openclaw-gateway sh -c %q sh %q < reset-sessions-node-script\n' 'node - "$1"' "$chat_id"
+    printf '+'
+    printf ' %q' "${COMPOSE[@]}" restart openclaw-gateway
+    printf '\n'
+    return 0
+  fi
+  docker exec -i openclaw-gateway sh -c 'node - "$1"' sh "$chat_id" <<'NODE'
+const fs = require("node:fs");
+
+const chatId = process.argv[2] || "";
+const path = "/home/node/.openclaw/agents/jobs/sessions/sessions.json";
+const prefix = "agent:jobs:telegram:direct:";
+const expected = chatId ? `${prefix}${chatId}` : "";
+const data = JSON.parse(fs.readFileSync(path, "utf8"));
+const removed = [];
+
+for (const key of Object.keys(data)) {
+  if (!key.startsWith(prefix)) continue;
+  if (expected && key !== expected) continue;
+  removed.push(key);
+  delete data[key];
+}
+
+if (removed.length) {
+  const tmp = `${path}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`);
+  fs.renameSync(tmp, path);
+}
+
+if (removed.length) {
+  console.log(`removed session keys: ${removed.join(", ")}`);
+} else {
+  console.log("removed session keys: none");
+}
+NODE
+  run_cmd "${COMPOSE[@]}" restart openclaw-gateway >/dev/null
+  wait_gateway_health
 }
 
 config_patch() {
@@ -526,6 +599,10 @@ case "${1:-help}" in
     ;;
   set-keyboard)
     set_keyboard
+    ;;
+  reset-sessions)
+    shift
+    reset_sessions "$@"
     ;;
   doctor)
     shift
