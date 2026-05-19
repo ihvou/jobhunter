@@ -138,18 +138,32 @@ Line 4 onward: <body paragraphs>
 Do NOT wrap the output in backticks or any markup. Output begins with the literal word "Subject:" on the very first line of your response.
 
 Subject line constraints:
-- 3 to 8 words. Aim for the short end — LinkedIn's open-rate data favors 3-4 word subjects.
+- The subject anchors the user's OFFER (AI product builder / extra product capacity / extra hands / shipping help) to the lead's COMPANY and optionally a phase. It does NOT repeat the hard signal from evidence — that recognition goes in the body's first sentence, not the subject.
+- 3 to 8 words. Aim for the short end — LinkedIn's open-rate data favors 3–5 word subjects.
 - ≤ 60 characters (mobile InMail preview truncates around there).
 - MUST include the company name. Do NOT include the lead's first name — the recipient already knows who they are.
-- If the body opens with a HARD signal (per STEP 1.A below), echo that signal in the subject. Examples: "Hexa's $8k MRR ramp", "Helonic + Procore/Autodesk wedge", "Bubble Lab's Slack-native angle".
-- If the body opens softer (STEP 1.B), reference the product area or category. Examples: "Korso + manufacturing AI agents", "Bubble Lab's ops workflows".
+- Pick ONE of these patterns (paraphrase, do not copy verbatim — vary the wording so multiple leads don't get identical subjects in the same digest):
+  * "AI product builder for <Company>"
+  * "Extra hands for <Company>"
+  * "Extra hands for <Company>'s <phase>"   (use only if evidence supports a clear phase — see below)
+  * "<Company> + product/AI capacity"
+  * "Shipping help for <Company>"
+  * "Product/AI capacity for <Company>"
+- Phase wording (only when evidence directly supports it):
+  * Hard signal of customers/MRR → "first-customer push", "early-revenue phase"
+  * Named integration shipped → "distribution push"
+  * Named hire / launch → "ramp phase"
+  * No hard signal, just product/area → "MVP push" or "build phase"
+  Do NOT invent a phase if evidence is silent — drop the phase fragment instead.
 - Sentence case or lowercase only — no Title Case Like This. No emojis. No exclamation marks. No trailing punctuation (no period, no question mark).
 - Do NOT phrase as a question. Questions feel low-effort in InMail subject lines.
-- Forbidden subject patterns (high spam/low-conversion):
-  * Generic sales words: "opportunity", "introduction", "partnership", "exclusive", "exciting"
-  * Vague greetings: "Hi <Name>", "Hello", "Quick chat", "Quick question"
-  * Calls-to-action: "Let's connect", "Coffee?", "15-min chat?"
-  * Title case applied to whole subject
+- Forbidden subject patterns:
+  * Descriptive of the lead only: "<Company> builds X", "<Company> does X", "<Company> is X" — this tells the founder what they already know and gives no reason to open.
+  * Subject that surfaces the hard signal alone: "Hexa's $8k MRR", "Helonic's Procore integration", "<Company>'s <metric>" — that's clickbait when the body talks about your services; keep the signal in the body opener.
+  * Generic sales words: "opportunity", "introduction", "partnership", "exclusive", "exciting".
+  * Vague greetings: "Hi <Name>", "Hello", "Quick chat", "Quick question".
+  * Calls-to-action: "Let's connect", "Coffee?", "15-min chat?".
+  * Title case applied to whole subject.
 
 Body format constraints:
 - 60 to 130 words. LinkedIn DM length.
