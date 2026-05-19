@@ -875,14 +875,57 @@ Implementation: source-specific parser functions in `jobhunter/sources.py`, one 
 
 Acceptance: a fresh `/jobs` digest after this lands shows real company names for YC, DOU, WeWorkRemotely rows; LinkedIn titles no longer have `"role at X is available"` artifacts; YC and DOU rows have non-`"Unknown company"` company fields.
 
-### 5d. Time and branch policy
+### 5d. Time and branch policy (closed)
 
-Each sub-phase is independent and can be merged separately. Suggested order:
-1. **5b** (two-call digest) — unblocks the delete UX users complain about. ~3-4h Codex.
-2. **5a** (persistent reply-keyboard) — quality-of-life. ~2-3h Codex. Depends on schema investigation.
-3. **5c** (parser fixes) — already filed as task candidate #3. ~3-4h Codex. Independent of 5a/5b.
+5a/5b/5c shipped on a single branch `codex/phase-5-ux-parser-polish` (off `main` after the Phase-2-cleanup → main fast-forward). Tag `phase-5-passed-2026-05-19` marks acceptance; commits are atomic per sub-phase plus three follow-up acceptance commits for the runtime quirks documented in Phase 5 — acceptance record below.
 
-All sub-phases on dedicated branches off `codex/phase-4-recurring-leadhunter` (or its merged successor). Verification is trajectory-based, same discipline as Phase 3a/3b/4.
+### Phase 5 — acceptance record (2026-05-19)
+
+What actually shipped vs the original sub-phase specs, and the OpenClaw 2026.5.7 quirks we discovered along the way. Recorded here so we don't relearn them next phase.
+
+**5a — persistent reply-keyboard.** Shipped via a different path than the spec proposed.
+
+- Path 1 (OpenClaw `channels.telegram` config) and Path 2 (per-message `presentation.blocks[type="keyboard"]`) were both investigated. **Neither is supported by OpenClaw 2026.5.7.** `/app/extensions/telegram/src/send.ts` only builds `reply_markup` via `buildInlineKeyboard(opts.buttons)` — no code path reads a `keyboard` block, no `ReplyKeyboardMarkup`, no `is_persistent` flag, no `channels.telegram.replyKeyboard` config option exists.
+- The old `Get more jobs / Update sources / Tune scoring / Usage` reply-keyboard visible in the user's chat was a remnant from the retired pre-Phase-2 `jobhunter/telegram.py`. Telegram caches reply keyboards per chat until the bot overwrites them, and OpenClaw never overwrites the keyboard (it only sends `inline_keyboard`), so it stuck.
+- Resolution: set the new 2×2 keyboard once via a direct Telegram Bot API `sendMessage` call with `reply_markup={keyboard:[[...]], resize_keyboard:true, is_persistent:true}`. Done ad-hoc with `curl` from inside the gateway container; Telegram cached it. Phase 5e wraps this in `./bin/openclaw set-keyboard` so re-onboarding and new chats can re-apply idempotently.
+- The two new read-only tools shipped as planned: `jobhunter_show_profile` (returns `input/profile.local.md`) and `leadhunter_show_icp` (returns `input/icp.local.md`).
+
+**5b — callback message_id round-trip.** Shipped as spec'd. Verified by trajectory: `message(action="send")` on Telegram returns the real Telegram message_id (not the OpenClaw internal id), so encoding it in `callback_data` as `applied:<id_prefix>:<messageId>` and using it for `message(action="delete")` works. Triage actions (Applied/Irrelevant/Snooze on jobs; Reached out/Irrelevant/Snooze on leads) now delete the original card on tap. Draft actions (Cover on jobs, Pitch on leads) use `edit` instead of `delete` to append the draft to the existing card.
+
+**5c — per-source parser fixes.** Shipped as spec'd. YC/DOU now extract company from the URL path (`/companies/<slug>/jobs/<id>` and `/companies/<slug>/vacancies/<id>`), so `Unknown company` is no longer the default. WeWorkRemotely strips the `<Company>: ` prefix from titles. LinkedIn email parser strips the `role at <Company> is available` artifact from title and company. Test coverage in `tests/test_sources.py`.
+
+**5a/5b acceptance follow-ups (committed as `fec4a5d`, `7b0b6f2`, `f80eba7`).** Three quirks emerged during live testing that required additional fixes on top of the spec'd sub-phases:
+
+- **Reply-keyboard block dropped silently and broke sibling buttons block.** When Codex included `{type:"keyboard",keyboard:[...]}` alongside a `{type:"buttons",buttons:[...]}` block per the original 5a contract, the keyboard was ignored as expected, but the buttons block also stopped rendering. The plugin contract now forbids emitting any `keyboard` block.
+- **`presentation.blocks[type="buttons"].buttons` must be a FLAT array, not 2D row-grouped.** `normalizeButton` in `/app/dist/payload-Ojv8hlch.js` calls `toRecord(raw)`, which returns `undefined` for arrays, so a `[[btn,btn],[btn,btn]]` 2D structure normalizes to `[]` and the entire buttons block is dropped. To get a 2×2 inline-button layout, emit TWO separate `{type:"buttons"}` blocks with 2 flat buttons each. OpenClaw renders one row per block. (This means inline buttons NEVER actually rendered prior to Phase 5 — Phase 4's "verified buttons" was Codex hallucinating success. Trust-but-verify confirmed.)
+- **OpenClaw caches the system prompt + tool descriptions per session.** Plugin description edits do not take effect on existing sessions, only on new ones. `~/.openclaw/agents/<id>/sessions/sessions.json` has a `systemSent: true` flag per `agent:jobs:telegram:direct:<chat_id>` key. Deleting the session entry (and restarting the gateway) forces a fresh session that loads current plugin descriptions on the next user message. Phase 5e wraps this in `./bin/openclaw reset-sessions`.
+
+**LLM-based lead pitch with InMail subject.** The deterministic `build_lead_pitch` template was producing rephrased lead data, not actual outreach. Replaced with `LLMClient.lead_pitch` (budget-gated, falls back to template on error) that generates a two-part draft: subject line (3–8 words, company-anchored, echoes the hard signal when one exists in evidence, forbids generic sales words and questions) and body (60–130 words, first-name salutation, OPEN/BRIDGE/OFFER/CTA structure, locked passive CTA verbatim from one of three approved variants, no sign-off). Pitch callback now appends to the original lead card via `message(action="edit", message=card_text + "\n\n— Pitch draft —\n" + draft)` with buttons preserved, so the user has the pitch in place without a separate message and can still tap Reached out / Snooze / Irrelevant.
+
+### Phase 5e — followups (post-acceptance)
+
+Captures the ad-hoc surgery we did during Phase 5 acceptance so it becomes repeatable.
+
+**5e.1 `./bin/openclaw set-keyboard`** — wrap the one-shot Telegram Bot API call we did manually so:
+- the 2×2 reply-keyboard is applied idempotently on first install (called automatically by `./bin/openclaw onboard`),
+- it can be re-applied if Telegram state is wiped or a second chat is paired,
+- the labels live in one place (currently duplicated in plugin descriptions, SKILL.md, and the curl).
+
+Implementation: shell function or a Python one-shot that reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` from the gateway env, POSTs to `https://api.telegram.org/bot<token>/sendMessage` with the canonical 4-button keyboard, `resize_keyboard:true`, `is_persistent:true`, and a short body like `Menu updated.` Exits non-zero if either env var is missing.
+
+Acceptance: fresh install + onboard yields a chat where the 2×2 keyboard appears under any bot reply; re-running `set-keyboard` is a no-op from the user's perspective (the keyboard refreshes silently).
+
+**5e.2 `./bin/openclaw reset-sessions`** — wrap the `sessions.json` surgery I did manually so plugin-description changes take effect on the next user message without needing to know the file path.
+
+Implementation: shell call into the gateway container that strips per-chat session entries from `/home/node/.openclaw/agents/jobs/sessions/sessions.json` (keep `agent:jobs:main`), then restarts the gateway. Optionally accept a chat-id argument to clear only one session.
+
+Acceptance: after an edit to `plugins/jobhunter-tools/index.js`, running `./bin/openclaw reset-sessions && ./bin/openclaw status` is the only surgery needed before sending the next Telegram message that uses the new contract.
+
+**5e.3 Update MIGRATION.md "What this project is" / runtime model to reflect Phase 5 reality.** The `## Active OpenClaw Migration`, `## Runtime Model`, and the top of CLAUDE.md/AGENTS.md still describe Phase 4 state. Bring them in sync with the Phase 5 acceptance record above (delete-on-tap works, LLM pitches exist, persistent keyboard is chat-level not per-message). Bonus: codify the two OpenClaw quirks (flat-per-block buttons, session-cached system prompt) as a `## OpenClaw 2026.5.7 known quirks` section so future contributors don't relearn them.
+
+**5e.4 Draft the OpenClaw upstream issue for `callback_origin_message_id`.** Phase 5b's two-call workaround is correct but doubles message API traffic. Once OpenClaw exposes the source message_id in callback synthetic-prompt metadata (or a `message(action="delete-callback-source")` shortcut), we retire the second call. Draft the issue text against `ghcr.io/openclaw/openclaw:2026.5.7-slim`, file it, link from this file once filed.
+
+Branch policy: single branch `codex/phase-5e-acceptance-followups` off `main` at `phase-5-passed-2026-05-19`. Atomic commits per sub-item. Trajectory-based acceptance.
 
 ## Security configuration (mandatory)
 
