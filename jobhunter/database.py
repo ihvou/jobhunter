@@ -1071,6 +1071,11 @@ class Database:
                 )
             )
 
+    def leads_last_seen_at(self) -> Optional[str]:
+        with self.connection() as conn:
+            row = conn.execute("select max(last_seen_at) as last_seen from leads").fetchone()
+        return row["last_seen"] if row and row["last_seen"] else None
+
     def mark_leads_digested(self, lead_ids: List[str]) -> str:
         digest_id = hashlib.sha256(("|".join(lead_ids) + utc_now_iso()).encode("utf-8")).hexdigest()[:16]
         if not lead_ids:

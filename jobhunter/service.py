@@ -232,7 +232,14 @@ class JobHunterService:
         digest_id = ""
         if mark_sent and leads:
             digest_id = self.bot.database.mark_leads_digested([lead["id"] for lead in leads])
-        return {"ok": True, "leads": leads, "count": len(leads), "digest_id": digest_id, "marked_sent": bool(digest_id)}
+        return {
+            "ok": True,
+            "leads": leads,
+            "count": len(leads),
+            "digest_id": digest_id,
+            "marked_sent": bool(digest_id),
+            **leads_freshness(self.bot.database),
+        }
 
     def research_leads(self, body: Dict) -> Dict:
         candidates = body.get("leads") or body.get("candidates") or []
@@ -607,6 +614,36 @@ def lead_digest_row(row) -> Dict:
     }
     out["card_text"] = format_lead_card(out)
     return out
+
+
+LEADS_STALE_HOURS = 24
+
+
+def leads_freshness(database) -> Dict:
+    last = database.leads_last_seen_at()
+    if not last:
+        return {
+            "leads_last_seen_at": None,
+            "leads_freshness_minutes": None,
+            "leads_freshness_hours": None,
+            "leads_is_stale": True,
+        }
+    try:
+        last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return {
+            "leads_last_seen_at": str(last),
+            "leads_freshness_minutes": None,
+            "leads_freshness_hours": None,
+            "leads_is_stale": True,
+        }
+    age_minutes = max(0, int((datetime.utcnow() - last_dt).total_seconds() // 60))
+    return {
+        "leads_last_seen_at": str(last),
+        "leads_freshness_minutes": age_minutes,
+        "leads_freshness_hours": age_minutes // 60,
+        "leads_is_stale": age_minutes >= LEADS_STALE_HOURS * 60,
+    }
 
 
 def format_lead_card(lead: Dict) -> str:
