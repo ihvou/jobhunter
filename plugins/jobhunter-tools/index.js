@@ -128,12 +128,12 @@ function register(api, tool) {
 
 const intSchema = (minimum, maximum) => ({ type: "integer", minimum, maximum });
 const PERSISTENT_KEYBOARD_CONTRACT =
-  "PERSISTENT TELEGRAM KEYBOARD: after any user-visible Telegram reply, include a reply-keyboard presentation.blocks block " +
-  "alongside any inline buttons: {type: \"keyboard\", keyboard: [[\"Get more jobs\", \"My job profile\"], " +
-  "[\"Get more leads\", \"My ICP profile\"]], resize_keyboard: true, persistent: true}. " +
-  "These are reply-keyboard buttons, not inline callback buttons. Route `Get more jobs` to jobhunter_get_more_jobs, " +
-  "`My job profile` to jobhunter_show_profile, `Get more leads` to leadhunter_get_more_leads, and `My ICP profile` " +
-  "to leadhunter_show_icp. If the channel rejects an unknown keyboard block, still send the reply; the slash menu remains the fallback.";
+  "PERSISTENT TELEGRAM KEYBOARD: the chat already has a 2x2 reply-keyboard set at the chat level " +
+  "(`Get more jobs`/`My job profile`/`Get more leads`/`My ICP profile`). Do NOT include a `type: \"keyboard\"` " +
+  "block in `presentation.blocks` in any message — OpenClaw 2026.5.7 does not recognize that block type and " +
+  "adding it silently breaks the sibling `type: \"buttons\"` block, so inline buttons disappear. Route the reply-keyboard " +
+  "labels by intent: `Get more jobs` -> jobhunter_get_more_jobs, `My job profile` -> jobhunter_show_profile, " +
+  "`Get more leads` -> leadhunter_get_more_leads, `My ICP profile` -> leadhunter_show_icp.";
 
 export default definePluginEntry({
   id: "jobhunter-tools",
@@ -152,18 +152,24 @@ export default definePluginEntry({
         "then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
         "\"Collecting fresh jobs, back in ~1 min.\" " +
         "RENDERING (Telegram digest requests only): for EACH job in jobs[], use the two-call messageId workaround. " +
+        "BUTTON SHAPE (CRITICAL): each `presentation.blocks` entry of type `\"buttons\"` must contain a FLAT array of " +
+        "button objects, not a 2D row-grouped array. Each top-level buttons block renders as ONE Telegram row. " +
+        "To get a 2x2 layout, emit TWO buttons blocks of 2 buttons each. OpenClaw 2026.5.7 silently drops a buttons " +
+        "block whose `buttons` array contains nested arrays — confirmed via /app/dist/payload-Ojv8hlch.js normalizeButton. " +
         "CALL 1: emit `message({action: \"send\", target: <chat_id from conversation metadata, e.g. \"telegram:855127987\">, " +
-        "message: <job text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Applied\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
-        "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}], " +
-        "[{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
-        "{text: \"Cover\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]]}]}})`. " +
+        "message: <job text>, presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
+        "{text: \"Cover\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}" +
+        "]}})`. " +
         "Capture the returned `messageId`. CALL 2: immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
-        "message: <same job text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
-        "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}], " +
-        "[{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
-        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]]}]}})`. " +
+        "message: <same job text>, presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "]}})`. " +
         "<id_prefix> is the first 12 lowercase hex characters of the job's id. " +
         "Use mark_sent=true only for rows actually shown. " +
         "For read-only diagnostics/analysis/source-or-scoring work, call with mark_sent=false and do NOT emit messages. " +
@@ -485,18 +491,25 @@ export default definePluginEntry({
         "If leads[] is empty, do NOT silently return — emit a single `message` explaining the empty state " +
         "(e.g. \"no saved leads yet — first set your Leadhunter ICP via icp_edit, then add a lead_source, then research\"). " +
         "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], use the same two-call messageId workaround as jobs. " +
-        "CALL 1: emit `message({action: \"send\", target: <chat_id from conversation metadata>, message: <lead text>, " +
-        "presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Reached out\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
-        "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}], " +
-        "[{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
-        "{text: \"Pitch\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]]}]}})`. " +
+        "BUTTON SHAPE (CRITICAL): each `presentation.blocks` entry of type `\"buttons\"` must contain a FLAT array of " +
+        "button objects, not a 2D row-grouped array. Each top-level buttons block renders as ONE Telegram row. " +
+        "To get a 2x2 layout, emit TWO buttons blocks of 2 buttons each. " +
+        "MESSAGE BODY: use `lead.card_text` from the response verbatim as the `message` field — do NOT reformat or paraphrase. " +
+        "This is the canonical lead card text and must be stable across send/edit so the pitch callback can append cleanly later. " +
+        "CALL 1: emit `message({action: \"send\", target: <chat_id from conversation metadata>, message: <lead.card_text>, " +
+        "presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
+        "{text: \"Pitch\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}" +
+        "]}})`. " +
         "Capture the returned `messageId`. CALL 2: immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
-        "message: <same lead text>, presentation: {blocks: [{type: \"buttons\", buttons: [" +
-        "[{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
-        "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}], " +
-        "[{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +
-        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]]}]}})`. " +
+        "message: <same lead.card_text>, presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "]}})`. " +
         "<id_prefix> is the first 12 lowercase hex characters of the lead id. " +
         "Button labels are intentionally symmetric with the job triage buttons. " +
         "Use mark_sent=true only for rows actually shown. " +
@@ -508,9 +521,17 @@ export default definePluginEntry({
         "Snoozed leads automatically reappear in the next `/leads` digest after their snooze window expires " +
         "(default 7 days; outreach cycles are longer than job triage). The DB row persists for audit. " +
         "The encoded `:<messageId>` is mandatory because the synthetic callback prompt does not carry the button message id. " +
-        "(b) For pitch (draft action — user wants the pitch text): call `leadhunter_draft_pitch`, then emit " +
-        "`message({action: \"send\", target: <chat_id>, message: \"**Pitch draft:**\\n<draft text>\"})`. " +
-        "Never send outreach automatically — drafts only.",
+        "(b) For pitch (draft action — APPEND pitch text to the SAME lead card, do NOT send a new message): " +
+        "1) call `leadhunter_draft_pitch` with the id_prefix. Response contains both `draft` (LinkedIn-style outreach text from the user) " +
+        "and `card_text` (the canonical lead card body, same as in the original send). " +
+        "2) emit `message({action: \"edit\", target: <chat_id>, messageId: <messageId from callback_data>, " +
+        "message: <card_text> + \"\\n\\n— Pitch draft —\\n\" + <draft>, presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "]}})`. Buttons stay the same so the user can still tap Reached out / Snooze / Irrelevant after seeing the pitch. " +
+        "Do NOT send a separate \"**Pitch draft:** ...\" message. Never send outreach automatically — drafts are copy-paste only.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
