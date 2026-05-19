@@ -130,9 +130,18 @@ lead_snooze:<12_hex>:<messageId>      -> leadhunter_mark_lead(id_prefix=<12_hex>
 lead_pitch:<12_hex>:<messageId>       -> leadhunter_draft_pitch(id_prefix=<12_hex>)
 ```
 
-The job/lead callback prefixes are deliberately distinct (`applied:` vs `lead_reached:`, `irrelevant:` vs `lead_irrelevant:`, `snooze:` vs `lead_snooze:`) so the dispatcher can route by prefix even if a job and a lead happen to share an `id_prefix`.
+**Approval callbacks (proposed agent actions: sources/scoring/profile/icp/directive/rescore/bulk_update):**
 
-**After triage actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads): delete the original card.**
+```text
+approve:<action_id>:<messageId>  -> jobhunter_apply_action(action_id=<action_id>), then delete <messageId>
+reject:<action_id>:<messageId>   -> delete <messageId>; the proposed action stays in the DB with status='proposed' for audit
+```
+
+`<action_id>` is the integer id returned by `jobhunter_propose_actions` (not a hex prefix). No backend call is made on reject — silently dropping the card is the cleanest UX, and the proposed-but-not-applied row is still visible via `jobhunter_history`.
+
+The job/lead/approval callback prefixes are deliberately distinct (`applied:` vs `lead_reached:` vs `approve:`, etc.) so the dispatcher can route by prefix even if id-spaces collide.
+
+**After triage or approval actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads; approve/reject on proposed actions): delete the original card.**
 
 ```text
 message({

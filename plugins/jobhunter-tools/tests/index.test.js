@@ -153,7 +153,10 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   // the `leadhunter_get_more_leads` description and the regression guards at line ~78 above.
 
   const saveLeadsDescription = tools.get("leadhunter_save_leads").description;
-  for (const phrase of ["explicit user approval", "public url", "Do not store guessed personal emails"]) {
+  // Lead saves intentionally do NOT require a per-call user-approval step anymore — the per-lead triage buttons
+  // (Reached out / Irrelevant / Snooze / Pitch) on the digest are the pruning surface. Phrase guards updated
+  // accordingly; if the no-approval policy is reverted, update both the description and this list.
+  for (const phrase of ["no separate user approval step", "public url", "Do not store guessed personal emails"]) {
     assert.match(saveLeadsDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });

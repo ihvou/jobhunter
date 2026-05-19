@@ -317,17 +317,39 @@ export default definePluginEntry({
         "default to type=\"community\" and propose anyway. For 'find me sources for X' requests, use exa to " +
         "search first, then propose the top results via jobhunter_propose_actions. " +
         "MANDATORY EMIT: after this tool returns, inspect `actions[]` in the response — each entry has an `id` " +
-        "field (the action_id). Your NEXT action MUST be a `message` tool call (action=send, target=<chat_id from " +
-        "conversation metadata>) listing every action_id with a one-line human summary so the user can approve. " +
-        "Send the approval prompt as **plain text**, not as inline buttons. Approvals are low-frequency, " +
-        "high-context decisions; the user may want to qualify or amend the approval (\"approve 39 but switch " +
-        "type to rss\", \"approve 39 and run collection now\", \"what's the risk if I leave 39 as test?\"). Forcing " +
-        "a binary button cuts off that dialog. Inline buttons are for per-job digest triage only " +
-        "(Applied/Irrelevant/Snooze/Cover), NOT for proposal approval. " +
+        "field (the integer action_id). For EACH action you MUST emit ONE message with a short one-line human summary " +
+        "AND inline Approve/Reject buttons. Use the same two-call messageId workaround as job/lead digests so the " +
+        "buttons encode the Telegram message_id and the message can be deleted on tap.\n\n" +
+        "CALL 1 (per action): emit `message({action: \"send\", target: <chat_id from conversation metadata>, " +
+        "message: \"#<id> <one-line summary>\\n<one or two lines of detail if useful>\", presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [" +
+        "{text: \"Approve\", callback_data: \"pending:<id>\", style: \"success\"}, " +
+        "{text: \"Reject\", callback_data: \"pending:<id>\", style: \"danger\"}" +
+        "]}]}})`. Capture the returned `messageId`. " +
+        "CALL 2 (per action): immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
+        "message: <same text>, presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [" +
+        "{text: \"Approve\", callback_data: \"approve:<id>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Reject\", callback_data: \"reject:<id>:<messageId>\", style: \"danger\"}" +
+        "]}]}})`. " +
+        "Buttons remain a flat array per block (OpenClaw 2026.5.7 normalizer drops 2D button arrays). The id is the " +
+        "integer action_id from the response — full id, no truncation. " +
         "If the response has `count: 0` and empty `actions[]`, that means the server REJECTED your input shape — " +
-        "still emit a `message` to the user explaining you tried to propose but the shape was wrong, then retry " +
-        "with a corrected payload. " +
-        "Do NOT continue reasoning, do NOT plan further checks, do NOT end the turn without a `message` call.",
+        "still emit ONE `message(action=\"send\")` to the user explaining you tried to propose but the shape was " +
+        "wrong, then retry with a corrected payload. " +
+        "Edge case — the user typed free-form context with the approval (\"approve 39 but switch type to rss\", " +
+        "\"what's the risk if I leave 39 as test?\"). Treat that as a regular conversational turn: answer the " +
+        "question, propose a new corrected action if needed, and re-emit the buttons. Do not just tap a synthetic " +
+        "button. " +
+        "Do NOT continue reasoning, do NOT plan further checks, do NOT end the turn without a `message` call.\n\n" +
+        "CALLBACK HANDLING (when a synthetic user message arrives matching `approve:<id>:<messageId>` or " +
+        "`reject:<id>:<messageId>`): " +
+        "For approve: call `jobhunter_apply_action(action_id=<id>)`, then emit `message(action=\"delete\", " +
+        "target=<chat_id>, messageId=<messageId>)`. The disappearing card is the confirmation. The applied action " +
+        "is auditable via jobhunter_history. " +
+        "For reject: emit `message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. Do not call any " +
+        "backend tool — the proposed action stays in the DB with status='proposed' for audit (visible via " +
+        "jobhunter_history); silently rejecting is the cleanest UX.",
       parameters: schema(
         {
           session_id: { type: "string" },
@@ -488,8 +510,17 @@ export default definePluginEntry({
         "\"get more leads\", asks for a lead digest, or asks to see researched leads. " +
         PERSISTENT_KEYBOARD_CONTRACT +
         " " +
-        "If leads[] is empty, do NOT silently return — emit a single `message` explaining the empty state " +
-        "(e.g. \"no saved leads yet — first set your Leadhunter ICP via icp_edit, then add a lead_source, then research\"). " +
+        "STALENESS RULE: response includes `leads_freshness_hours`, `leads_last_seen_at`, `leads_is_stale`. " +
+        "If `leads_is_stale` is true (no leads OR last_seen >= 24h ago), you MUST first run a fresh research pass " +
+        "BEFORE rendering. Don't ask the user to confirm — they tapped `Get more leads` and expect fresh results. " +
+        "Tell the user briefly: \"Researching fresh leads, back in ~1-2 min.\" Then use firecrawl/exa/web tools " +
+        "against the user's current Leadhunter ICP (read it via `leadhunter_show_icp`) to identify candidate " +
+        "founders/operators matching the ICP. Save them DIRECTLY via `leadhunter_save_leads` (no separate approval " +
+        "prompt — saving is non-destructive, the per-lead triage buttons let the user prune later). Then call " +
+        "`leadhunter_get_more_leads` AGAIN and render the fresh digest. " +
+        "If `leads_is_stale` is false, skip research and render the cached digest immediately. " +
+        "EMPTY DIGEST: if leads[] is still empty after research (e.g. ICP not set, no candidates found, all " +
+        "candidates already triaged), emit a single `message` explaining the empty state. " +
         "RENDERING (Telegram lead digest requests only): for EACH lead in leads[], use the same two-call messageId workaround as jobs. " +
         "BUTTON SHAPE (CRITICAL): each `presentation.blocks` entry of type `\"buttons\"` must contain a FLAT array of " +
         "button objects, not a 2D row-grouped array. Each top-level buttons block renders as ONE Telegram row. " +
@@ -555,9 +586,11 @@ export default definePluginEntry({
       name: "leadhunter_save_leads",
       label: "Leadhunter Save Leads",
       description:
-        "Save researched lead candidates after explicit user approval. Do NOT call this immediately after web_search/firecrawl/exa research unless the user has approved the candidate list. " +
+        "Save researched lead candidates DIRECTLY after web_search/firecrawl/exa research — no separate user approval step. " +
+        "Lead saves are not destructive (status=new, fully triagable later via the Reached out/Irrelevant/Snooze/Pitch buttons), so the per-lead approval step that existed previously was friction without payoff. " +
+        "The user expects: research → save → render in next `leadhunter_get_more_leads` digest. " +
         "Lead objects need a public url plus person_name or company. Optional fields: role, source_name, source_url, contact_surface, evidence[], why_match, confidence 0-100, risk_level low|medium|high, notes. " +
-        "Use public professional evidence only. Do not store guessed personal emails, private LinkedIn/cookie data, or hidden contact details.",
+        "Use public professional evidence only. Do not store guessed personal emails, private LinkedIn/cookie data, or hidden contact details. Capping at 25 per call still applies.",
       parameters: schema(
         {
           session_id: { type: "string" },
