@@ -20,6 +20,7 @@ Commands:
   status    Show service and gateway status
   shell     Open a shell; use "shell gateway" or "shell service"
   onboard   Run Dockerized OpenClaw onboarding without host daemon install
+  set-keyboard  Apply the persistent Telegram 2x2 reply keyboard
   cron-install  Register the Phase 4 OpenClaw cron jobs
   cron-list     List OpenClaw cron jobs
   doctor    Run OpenClaw doctor inside the gateway image
@@ -73,6 +74,79 @@ gateway_node() {
 
 gateway_node_live() {
   run_cmd "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js "$@"
+}
+
+set_keyboard() {
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker exec -i openclaw-gateway sh -c %q < set-keyboard-node-script\n' 'node -'
+    return 0
+  fi
+  docker exec -i openclaw-gateway sh -c 'node -' <<'NODE'
+const https = require("node:https");
+
+const token = process.env.TELEGRAM_BOT_TOKEN || "";
+const chatId = process.env.TELEGRAM_ALLOWED_CHAT_ID || "";
+if (!token) {
+  console.error("missing TELEGRAM_BOT_TOKEN in openclaw-gateway env");
+  process.exit(2);
+}
+if (!chatId) {
+  console.error("missing TELEGRAM_ALLOWED_CHAT_ID in openclaw-gateway env");
+  process.exit(2);
+}
+
+const payload = JSON.stringify({
+  chat_id: chatId,
+  text: "Menu updated.",
+  reply_markup: {
+    keyboard: [
+      ["Get more jobs", "My job profile"],
+      ["Get more leads", "My ICP profile"],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  },
+});
+
+const request = https.request(
+  {
+    hostname: "api.telegram.org",
+    path: `/bot${token}/sendMessage`,
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(payload),
+    },
+  },
+  (response) => {
+    let body = "";
+    response.setEncoding("utf8");
+    response.on("data", (chunk) => {
+      body += chunk;
+    });
+    response.on("end", () => {
+      let parsed = {};
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        console.error(`telegram set-keyboard returned non-JSON HTTP ${response.statusCode}: ${body.slice(0, 300)}`);
+        process.exit(1);
+      }
+      if (!parsed.ok) {
+        console.error(`telegram set-keyboard failed: ${parsed.description || body.slice(0, 300)}`);
+        process.exit(1);
+      }
+      console.log(`keyboard set: message_id=${parsed.result && parsed.result.message_id}`);
+    });
+  },
+);
+
+request.on("error", (error) => {
+  console.error(`telegram set-keyboard request failed: ${error.message}`);
+  process.exit(1);
+});
+request.end(payload);
+NODE
 }
 
 config_patch() {
@@ -436,6 +510,7 @@ case "${1:-help}" in
     gateway_node_live config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
     patch_jobhunter_openclaw_config
     remove_codex_mcp_jobhunter
+    set_keyboard
     if install_cron_jobs; then
       printf "\nOnboarding finished. Jobhunter OpenClaw plugin, skills, Telegram, Codex runtime, and cron jobs are configured.\n"
     else
@@ -448,6 +523,9 @@ case "${1:-help}" in
     ;;
   cron-list)
     cron_exec list
+    ;;
+  set-keyboard)
+    set_keyboard
     ;;
   doctor)
     shift
