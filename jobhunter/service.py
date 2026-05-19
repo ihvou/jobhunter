@@ -309,9 +309,25 @@ class JobHunterService:
 
     def draft_lead_pitch(self, lead_id: str, ask: str = "") -> Dict:
         lead = self.ensure_lead(lead_id)
-        draft = build_lead_pitch(lead, read_text_if_exists(self.bot.config.icp_path), ask)
+        icp_text = read_text_if_exists(self.bot.config.icp_path)
+        draft = ""
+        llm_error = ""
+        try:
+            self.bot.refresh_profile()
+            draft = self.bot.llm.lead_pitch(self.bot.profile, icp_text, lead, ask=ask) or ""
+        except Exception as exc:  # LLMError, BudgetExceeded, anything else
+            llm_error = "%s: %s" % (type(exc).__name__, str(exc))
+            draft = ""
+        if not draft:
+            draft = build_lead_pitch(lead, icp_text, ask)
         self.bot.database.save_lead_draft(lead_id, "dm_pitch", draft)
-        return {"ok": True, "lead_id": lead_id, "draft": draft}
+        return {
+            "ok": True,
+            "lead_id": lead_id,
+            "draft": draft,
+            "card_text": format_lead_card(lead_digest_row(lead)),
+            "llm_error": llm_error,
+        }
 
     def mark_job(self, job_id: str, status: str, feedback: str, details: str = "") -> Dict:
         self.ensure_job(job_id)
@@ -572,7 +588,7 @@ def lead_digest_row(row) -> Dict:
         evidence = json.loads(data.get("evidence_json") or "[]")
     except json.JSONDecodeError:
         evidence = []
-    return {
+    out = {
         "id": data.get("id"),
         "id_prefix": str(data.get("id") or "")[:12],
         "person_name": data.get("person_name") or "",
@@ -589,6 +605,44 @@ def lead_digest_row(row) -> Dict:
         "status": data.get("status") or "new",
         "last_seen_at": data.get("last_seen_at") or "",
     }
+    out["card_text"] = format_lead_card(out)
+    return out
+
+
+def format_lead_card(lead: Dict) -> str:
+    """Canonical Telegram-friendly lead card text. Stable across send/edit so
+    `message(action='edit')` can append the pitch draft without re-formatting."""
+    name = lead.get("person_name") or "Unknown"
+    role = lead.get("role") or ""
+    company = lead.get("company") or ""
+    confidence = lead.get("confidence") or 0
+    risk = lead.get("risk_level") or "low"
+    why = lead.get("why_match") or ""
+    evidence = lead.get("evidence") or []
+    contact = lead.get("contact_surface") or ""
+    url = lead.get("url") or ""
+    source_url = lead.get("source_url") or ""
+    header_role_company = (
+        "%s, %s" % (role, company) if role and company else (role or company)
+    )
+    header = "**%s**" % name if not header_role_company else "**%s** — %s" % (name, header_role_company)
+    lines = [header, "Confidence: %s | Risk: %s" % (confidence, risk)]
+    if why:
+        lines += ["", "Why match: %s" % why]
+    if evidence:
+        lines += [""]
+        lines.append("Evidence:")
+        for item in evidence[:5]:
+            text = item if isinstance(item, str) else (item.get("text") or item.get("note") or "")
+            if text:
+                lines.append("- %s" % text)
+    if contact:
+        lines += ["", "Contact surface: %s" % contact]
+    if url:
+        lines.append("Profile/URL: %s" % url)
+    if source_url and source_url != url:
+        lines.append("Source: %s" % source_url)
+    return "\n".join(lines).strip()
 
 
 def normalize_lead_candidate(candidate) -> Lead:
