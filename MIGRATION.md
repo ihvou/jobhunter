@@ -966,6 +966,138 @@ Acceptance: after an edit to `plugins/jobhunter-tools/index.js`, running `./bin/
 
 Branch policy: single branch `codex/phase-5e-acceptance-followups` off `main` at `phase-5-passed-2026-05-19`. Atomic commits per sub-item. Trajectory-based acceptance.
 
+## Phase 6 — Email pipeline rebuild
+
+### Why
+
+The existing email-alert parsing (`jobhunter/sources.py` — `parse_email_alert_jobs`, `email_job`, `normalize_email_job_fields`, LinkedIn cleanup helpers) does string regex against email body content. It's fragile, format-sensitive, and produces garbage rows in production. Real samples from the DB on 2026-05-20:
+
+```
+title='Senior Product Manager - Core Experiences (Remote) role at Huckleberry Labs is available'
+company='Huckleberry Labs is available LinkedIn'
+
+title='Learn More' company='AIOS' l1=3
+title='Ready to interview' company='Unknown company' l1=15
+title='New jobs: Head of Product Growth (Referrals & Viral Loops) at AIOS — ...' company='New jobs'
+```
+
+Phase 5c claimed to fix the LinkedIn `role at X is available` pattern but the regex doesn't actually run on the production email path. Beyond LinkedIn-specific bugs, the deeper problem is **the email body itself is template noise** — the real job qualification data (description, salary, requirements, remote policy) lives on the job page that the email links to, not in the email.
+
+Rebuild as two stages with a clean architectural split, mirroring the existing OpenClaw/Codex pattern (service = data, gateway = cognition):
+
+1. Service persists raw emails. No more service-side text parsing.
+2. Codex (free under subscription) extracts thin job records `{title, company, url, location_hint, snippet}` from raw HTML via tight JSON-schema prompt.
+3. Service auto-enriches each saved job by fetching the actual job page (stdlib `urllib.request` — most job boards are SSR, no headless browser needed) and parsing structured data via per-domain extractors.
+4. Existing L1/L2 scoring + cover-note flow run on the enriched data, unchanged.
+
+No cron for now — the manual `Get more jobs` interactive flow drives the pipeline via the existing staleness self-heal. Cron can be added later as a follow-up.
+
+### 6a. Email-A — raw email persistence + audit tools
+
+**DB migration (schema_version 12 → 13).** Add `migrate_v13` in `jobhunter/database.py`:
+
+- New table `email_alert_raw`:
+  - `id` INTEGER PRIMARY KEY AUTOINCREMENT
+  - `source_id` TEXT NOT NULL (FK to `sources.id` semantically, no constraint)
+  - `message_id` TEXT (RFC 5322 Message-ID; UNIQUE within source_id)
+  - `sender` TEXT
+  - `subject` TEXT
+  - `received_at` TEXT NOT NULL (ISO-8601 UTC)
+  - `raw_html_blob` BLOB (stdlib `gzip.compress(html.encode('utf-8'))`)
+  - `raw_text_blob` BLOB (gzipped text-body fallback)
+  - `parsed_at` TEXT (nullable; populated when Email-B finishes processing)
+  - `parsed_jobs_count` INTEGER DEFAULT 0
+  - `parser_version` TEXT (value of env `JOBHUNTER_GIT_SHA` if set, else empty string)
+  - Index on `(source_id, parsed_at)` for the unparsed-queue query
+- Add `email_alert_id` INTEGER (nullable) column to `jobs` table; backfill NULL is fine.
+
+**Code:** modify `collect_imap_alerts` in `jobhunter/sources.py` so each fetched email is gzip-compressed and inserted into `email_alert_raw` BEFORE any parsing runs. The existing text parser still runs for now (Email-B retires it). On insert collision (same `(source_id, message_id)`), update `received_at` and skip — don't duplicate.
+
+**Plugin tools (new, both read-only):**
+
+- `jobhunter_list_email_alerts(limit?: int, since?: ISO-8601, only_unparsed?: bool)`: paginate `email_alert_raw` rows ordered by `received_at desc`. Return slim records `{id, source_id, sender, subject, received_at, parsed_at, parsed_jobs_count}` — do NOT return the BLOB contents (too large for a digest). Max limit 50.
+- `jobhunter_email_alert_compare(email_alert_id: int)`: return the full raw email (HTML decompressed and decoded as UTF-8, text similarly) AND any rows from `jobs` joined via `jobs.email_alert_id = email_alert_raw.id`. Used by the agent or you to validate parser output against source.
+
+Retention: no automatic cleanup yet. Document a manual SQL query (`delete from email_alert_raw where received_at < datetime('now','-90 days');`) in CLAUDE.md / AGENTS.md operations notes. 30 emails/day × ~30 KB compressed = ~1 MB/day = ~90 MB/quarter. Fine.
+
+**Acceptance (commit message must include `Verified:` lines citing literal artifacts):**
+
+- `Verified: schema_version=13; PRAGMA table_info(email_alert_raw) shows columns [id, source_id, message_id, sender, subject, received_at, raw_html_blob, raw_text_blob, parsed_at, parsed_jobs_count, parser_version]; PRAGMA table_info(jobs) shows new email_alert_id column.`
+- `Verified: after `./bin/openclaw status` and one collect cycle, count(*) from email_alert_raw > 0; sample row has raw_html_blob len > 0 (compressed) and decompresses to valid HTML.`
+- `Verified: jobhunter_list_email_alerts(limit=5) returns 5 rows; jobhunter_email_alert_compare(<id>) returns raw HTML + jobs JOIN.`
+
+### 6b. Email-B+C merged — Codex extraction + server-side enrichment
+
+**Service endpoints (new, in `jobhunter/service.py`):**
+
+- `GET /email/unparsed?limit=20`: returns `email_alert_raw` rows where `parsed_at IS NULL`, ordered `received_at asc` (oldest first so backlog drains FIFO). Decompress `raw_html_blob` to UTF-8 string in the response. Cap at 20 per call, hard.
+- `POST /email/save_extracted_jobs`: body `{email_alert_id: int, jobs: [{title, company, url, location_hint?, snippet?}]}`. For each job in `jobs[]`:
+  1. Validate (`title` and `company` and `url` required; URL must validate via existing `validate_safe_url`).
+  2. Insert into `jobs` table with `email_alert_id` populated.
+  3. **Auto-enrich** by calling new `enrich_job_from_url(job_row)` helper (see below).
+  4. Run L1 scoring on the enriched job (reuse existing scoring flow).
+  Mark `email_alert_raw.parsed_at = utc_now_iso()` and `parsed_jobs_count = len(jobs)`. Return summary `{saved: N, enriched: M, enrich_failed: K}`.
+- `POST /email/enrich_job_description`: body `{job_id}`. Re-runs the enrichment for an existing job (idempotent). Used by the agent or you to retry a failed enrichment.
+
+**Server-side enrichment (new helper `enrich_job_from_url` in `jobhunter/sources.py`):**
+
+1. `urllib.request.urlopen(url, timeout=10)` with `User-Agent: Mozilla/5.0 (compatible; Jobhunter/1.0)` and follow up to 3 redirects. Reuse the existing `fetch_text` helper if it already supports these.
+2. Per-domain extractor dispatch by hostname:
+   - `boards.greenhouse.io/<co>/jobs/<id>` or `*.greenhouse.io/embed/job_app?for=<co>` → reuse existing Greenhouse JSON parser logic (Greenhouse boards expose `<co>.greenhouse.io/embed/job_board?for=<co>&format=json` or the `jobs/<id>.json` endpoint).
+   - `jobs.lever.co/<co>/<id>` → existing Lever parser.
+   - `*.ashbyhq.com/<co>/<id>` or `jobs.ashbyhq.com/<co>/<id>` → existing Ashby parser.
+   - `*.workable.com/...` → existing Workable parser.
+   - `linkedin.com/jobs/view/<id>` (and `/comm/jobs/view/<id>`) → new bespoke parser: regex-match the description block in the SSR HTML (look for `<div class="description__text">` or similar — verify in a real LinkedIn job page during implementation).
+   - Anything else → generic extractor: parse `<script type="application/ld+json">` blocks, look for `{"@type": "JobPosting", ...}`, pull `description`/`hiringOrganization`/`jobLocation`/`baseSalary`. Fall back to OpenGraph (`<meta property="og:title">`, `<meta property="og:description">`).
+3. Update the `jobs` row with whatever fields the extractor returned (description, salary if present, location detail, remote_policy).
+4. On any exception or all-extractors-empty: log warning, mark job `description = (existing snippet or "")`, do NOT raise — return success so the calling endpoint doesn't abort the batch. Optionally add a new column `enrich_status` to jobs (values: `enriched`, `failed`, `skipped`) for QA, but minimal impl can skip this.
+5. Firecrawl fallback: documented but DISABLED by default for v1. If `urllib` returns 403/timeout on a domain we care about, the agent can call `jobhunter_email_alert_compare` to inspect the raw email and decide whether to enable firecrawl.
+
+**Plugin tool (new):**
+
+- `jobhunter_process_unparsed_emails(limit?: int default 20)`: client-side Codex loop. Tool description tells Codex:
+
+> 1. Call `GET /email/unparsed?limit=<limit>`. If response is empty `[]`, return `{processed: 0}`.
+> 2. For EACH email in the batch, extract every distinct job posting as a JSON object with keys `title`, `company`, `url`, optional `location_hint`, optional `snippet`. Output schema is strict — no other keys, no extra text, no markdown.
+> 3. Filter rules (skip these — they're UI noise, not jobs):
+>    - "Learn More", "Update preferences", "Unsubscribe", "Ready to interview", "Open to offers", "Closed to offers", "Message from <X>", "New jobs:", "Edit job alert"
+>    - Any link whose href isn't an actual job posting URL (skip mailto:, tracking pixels, profile links, search-result pages)
+>    - Any row missing both `title` AND `company`
+> 4. Deduplicate within an email: if the same `url` appears in the body multiple times (subject line + table row + footer mention), include it ONCE.
+> 5. Strip template artifacts from extracted fields:
+>    - Title: strip trailing ` role at <X> is available`, ` role`, ` | LinkedIn`, ` - LinkedIn`
+>    - Company: strip trailing ` is available LinkedIn`, ` LinkedIn`, ` is available`
+> 6. POST `/email/save_extracted_jobs` with `{email_alert_id, jobs}`. The server enriches each job from its URL (urllib fetch + per-domain parser + L1 scoring) before persisting.
+> 7. Repeat until the unparsed queue is empty or `limit` emails processed. Return final counts.
+
+**Plugin contract extensions:**
+
+- `jobhunter_collect_all_sources` description: extend to mention that the response now includes `unparsed_email_count` (count of `email_alert_raw` rows where `parsed_at IS NULL`). If `unparsed_email_count > 0`, Codex MUST call `jobhunter_process_unparsed_emails` before rendering the next digest.
+- `jobhunter_get_more_jobs` description: extend the existing STALENESS RULE so the self-heal chain becomes: stale → `collect_all_sources` → if `unparsed_email_count > 0`, `process_unparsed_emails` → `get_more_jobs` AGAIN. Same trigger as today, one extra hop.
+
+**Retire the old parser:**
+
+- Delete or stub-out: `parse_email_alert_jobs`, `jobs_from_email`, `jobs_from_link_config`, `email_job`, `normalize_email_job_fields`, `is_linkedin_email_job`, `is_linkedin_company_artifact`, `clean_linkedin_company`, `filter_email_alert_jobs`. Anything in `jobhunter/sources.py` that does string-level parsing of email body content to extract job fields.
+- `collect_imap_alerts` retains ONLY the IMAP fetch + persist-raw logic. No parsing.
+- Remove or adapt tests targeting the retired helpers: `tests/test_sources.py` LinkedIn-email-artifact test, any email-body parsing fixtures.
+- Tables `email_templates` and `email_parser_configs` become unused. **Do NOT drop them yet** — preserve data; add a TODO note to drop in a later phase if confirmed unused.
+
+**Acceptance (commit message `Verified:` lines):**
+
+- `Verified: GET /email/unparsed?limit=20 returned 20 pending rows (or fewer if fewer pending); raw_html field decompressed cleanly.`
+- `Verified: POST /email/save_extracted_jobs with one email yielded {saved: N, enriched: M, enrich_failed: K}; sample saved job has email_alert_id populated and description > 500 chars (Greenhouse URL) or > 100 chars (LinkedIn URL).`
+- `Verified: full round-trip jobhunter_collect_all_sources → jobhunter_process_unparsed_emails → jobhunter_get_more_jobs returns a digest containing newly-extracted email jobs with l2_score populated.`
+- `Verified: PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest discover -s tests passes; cd plugins/jobhunter-tools && node --test tests/index.test.js passes; docker compose --profile openclaw config --quiet validates.`
+- `Verified: grep -rn parse_email_alert_jobs jobhunter/ returns no matches (retired).`
+
+### 6c. Branch + policy
+
+Branch: `codex/phase-6-email-pipeline-rebuild` off `main` at the latest tagged commit. Two commits, one per sub-phase (6a, 6b). Each commit has its `Verified:` lines.
+
+No autonomous merge to main. The user merges after trajectory-based acceptance and tags as `phase-6-passed-<date>`.
+
+No cron added in this phase. The interactive `Get more jobs` flow drives the pipeline. A nightly email-processing cron may be added in a later phase if interactive triggering proves insufficient.
+
 ## Security configuration (mandatory)
 
 OpenClaw's default is FULL host access for main session. We override to match-or-exceed our current safety.
