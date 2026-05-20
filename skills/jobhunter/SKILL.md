@@ -141,7 +141,7 @@ reject:<action_id>:<messageId>   -> delete <messageId>; the proposed action stay
 
 The job/lead/approval callback prefixes are deliberately distinct (`applied:` vs `lead_reached:` vs `approve:`, etc.) so the dispatcher can route by prefix even if id-spaces collide.
 
-**After triage or approval actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads; approve/reject on proposed actions): delete the original card.**
+**After triage or approval actions (applied/irrelevant/snooze on jobs; lead_reached/lead_irrelevant/lead_snooze on leads; approve/reject on proposed actions): delete the original card, then STOP.**
 
 ```text
 message({
@@ -153,16 +153,20 @@ message({
 
 The encoded `:<messageId>` is mandatory because OpenClaw 2026.5.7's synthetic callback prompt uses the callback_query id, not the button message id.
 
+**No confirmation messages after the delete.** The turn ends with the delete call. Do NOT emit a follow-up `message` like `"Marked the job as applied"`, `"Removed the card"`, `"Snoozed for 1 day"`, `"✓ Applied"`, `"Done."`, or any paraphrase that narrates what just happened. The disappearing card is the only acknowledgement needed. Confirmation messages have been explicitly flagged as redundant clutter — they're the most common compliance mistake on this surface.
+
 Snoozed items automatically reappear in the next `/jobs` or `/leads` digest after the snooze window expires (1 day for jobs, 7 days for leads). DB rows persist for audit.
 
-**After draft actions (cover on jobs, lead_pitch on leads): send the draft as a NEW reply.**
+**After draft actions (cover on jobs, lead_pitch on leads): append the draft to the SAME card via `edit`, then STOP.**
 
 ```text
 message({
-  action: "send",
+  action: "edit",
   target: "telegram:<chat_id>",
-  message: "**Cover note draft:**\n<draft text>"      // or "**Pitch draft:**\n…"
+  messageId: "<messageId_from_callback_data>",
+  message: <card_text> + "\n\n— Cover note —\n" + <draft>,   // "— Pitch draft —" for lead_pitch
+  presentation: { blocks: [ /* same TWO buttons blocks, callback_data unchanged */ ] }
 })
 ```
 
-Keep the original card for draft actions unless the user also tapped a triage action.
+`card_text` and `draft` come from the `jobhunter_cover_note` / `leadhunter_draft_pitch` response. Keep the same buttons so the user can still triage after seeing the draft. Do NOT send a separate `**Cover note draft:** ...` message. Do not emit any further `message` calls after the edit — the turn ends.
