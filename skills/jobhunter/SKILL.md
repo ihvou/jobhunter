@@ -153,7 +153,9 @@ message({
 
 The encoded `:<messageId>` is mandatory because OpenClaw 2026.5.7's synthetic callback prompt uses the callback_query id, not the button message id.
 
-**ABSOLUTE RULE: after the delete, count of further `message` tool calls for this turn is ZERO.** Not one. Not a single word. Not an emoji. The disappearing card is the only acknowledgement. This rule is bypass-resistant — listing forbidden phrases doesn't work because the model keeps inventing shorter ones. Each iteration found a new word: `"Marked the job as applied"` → `"Removed the card"` → `"Snoozed 1d"` → `"✓ Applied"` → `"Done."` → `"Handled"`. The pattern is: ANY post-delete message is forbidden regardless of length. If you find yourself reaching for one, the answer is STOP, not "say it shorter".
+**FINAL STEP after the delete: emit `NO_REPLY` as your assistant text.** Literal, all caps, no quotes, no other characters. Do NOT call `message` again.
+
+`NO_REPLY` is OpenClaw 2026.5.7's silent-reply token (defined in `/app/dist/tokens-*.js` as `SILENT_REPLY_TOKEN`). The gateway treats it as a user-visible answer for completion-gate purposes but renders nothing to Telegram. Without it, OpenClaw detects an empty turn after the delete (because `message.delete` is not a user-visible payload), re-prompts with "The previous attempt did not produce a user-visible answer. Continue from the current state and produce the visible answer now.", and the model fabricates a confirmation like `"Already marked this job as applied and deleted the card."` — which is exactly the redundant clutter we're trying to suppress. `NO_REPLY` is the only clean way to end the turn.
 
 Snoozed items automatically reappear in the next `/jobs` or `/leads` digest after the snooze window expires (1 day for jobs, 7 days for leads). DB rows persist for audit.
 

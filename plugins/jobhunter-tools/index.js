@@ -180,14 +180,16 @@ export default definePluginEntry({
         "`irrelevant:<12hex>:<messageId>`, `snooze:<12hex>:<messageId>`, or `cover:<12hex>:<messageId>`): " +
         "(a) For applied/irrelevant/snooze (triage actions): call `jobhunter_mark_job` with the matching " +
         "status, then emit `message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. " +
-        "ABSOLUTE RULE: after that delete, the count of further `message` tool calls for this turn is ZERO. " +
-        "Not one acknowledgment. Not a single word. Not an emoji. The disappearing card IS the acknowledgment. " +
-        "This rule is bypass-resistant: forbidding specific phrases doesn't work because the model keeps inventing " +
-        "shorter ones (we have already had to forbid \"Marked the job as applied\", \"Removed the card\", " +
-        "\"Card deleted\", \"Snoozed 1d\", \"✓ Applied\", \"Done.\", and then \"Handled\" — every iteration the " +
-        "model found a new short word). The pattern is: ANY follow-up message after a delete is forbidden, " +
-        "regardless of length, regardless of tone, regardless of how minimal it seems. If you find yourself " +
-        "reaching for any post-delete message, that's the signal to STOP — not to make it shorter. " +
+        "FINAL STEP — emit `NO_REPLY` as your assistant text (literal, all caps, no quotes, no other characters, " +
+        "no markdown). Do NOT call `message` again. The `NO_REPLY` token is OpenClaw 2026.5.7's silent-reply " +
+        "marker — it satisfies the gateway's user-visible-answer requirement but renders NOTHING to Telegram. " +
+        "If you skip it, OpenClaw detects an empty turn (delete is not a user-visible payload) and forcibly " +
+        "re-prompts you with \"The previous attempt did not produce a user-visible answer. Continue from the " +
+        "current state and produce the visible answer now.\" — at which point you will fabricate a confirmation " +
+        "like \"Already marked this job applied and deleted the card.\" which is exactly the redundant clutter " +
+        "the user has explicitly complained about. The `NO_REPLY` token is the only way to end the turn cleanly. " +
+        "Mechanism: /app/dist/tokens-*.js exports SILENT_REPLY_TOKEN = \"NO_REPLY\" and isSilentReplyText() " +
+        "case-insensitively matches it as a silent reply. " +
         "Snoozed jobs automatically reappear in the next `/jobs` digest after their snooze window expires " +
         "(default 1 day). The DB row persists for audit. " +
         "NOTE on deleting the original digest message: OpenClaw 2026.5.7's callback synthetic-prompt metadata " +
@@ -363,15 +365,11 @@ export default definePluginEntry({
         "CALLBACK HANDLING (when a synthetic user message arrives matching `approve:<id>:<messageId>` or " +
         "`reject:<id>:<messageId>`): " +
         "For approve: call `jobhunter_apply_action(action_id=<id>)`, then emit `message(action=\"delete\", " +
-        "target=<chat_id>, messageId=<messageId>)`. " +
-        "ABSOLUTE RULE: after the delete, the count of further `message` tool calls for this turn is ZERO. " +
-        "Not one acknowledgment. Not \"Handled\", \"OK\", \"Done\", \"Approved\", \"Applied\", or any emoji. " +
-        "Same bypass-resistant rule as job/lead triage. The disappearing card IS the acknowledgment. The applied " +
-        "action is auditable via jobhunter_history. " +
+        "target=<chat_id>, messageId=<messageId>)`. FINAL STEP — emit `NO_REPLY` as your assistant text " +
+        "(literal, all caps, no quotes, no other characters). Same OpenClaw silent-reply mechanism as job/lead " +
+        "triage. Do NOT call `message` again. The applied action is auditable via jobhunter_history. " +
         "For reject: emit `message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. Do not call any " +
-        "backend tool. " +
-        "Same ABSOLUTE rule: ZERO further `message` calls for this turn. Not \"Rejected\", \"Dismissed\", or any " +
-        "acknowledgment. " +
+        "backend tool. FINAL STEP — emit `NO_REPLY` as your assistant text. " +
         "The proposed action stays in the DB with status='proposed' for audit (visible via jobhunter_history); " +
         "silently rejecting is the cleanest UX.",
       parameters: schema(
@@ -573,13 +571,11 @@ export default definePluginEntry({
         "(a) For reached/irrelevant/snooze (triage actions): call `leadhunter_mark_lead` with the matching " +
         "status (reached_out / irrelevant / snoozed; default snooze_days=7), then emit " +
         "`message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. " +
-        "ABSOLUTE RULE: after that delete, the count of further `message` tool calls for this turn is ZERO. " +
-        "Not one acknowledgment. Not a single word. Not an emoji. The disappearing card IS the acknowledgment. " +
-        "Same bypass-resistant rule as job triage above — short words like \"Handled\", \"OK\", \"Done\", " +
-        "\"Updated\", \"Noted\", a thumbs-up emoji, are all forbidden along with the longer narrations " +
-        "(\"Marked the lead as reached out\", \"Removed the card\", \"Snoozed 7d\", etc.). The pattern: ANY " +
-        "follow-up message after a delete is forbidden, regardless of length. If you find yourself reaching " +
-        "for any post-delete message, STOP — do not make it shorter, just don't send it. " +
+        "FINAL STEP — emit `NO_REPLY` as your assistant text (literal, all caps, no quotes, no other characters). " +
+        "Same OpenClaw silent-reply mechanism as job triage: NO_REPLY satisfies the gateway's empty-turn detector " +
+        "without rendering anything to Telegram. Without it, OpenClaw re-prompts you and you fabricate " +
+        "confirmations like \"Already marked this lead as reached out and deleted the card.\" — exactly the " +
+        "redundant clutter the user has complained about. Do NOT call `message` again after the delete. " +
         "Snoozed leads automatically reappear in the next `/leads` digest after their snooze window expires " +
         "(default 7 days; outreach cycles are longer than job triage). The DB row persists for audit. " +
         "The encoded `:<messageId>` is mandatory because the synthetic callback prompt does not carry the button message id. " +
