@@ -110,7 +110,12 @@ class JobHunterService:
         self.bot.database.add_feedback(job_id, "cover_note")
         self.bot.database.save_draft(job_id, "cover_note", draft)
         self.bot.database.update_job_status(job_id, "draft_ready")
-        return {"ok": True, "job_id": job_id, "draft": draft}
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "draft": draft,
+            "card_text": format_job_card(job_digest_row(job)),
+        }
 
     def propose_actions(self, actions: List[Dict], user_intent: str = "", session_id: str = "") -> Dict:
         session_id = session_id or "openclaw-%s" % int(time.time() * 1000)
@@ -570,7 +575,7 @@ def job_digest_row(row) -> Dict:
                 data[key.replace("_json", "")] = json.loads(data[key] or "[]")
             except json.JSONDecodeError:
                 data[key.replace("_json", "")] = []
-    return {
+    out = {
         "id": data.get("id"),
         "title": data.get("title"),
         "company": data.get("company"),
@@ -587,6 +592,36 @@ def job_digest_row(row) -> Dict:
         "concerns": data.get("concerns", []),
         "fired_rules": data.get("fired_rules", []),
     }
+    out["card_text"] = format_job_card(out)
+    return out
+
+
+def format_job_card(job: Dict) -> str:
+    """Canonical Telegram-friendly job card text. Stable across send/edit so the
+    cover callback can append cleanly to the original message body."""
+    title = job.get("title") or "Untitled role"
+    company = job.get("company") or "Unknown company"
+    total = job.get("total_score")
+    location = job.get("location") or ""
+    l2_reason = job.get("l2_reason") or ""
+    reasons = job.get("reasons") or []
+    url = job.get("url") or ""
+    header = "**%s** — %s" % (title, company)
+    if total is not None:
+        header += " — score %s" % total
+    lines = [header]
+    if location:
+        lines.append(location)
+    if l2_reason:
+        lines += ["", l2_reason]
+    elif reasons:
+        first = reasons[0]
+        text = first if isinstance(first, str) else (first.get("text") or first.get("note") or "")
+        if text:
+            lines += ["", text]
+    if url:
+        lines += ["", url]
+    return "\n".join(lines).strip()
 
 
 def lead_digest_row(row) -> Dict:

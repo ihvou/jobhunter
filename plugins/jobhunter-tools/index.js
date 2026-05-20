@@ -156,15 +156,17 @@ export default definePluginEntry({
         "button objects, not a 2D row-grouped array. Each top-level buttons block renders as ONE Telegram row. " +
         "To get a 2x2 layout, emit TWO buttons blocks of 2 buttons each. OpenClaw 2026.5.7 silently drops a buttons " +
         "block whose `buttons` array contains nested arrays — confirmed via /app/dist/payload-Ojv8hlch.js normalizeButton. " +
+        "MESSAGE BODY: use `job.card_text` from the response verbatim as the `message` field — do NOT reformat or paraphrase. " +
+        "This is the canonical job card text and must be stable across send/edit so the cover callback can append cleanly. " +
         "CALL 1: emit `message({action: \"send\", target: <chat_id from conversation metadata, e.g. \"telegram:855127987\">, " +
-        "message: <job text>, presentation: {blocks: [" +
+        "message: <job.card_text>, presentation: {blocks: [" +
         "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
         "{text: \"Cover\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}" +
         "]}})`. " +
         "Capture the returned `messageId`. CALL 2: immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
-        "message: <same job text>, presentation: {blocks: [" +
+        "message: <same job.card_text>, presentation: {blocks: [" +
         "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
@@ -183,9 +185,18 @@ export default definePluginEntry({
         "(default 1 day). The DB row persists for audit. " +
         "NOTE on deleting the original digest message: OpenClaw 2026.5.7's callback synthetic-prompt metadata " +
         "uses callback_query id, not the button message id; the encoded `:<messageId>` is mandatory. " +
-        "(b) For cover (draft action — user wants the cover text attached): call `jobhunter_cover_note`, then " +
-        "emit `message({action: \"send\", target: <chat_id>, message: \"**Cover note draft:**\\n<draft text>\"})`. " +
-        "Keep the original digest card unless the user also tapped a triage action.",
+        "(b) For cover (draft action — APPEND cover note to the SAME job card, do NOT send a new message): " +
+        "1) call `jobhunter_cover_note` with the job_id (or use the id_prefix-resolved full id). Response contains " +
+        "both `draft` (LLM-generated short neutral cover note) and `card_text` (canonical job card body, same as " +
+        "the original send). " +
+        "2) emit `message({action: \"edit\", target: <chat_id>, messageId: <messageId from callback_data>, " +
+        "message: <card_text> + \"\\n\\n— Cover note —\\n\" + <draft>, presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "]}})`. Buttons stay the same so the user can still tap Applied / Irrelevant / Snooze after seeing the cover note. " +
+        "Do NOT send a separate \"**Cover note draft:** ...\" message. Never apply on behalf of the user — drafts are copy-paste only.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
