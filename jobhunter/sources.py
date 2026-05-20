@@ -21,7 +21,7 @@ from urllib.parse import urljoin, urlparse
 
 from .firecrawl import FirecrawlError, firecrawl_available, firecrawl_scrape_markdown
 from .logging_setup import log_context
-from .models import Job, SourceConfig
+from .models import Job, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
 MAX_BYTES = int(os.getenv("JOBHUNTER_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024)))
@@ -638,7 +638,16 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
                 continue
             message = email.message_from_bytes(data[0][1])
             persist_email_sample(source, message, str(message_id.decode("utf-8", errors="ignore")))
-            jobs.extend(jobs_from_email(source, message))
+            raw_id, raw_inserted = persist_raw_email(source, message, str(message_id.decode("utf-8", errors="ignore")))
+            if raw_id:
+                log_context(LOGGER, logging.DEBUG, "email_alert_raw_saved", source_id=source.id, email_alert_id=raw_id, inserted=raw_inserted)
+            if raw_id and not raw_inserted:
+                continue
+            email_jobs = jobs_from_email(source, message)
+            if raw_id:
+                for job in email_jobs:
+                    setattr(job, "email_alert_id", raw_id)
+            jobs.extend(email_jobs)
         source.last_seen_uid = max_uid
         return jobs
     finally:
@@ -650,8 +659,8 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
 
 
 def jobs_from_email(source: SourceConfig, message) -> List[Job]:
-    subject = str(email.header.make_header(email.header.decode_header(message.get("Subject", ""))))
-    sender = str(email.header.make_header(email.header.decode_header(message.get("From", ""))))
+    subject = decoded_header(message.get("Subject", ""))
+    sender = decoded_header(message.get("From", ""))
     body = email_body(message)
     for template in getattr(source, "email_templates", []) or []:
         if email_template_matches(template, sender, subject):
@@ -659,6 +668,31 @@ def jobs_from_email(source: SourceConfig, message) -> List[Job]:
             if jobs:
                 return filter_email_alert_jobs(source, jobs)
     return filter_email_alert_jobs(source, generic_jobs_from_email(source, message, subject, sender, body))
+
+
+def persist_raw_email(source: SourceConfig, message, sample_id: str = "") -> tuple:
+    writer = getattr(source, "raw_email_writer", None)
+    if not writer:
+        return None, False
+    html, text = email_body_parts(message)
+    message_id = message.get("Message-ID") or sample_id or ""
+    received_at = parse_date(message.get("Date")) or utc_now_iso_text()
+    return writer(
+        source.id,
+        message_id,
+        decoded_header(message.get("From", "")),
+        decoded_header(message.get("Subject", "")),
+        received_at,
+        html,
+        text,
+    )
+
+
+def decoded_header(value: str) -> str:
+    try:
+        return str(email.header.make_header(email.header.decode_header(value or "")))
+    except Exception:
+        return str(value or "")
 
 
 def persist_email_sample(source: SourceConfig, message, sample_id: str = "") -> Optional[Path]:
@@ -906,9 +940,14 @@ def surrounding_text(body: str, needle: str, size: int) -> str:
     return plain[start : start + size]
 
 
-def email_body(message) -> str:
+def utc_now_iso_text() -> str:
+    return utc_now_iso()
+
+
+def email_body_parts(message) -> tuple:
+    html_parts = []
+    text_parts = []
     if message.is_multipart():
-        parts = []
         for part in message.walk():
             content_type = part.get_content_type()
             if content_type not in ("text/plain", "text/html"):
@@ -916,12 +955,28 @@ def email_body(message) -> str:
             payload = part.get_payload(decode=True)
             if payload:
                 charset = part.get_content_charset() or "utf-8"
-                parts.append(payload.decode(charset, errors="replace"))
-        return "\n".join(parts)
+                decoded = payload.decode(charset, errors="replace")
+            else:
+                decoded = str(part.get_payload() or "")
+            if content_type == "text/html":
+                html_parts.append(decoded)
+            else:
+                text_parts.append(decoded)
+        return "\n".join(html_parts), "\n".join(text_parts)
     payload = message.get_payload(decode=True)
     if payload:
-        return payload.decode(message.get_content_charset() or "utf-8", errors="replace")
-    return str(message.get_payload() or "")
+        decoded = payload.decode(message.get_content_charset() or "utf-8", errors="replace")
+    else:
+        decoded = str(message.get_payload() or "")
+    content_type = message.get_content_type()
+    if content_type == "text/html":
+        return decoded, ""
+    return "", decoded
+
+
+def email_body(message) -> str:
+    html, text = email_body_parts(message)
+    return "\n".join(part for part in (html, text) if part)
 
 
 def extract_urls(text: str) -> List[str]:

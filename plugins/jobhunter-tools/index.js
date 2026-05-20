@@ -217,7 +217,7 @@ export default definePluginEntry({
       name: "jobhunter_collect_all_sources",
       label: "Jobhunter Collect All Sources",
       description:
-        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly.",
+        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly. Response includes unparsed_email_count: the count of persisted email_alert_raw rows awaiting Codex extraction.",
       parameters: schema({}),
       execute: async () => jsonResult(await collectWithSoftTimeout()),
     });
@@ -522,6 +522,41 @@ export default definePluginEntry({
         ["sender", "subject", "body"],
       ),
       execute: async (_toolCallId, params) => jsonResult(await post("/email/process", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_list_email_alerts",
+      label: "Jobhunter List Email Alerts",
+      description:
+        "Read-only audit tool for persisted raw email alerts. Returns slim email_alert_raw records ordered by received_at desc: id, source_id, sender, subject, received_at, parsed_at, parsed_jobs_count. It never returns raw_html_blob or raw_text_blob, so it is safe for quick diagnostics. Use limit<=50 and only_unparsed=true when looking for alerts that still need Codex extraction.",
+      parameters: schema({
+        limit: intSchema(1, 50),
+        since: { type: "string" },
+        only_unparsed: { type: "boolean" },
+      }),
+      execute: async (_toolCallId, params) => {
+        const query = new URLSearchParams();
+        if (Number.isInteger(params.limit)) query.set("limit", String(params.limit));
+        if (typeof params.since === "string" && params.since.trim()) query.set("since", params.since.trim());
+        if (params.only_unparsed === true) query.set("only_unparsed", "1");
+        const suffix = query.toString() ? `?${query.toString()}` : "";
+        return jsonResult(await get(`/email/alerts${suffix}`));
+      },
+    });
+
+    register(api, {
+      name: "jobhunter_email_alert_compare",
+      label: "Jobhunter Email Alert Compare",
+      description:
+        "Read-only parser audit tool for one persisted email_alert_raw row. Returns decompressed raw_html and raw_text plus any jobs joined by jobs.email_alert_id = email_alert_raw.id. Use this to compare the original alert HTML against extracted Jobhunter rows; do not use it for regular digests because raw HTML can be large.",
+      parameters: schema(
+        {
+          email_alert_id: { type: "integer" },
+        },
+        ["email_alert_id"],
+      ),
+      execute: async (_toolCallId, params) =>
+        jsonResult(await get(`/email/alert/compare?id=${encodeURIComponent(String(params.email_alert_id))}`)),
     });
 
     register(api, {

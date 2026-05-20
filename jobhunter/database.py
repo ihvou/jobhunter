@@ -1,6 +1,8 @@
 import hashlib
+import gzip
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -12,7 +14,7 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 12
+LATEST_SCHEMA_VERSION = 13
 
 
 class Database:
@@ -72,6 +74,9 @@ class Database:
             if current < 12:
                 migrate_v12(conn)
                 set_schema_version(conn, 12)
+            if current < 13:
+                migrate_v13(conn)
+                set_schema_version(conn, 13)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -174,6 +179,7 @@ class Database:
         now = utc_now_iso()
         normalized_title = normalize_key(job.title)
         normalized_company = normalize_key(job.company)
+        email_alert_id = getattr(job, "email_alert_id", None)
         with self.connection() as conn:
             existing = conn.execute("select id from jobs where id = ?", (job_id,)).fetchone()
             if existing:
@@ -185,10 +191,11 @@ class Database:
                         description = case when length(coalesce(description, '')) < length(coalesce(?, ''))
                                            then ? else description end,
                         normalized_title = ?,
-                        normalized_company = ?
+                        normalized_company = ?,
+                        email_alert_id = coalesce(email_alert_id, ?)
                     where id = ?
                     """,
-                    (now, job.source_id, job.description, job.description, normalized_title, normalized_company, job_id),
+                    (now, job.source_id, job.description, job.description, normalized_title, normalized_company, email_alert_id, job_id),
                 )
                 return job_id, False
             duplicate = find_recent_duplicate(conn, normalized_title, normalized_company, job.posted_at, now)
@@ -198,10 +205,11 @@ class Database:
                     update jobs
                     set last_seen_at = ?,
                         description = case when length(coalesce(description, '')) < length(coalesce(?, ''))
-                                           then ? else description end
+                                           then ? else description end,
+                        email_alert_id = coalesce(email_alert_id, ?)
                     where id = ?
                     """,
-                    (now, job.description, job.description, duplicate),
+                    (now, job.description, job.description, email_alert_id, duplicate),
                 )
                 log_context(
                     LOGGER,
@@ -219,8 +227,8 @@ class Database:
                     id, source_id, source_name, external_id, url, title, company,
                     location, remote_policy, salary_min, salary_max, currency,
                     description, posted_at, first_seen_at, last_seen_at, status,
-                    normalized_title, normalized_company
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
+                    normalized_title, normalized_company, email_alert_id
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -241,6 +249,7 @@ class Database:
                     now,
                     normalized_title,
                     normalized_company,
+                    email_alert_id,
                 ),
             )
             return job_id, True
@@ -1114,6 +1123,88 @@ class Database:
                 (lead_id, draft_type, content, utc_now_iso()),
             )
 
+    def save_email_alert_raw(
+        self,
+        source_id: str,
+        message_id: str,
+        sender: str,
+        subject: str,
+        received_at: str,
+        raw_html: str,
+        raw_text: str,
+    ) -> Tuple[int, bool]:
+        message_id = message_id or ""
+        parser_version = os.getenv("JOBHUNTER_GIT_SHA", "")
+        html_blob = gzip.compress((raw_html or "").encode("utf-8")) if raw_html else None
+        text_blob = gzip.compress((raw_text or "").encode("utf-8")) if raw_text else None
+        with self.connection() as conn:
+            existing = None
+            if message_id:
+                existing = conn.execute(
+                    "select id from email_alert_raw where source_id = ? and message_id = ?",
+                    (source_id, message_id),
+                ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    update email_alert_raw
+                    set received_at = ?,
+                        sender = coalesce(nullif(?, ''), sender),
+                        subject = coalesce(nullif(?, ''), subject)
+                    where id = ?
+                    """,
+                    (received_at, sender or "", subject or "", existing["id"]),
+                )
+                return int(existing["id"]), False
+            cursor = conn.execute(
+                """
+                insert into email_alert_raw (
+                    source_id, message_id, sender, subject, received_at,
+                    raw_html_blob, raw_text_blob, parser_version
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_id, message_id, sender or "", subject or "", received_at, html_blob, text_blob, parser_version),
+            )
+            return int(cursor.lastrowid), True
+
+    def list_email_alerts(self, limit: int = 20, since: str = "", only_unparsed: bool = False) -> List[sqlite3.Row]:
+        limit = min(max(1, int(limit or 20)), 50)
+        where = []
+        params: List = []
+        if since:
+            where.append("received_at >= ?")
+            params.append(since)
+        if only_unparsed:
+            where.append("parsed_at is null")
+        sql = """
+            select id, source_id, message_id, sender, subject, received_at,
+                   parsed_at, parsed_jobs_count, parser_version
+            from email_alert_raw
+        """
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by received_at desc limit ?"
+        params.append(limit)
+        with self.connection() as conn:
+            return list(conn.execute(sql, tuple(params)))
+
+    def email_alert_compare(self, email_alert_id: int) -> Optional[Dict]:
+        with self.connection() as conn:
+            email_row = conn.execute("select * from email_alert_raw where id = ?", (email_alert_id,)).fetchone()
+            if not email_row:
+                return None
+            jobs = list(conn.execute("select * from jobs where email_alert_id = ? order by first_seen_at desc", (email_alert_id,)))
+        data = row_to_plain_dict(email_row)
+        data["raw_html"] = decompress_text(data.pop("raw_html_blob", None))
+        data["raw_text"] = decompress_text(data.pop("raw_text_blob", None))
+        data["jobs"] = [row_to_plain_dict(row) for row in jobs]
+        return data
+
+    def unparsed_email_count(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute("select count(*) as c from email_alert_raw where parsed_at is null").fetchone()
+            return int(row["c"] or 0)
+
 
 def migrate_v1(conn) -> None:
     conn.executescript(
@@ -1587,8 +1678,51 @@ def migrate_v12(conn) -> None:
     )
 
 
+def migrate_v13(conn) -> None:
+    conn.executescript(
+        """
+        create table if not exists email_alert_raw (
+            id integer primary key autoincrement,
+            source_id text not null,
+            message_id text,
+            sender text,
+            subject text,
+            received_at text not null,
+            raw_html_blob blob,
+            raw_text_blob blob,
+            parsed_at text,
+            parsed_jobs_count integer not null default 0,
+            parser_version text
+        );
+        create unique index if not exists idx_email_alert_raw_source_message
+            on email_alert_raw(source_id, message_id)
+            where message_id is not null and message_id != '';
+        create index if not exists idx_email_alert_raw_unparsed
+            on email_alert_raw(source_id, parsed_at);
+        """
+    )
+    try:
+        conn.execute("alter table jobs add column email_alert_id integer")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("create index if not exists idx_jobs_email_alert_id on jobs(email_alert_id)")
+
+
 def set_schema_version(conn, version: int) -> None:
     conn.execute("insert or ignore into schema_version (version, applied_at) values (?, ?)", (version, utc_now_iso()))
+
+
+def row_to_plain_dict(row) -> Dict:
+    return {key: row[key] for key in row.keys()}
+
+
+def decompress_text(blob) -> str:
+    if not blob:
+        return ""
+    try:
+        return gzip.decompress(blob).decode("utf-8", errors="replace")
+    except (OSError, EOFError):
+        return bytes(blob).decode("utf-8", errors="replace")
 
 
 def trim_usage_logs(conn) -> None:

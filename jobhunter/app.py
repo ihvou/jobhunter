@@ -102,6 +102,7 @@ class JobHunter:
             source.imap_last_uid = self.database.source_imap_last_uid(source.id)
             if source.type == "imap":
                 source.email_templates = self.database.email_templates_for_source(source.id)
+                source.raw_email_writer = self.database.save_email_alert_raw
         self.database.upsert_sources(sources)
         ruleset = load_scoring_rules(self.config.scoring_path)
         total_fetched = 0
@@ -174,6 +175,7 @@ class JobHunter:
         if source.type != "imap":
             raise SourceError("Source is not an email/imap source: %s" % source.id)
         source.email_templates = self.database.email_templates_for_source(source.id)
+        source.raw_email_writer = self.database.save_email_alert_raw
         message = EmailMessage()
         message["From"] = sender or "unknown@example.invalid"
         message["Subject"] = subject or "Job alert"
@@ -182,7 +184,11 @@ class JobHunter:
             message["Date"] = date
         subtype = "html" if "<" in (body or "") and ">" in (body or "") else "plain"
         message.set_content(body or "", subtype=subtype)
+        email_alert_id, raw_inserted = source_module.persist_raw_email(source, message)
         jobs = source_module.jobs_from_email(source, message)
+        if email_alert_id:
+            for job in jobs:
+                setattr(job, "email_alert_id", email_alert_id)
         result = self.ingest_jobs(source, jobs)
         log_context(
             LOGGER,
@@ -191,8 +197,18 @@ class JobHunter:
             source_id=source.id,
             fetched=result["fetched"],
             inserted=result["inserted"],
+            email_alert_id=email_alert_id,
+            raw_inserted=raw_inserted,
         )
-        return {"ok": True, "source_id": source.id, "jobs_found": result["fetched"], "inserted": result["inserted"], "l2_candidates": result["l2_candidates"]}
+        return {
+            "ok": True,
+            "source_id": source.id,
+            "email_alert_id": email_alert_id,
+            "raw_inserted": raw_inserted,
+            "jobs_found": result["fetched"],
+            "inserted": result["inserted"],
+            "l2_candidates": result["l2_candidates"],
+        }
 
     def should_l2_score(self, source: SourceConfig, job: Job, l1_score: int, current_count: int) -> bool:
         if current_count >= self.config.l2_max_jobs:

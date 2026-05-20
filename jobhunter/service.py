@@ -69,7 +69,13 @@ class JobHunterService:
         before = self.count_jobs()
         self.bot.collect()
         after = self.count_jobs()
-        return {"ok": True, "jobs_before": before, "jobs_after": after, "inserted_estimate": max(0, after - before)}
+        return {
+            "ok": True,
+            "jobs_before": before,
+            "jobs_after": after,
+            "inserted_estimate": max(0, after - before),
+            "unparsed_email_count": self.bot.database.unparsed_email_count(),
+        }
 
     def rescore_recent_jobs(self, limit: int = 500) -> Dict:
         limit = min(max(1, limit or 500), 1000)
@@ -219,6 +225,16 @@ class JobHunterService:
         with self.bot.database.connection() as conn:
             rows = conn.execute(sql, params).fetchmany(min(max(1, limit), 100))
         return {"rows": [row_to_dict(row) for row in rows], "count": len(rows)}
+
+    def list_email_alerts(self, limit: int = 20, since: str = "", only_unparsed: bool = False) -> Dict:
+        rows = self.bot.database.list_email_alerts(limit=limit, since=since, only_unparsed=only_unparsed)
+        return {"ok": True, "alerts": [row_to_dict(row) for row in rows], "count": len(rows)}
+
+    def email_alert_compare(self, email_alert_id: int) -> Dict:
+        payload = self.bot.database.email_alert_compare(email_alert_id)
+        if not payload:
+            raise ServiceError(404, "Email alert not found: %s" % email_alert_id)
+        return {"ok": True, "email_alert": payload}
 
     def process_email(self, body: Dict) -> Dict:
         return self.bot.process_email_alert(
@@ -468,6 +484,17 @@ def create_handler(app: JobHunterService):
                     payload = app.show_profile()
                 elif method == "GET" and path == "/history":
                     payload = app.history(int(first(query, "limit", "10")))
+                elif method == "GET" and path == "/email/alerts":
+                    payload = app.list_email_alerts(
+                        optional_int(first(query, "limit", "")) or 20,
+                        str(first(query, "since", "") or ""),
+                        boolish(first(query, "only_unparsed", "")),
+                    )
+                elif method == "GET" and path == "/email/alert/compare":
+                    email_alert_id = optional_int(first(query, "id", ""))
+                    if email_alert_id is None:
+                        raise ServiceError(400, "Missing required integer field: id")
+                    payload = app.email_alert_compare(email_alert_id)
                 elif method == "POST" and path == "/collect":
                     payload = app.collect()
                 elif method == "POST" and path == "/rescore":
@@ -871,6 +898,10 @@ def optional_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def boolish(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def required_int(body: Dict, key: str) -> int:

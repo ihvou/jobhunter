@@ -18,6 +18,8 @@ const expectedToolNames = [
   "jobhunter_cover_note",
   "jobhunter_query_sql",
   "jobhunter_process_email",
+  "jobhunter_list_email_alerts",
+  "jobhunter_email_alert_compare",
   "leadhunter_get_more_leads",
   "leadhunter_show_icp",
   "leadhunter_save_leads",
@@ -138,6 +140,16 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     assert.match(processEmailDescription, new RegExp(phrase));
   }
 
+  const listEmailAlertsDescription = tools.get("jobhunter_list_email_alerts").description;
+  for (const phrase of ["email_alert_raw", "raw_html_blob", "limit<=50"]) {
+    assert.match(listEmailAlertsDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const compareEmailAlertDescription = tools.get("jobhunter_email_alert_compare").description;
+  for (const phrase of ["raw_html", "raw_text", "jobs.email_alert_id"]) {
+    assert.match(compareEmailAlertDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
   const showProfileDescription = tools.get("jobhunter_show_profile").description;
   for (const phrase of ["input/profile.local.md", "My job profile", "# About me", "# Directives"]) {
     assert.match(showProfileDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -242,5 +254,26 @@ test("profile and ICP tools call the read-only service endpoints", async () => {
   assert.deepEqual(calls, [
     "http://jobhunter-service:8765/profile/show",
     "http://jobhunter-service:8765/leads/icp/show",
+  ]);
+});
+
+test("email alert audit tools call read-only endpoints", async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return jsonResponse({ ok: true, alerts: [], email_alert: { id: 7 } });
+  };
+  const tools = new Map(registeredTools().map((tool) => [tool.name, tool]));
+
+  await tools.get("jobhunter_list_email_alerts").execute("tool-call-id", {
+    limit: 5,
+    since: "2026-05-20T00:00:00Z",
+    only_unparsed: true,
+  });
+  await tools.get("jobhunter_email_alert_compare").execute("tool-call-id", { email_alert_id: 7 });
+
+  assert.deepEqual(calls, [
+    "http://jobhunter-service:8765/email/alerts?limit=5&since=2026-05-20T00%3A00%3A00Z&only_unparsed=1",
+    "http://jobhunter-service:8765/email/alert/compare?id=7",
   ]);
 });

@@ -27,6 +27,77 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
+    def test_schema_v13_persists_raw_email_and_links_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            with db.connection() as conn:
+                schema_version = conn.execute("select max(version) as version from schema_version").fetchone()["version"]
+                email_columns = [row["name"] for row in conn.execute("pragma table_info(email_alert_raw)").fetchall()]
+                job_columns = [row["name"] for row in conn.execute("pragma table_info(jobs)").fetchall()]
+
+            self.assertEqual(schema_version, 13)
+            self.assertEqual(
+                email_columns,
+                [
+                    "id",
+                    "source_id",
+                    "message_id",
+                    "sender",
+                    "subject",
+                    "received_at",
+                    "raw_html_blob",
+                    "raw_text_blob",
+                    "parsed_at",
+                    "parsed_jobs_count",
+                    "parser_version",
+                ],
+            )
+            self.assertIn("email_alert_id", job_columns)
+
+            email_alert_id, inserted = db.save_email_alert_raw(
+                "email-job-alerts",
+                "<raw-1>",
+                "alerts@example.com",
+                "Product jobs",
+                "2026-05-20T09:00:00Z",
+                "<html><body><a href='https://example.com/job'>AI PM</a></body></html>",
+                "AI PM https://example.com/job",
+            )
+            self.assertTrue(inserted)
+            email_alert_id_again, inserted_again = db.save_email_alert_raw(
+                "email-job-alerts",
+                "<raw-1>",
+                "alerts@example.com",
+                "Product jobs updated",
+                "2026-05-20T10:00:00Z",
+                "<html>duplicate</html>",
+                "duplicate",
+            )
+            self.assertEqual(email_alert_id_again, email_alert_id)
+            self.assertFalse(inserted_again)
+
+            job = Job(
+                source_id="email-job-alerts",
+                source_name="Email",
+                external_id="raw-1-job",
+                url="https://example.com/job",
+                title="AI Product Manager",
+                company="ExampleCo",
+            )
+            job.email_alert_id = email_alert_id
+            job_id, _inserted = db.upsert_job(job)
+
+            alerts = db.list_email_alerts(limit=5)
+            self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0]["id"], email_alert_id)
+            self.assertEqual(alerts[0]["subject"], "Product jobs updated")
+            compare = db.email_alert_compare(email_alert_id)
+            self.assertIn("<html><body>", compare["raw_html"])
+            self.assertIn("AI PM", compare["raw_text"])
+            self.assertEqual(compare["jobs"][0]["id"], job_id)
+            self.assertEqual(db.unparsed_email_count(), 1)
+
     def test_total_score_is_generated_from_l1_and_l2(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")

@@ -137,6 +137,10 @@ Docker:
 
 `./bin/jobhunter` is a deprecated wrapper for one release and delegates to `./bin/openclaw`.
 
+## Operations Notes
+
+- Raw job-alert emails are retained for parser audits in `email_alert_raw`. There is no automatic cleanup yet. Manual quarterly retention SQL: `delete from email_alert_raw where received_at < datetime('now','-90 days');`
+
 ## OpenClaw Non-Negotiables
 
 - Do not remove `openclaw-gateway` from `docker-compose.yml`.

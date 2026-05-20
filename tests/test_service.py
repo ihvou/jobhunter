@@ -88,6 +88,50 @@ class ServiceTests(unittest.TestCase):
                 service.query_sql("delete from jobs")
             self.assertEqual(raised.exception.status, 400)
 
+    def test_email_alert_audit_endpoints_return_raw_and_joined_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.sources_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "email-job-alerts",
+                            "name": "Email Alerts",
+                            "type": "imap",
+                            "url": "imap://job-alerts",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            service = JobHunterService(bot)
+
+            processed = service.process_email(
+                {
+                    "source_id": "email-job-alerts",
+                    "sender": "alerts@example.com",
+                    "subject": "Product jobs",
+                    "message_id": "<service-email-1>",
+                    "date": "Wed, 20 May 2026 09:00:00 +0000",
+                    "body": '<html><body><a href="https://example.com/email-job">AI Product Manager</a></body></html>',
+                }
+            )
+
+            self.assertTrue(processed["ok"])
+            self.assertTrue(processed["raw_inserted"])
+            email_alert_id = processed["email_alert_id"]
+            listed = service.list_email_alerts(limit=5)
+            self.assertEqual(listed["count"], 1)
+            self.assertEqual(listed["alerts"][0]["id"], email_alert_id)
+            self.assertNotIn("raw_html_blob", listed["alerts"][0])
+
+            compared = service.email_alert_compare(email_alert_id)
+            email_alert = compared["email_alert"]
+            self.assertIn("<html><body>", email_alert["raw_html"])
+            self.assertEqual(email_alert["raw_text"], "")
+            self.assertEqual(len(email_alert["jobs"]), 1)
+            self.assertEqual(email_alert["jobs"][0]["email_alert_id"], email_alert_id)
+
     def test_show_profile_and_icp_return_local_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot, _job_id = self.seeded_bot(tmp)
