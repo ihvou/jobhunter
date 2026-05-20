@@ -22,6 +22,7 @@ Commands:
   onboard   Run Dockerized OpenClaw onboarding without host daemon install
   set-keyboard  Apply the persistent Telegram 2x2 reply keyboard
   reset-sessions  Clear cached Telegram direct sessions for fresh tool prompts
+  set-thinking [<level>]  Set Codex model_reasoning_effort across all agents (default: high)
   cron-install  Register the Phase 4 OpenClaw cron jobs
   cron-list     List OpenClaw cron jobs
   doctor    Run OpenClaw doctor inside the gateway image
@@ -220,6 +221,36 @@ if (removed.length) {
 NODE
   run_cmd "${COMPOSE[@]}" restart openclaw-gateway >/dev/null
   wait_gateway_health
+}
+
+set_thinking() {
+  local level="${1:-high}"
+  case "$level" in
+    minimal|low|medium|high|xhigh|max) ;;
+    *)
+      printf "set-thinking: invalid level '%s' (allowed: minimal|low|medium|high|xhigh|max)\n" "$level" >&2
+      return 2
+      ;;
+  esac
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker exec openclaw-gateway sh -c %q\n' \
+      "for f in /home/node/.openclaw/agents/*/agent/codex-home/config.toml; do upsert model_reasoning_effort=\"$level\"; done"
+    return 0
+  fi
+  docker exec openclaw-gateway sh -c 'level="$1"; updated=0; for f in /home/node/.openclaw/agents/*/agent/codex-home/config.toml; do
+    [ -f "$f" ] || continue
+    if grep -q "^model_reasoning_effort" "$f"; then
+      sed -i "s/^model_reasoning_effort.*/model_reasoning_effort = \"$level\"/" "$f"
+    else
+      printf "\nmodel_reasoning_effort = \"%s\"\n" "$level" >> "$f"
+    fi
+    printf "set: %s -> %s\n" "$f" "$level"
+    updated=$((updated + 1))
+  done
+  if [ "$updated" = 0 ]; then
+    echo "set-thinking: no agent codex-home config files found (run start/onboard first)" >&2
+    exit 3
+  fi' sh "$level"
 }
 
 config_patch() {
@@ -583,6 +614,7 @@ case "${1:-help}" in
     gateway_node_live config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]'
     patch_jobhunter_openclaw_config
     remove_codex_mcp_jobhunter
+    set_thinking high
     set_keyboard
     if install_cron_jobs; then
       printf "\nOnboarding finished. Jobhunter OpenClaw plugin, skills, Telegram, Codex runtime, and cron jobs are configured.\n"
@@ -603,6 +635,10 @@ case "${1:-help}" in
   reset-sessions)
     shift
     reset_sessions "$@"
+    ;;
+  set-thinking)
+    shift
+    set_thinking "${1:-high}"
     ;;
   doctor)
     shift
