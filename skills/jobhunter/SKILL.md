@@ -153,7 +153,7 @@ message({
 
 The encoded `:<messageId>` is mandatory because OpenClaw 2026.5.7's synthetic callback prompt uses the callback_query id, not the button message id.
 
-**No confirmation messages after the delete.** The turn ends with the delete call. Do NOT emit a follow-up `message` like `"Marked the job as applied"`, `"Removed the card"`, `"Snoozed for 1 day"`, `"✓ Applied"`, `"Done."`, or any paraphrase that narrates what just happened. The disappearing card is the only acknowledgement needed. Confirmation messages have been explicitly flagged as redundant clutter — they're the most common compliance mistake on this surface.
+**ABSOLUTE RULE: after the delete, count of further `message` tool calls for this turn is ZERO.** Not one. Not a single word. Not an emoji. The disappearing card is the only acknowledgement. This rule is bypass-resistant — listing forbidden phrases doesn't work because the model keeps inventing shorter ones. Each iteration found a new word: `"Marked the job as applied"` → `"Removed the card"` → `"Snoozed 1d"` → `"✓ Applied"` → `"Done."` → `"Handled"`. The pattern is: ANY post-delete message is forbidden regardless of length. If you find yourself reaching for one, the answer is STOP, not "say it shorter".
 
 Snoozed items automatically reappear in the next `/jobs` or `/leads` digest after the snooze window expires (1 day for jobs, 7 days for leads). DB rows persist for audit.
 

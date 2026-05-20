@@ -180,12 +180,14 @@ export default definePluginEntry({
         "`irrelevant:<12hex>:<messageId>`, `snooze:<12hex>:<messageId>`, or `cover:<12hex>:<messageId>`): " +
         "(a) For applied/irrelevant/snooze (triage actions): call `jobhunter_mark_job` with the matching " +
         "status, then emit `message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. " +
-        "STOP IMMEDIATELY AFTER THE DELETE. Your turn ends there. Do NOT emit any further `message` calls. " +
-        "Do NOT send confirmation phrases — the disappearing card is the only signal the user needs. " +
-        "Forbidden confirmation phrases (user has explicitly flagged these as redundant clutter): " +
-        "\"Marked the job as applied\", \"Marked that job as applied and removed the card\", " +
-        "\"Done.\", \"Removed the card\", \"Card deleted\", \"Snoozed for 1 day\", \"✓ Applied\", " +
-        "\"✗ Irrelevant\", \"💤 Snoozed 1d\", or any paraphrase that narrates what just happened. " +
+        "ABSOLUTE RULE: after that delete, the count of further `message` tool calls for this turn is ZERO. " +
+        "Not one acknowledgment. Not a single word. Not an emoji. The disappearing card IS the acknowledgment. " +
+        "This rule is bypass-resistant: forbidding specific phrases doesn't work because the model keeps inventing " +
+        "shorter ones (we have already had to forbid \"Marked the job as applied\", \"Removed the card\", " +
+        "\"Card deleted\", \"Snoozed 1d\", \"✓ Applied\", \"Done.\", and then \"Handled\" — every iteration the " +
+        "model found a new short word). The pattern is: ANY follow-up message after a delete is forbidden, " +
+        "regardless of length, regardless of tone, regardless of how minimal it seems. If you find yourself " +
+        "reaching for any post-delete message, that's the signal to STOP — not to make it shorter. " +
         "Snoozed jobs automatically reappear in the next `/jobs` digest after their snooze window expires " +
         "(default 1 day). The DB row persists for audit. " +
         "NOTE on deleting the original digest message: OpenClaw 2026.5.7's callback synthetic-prompt metadata " +
@@ -362,13 +364,14 @@ export default definePluginEntry({
         "`reject:<id>:<messageId>`): " +
         "For approve: call `jobhunter_apply_action(action_id=<id>)`, then emit `message(action=\"delete\", " +
         "target=<chat_id>, messageId=<messageId>)`. " +
-        "STOP IMMEDIATELY AFTER THE DELETE. Your turn ends there. Do NOT emit any further `message` calls. " +
-        "Do NOT send confirmation phrases — the disappearing card is the only signal the user needs. " +
-        "Forbidden confirmation phrases: \"Approved\", \"Action #<id> applied\", \"Applied and removed the card\", " +
-        "\"Done.\", or any paraphrase. The applied action is auditable via jobhunter_history. " +
+        "ABSOLUTE RULE: after the delete, the count of further `message` tool calls for this turn is ZERO. " +
+        "Not one acknowledgment. Not \"Handled\", \"OK\", \"Done\", \"Approved\", \"Applied\", or any emoji. " +
+        "Same bypass-resistant rule as job/lead triage. The disappearing card IS the acknowledgment. The applied " +
+        "action is auditable via jobhunter_history. " +
         "For reject: emit `message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. Do not call any " +
         "backend tool. " +
-        "STOP IMMEDIATELY AFTER THE DELETE. Do NOT send confirmation phrases like \"Rejected\" or \"Dismissed.\" " +
+        "Same ABSOLUTE rule: ZERO further `message` calls for this turn. Not \"Rejected\", \"Dismissed\", or any " +
+        "acknowledgment. " +
         "The proposed action stays in the DB with status='proposed' for audit (visible via jobhunter_history); " +
         "silently rejecting is the cleanest UX.",
       parameters: schema(
@@ -570,12 +573,13 @@ export default definePluginEntry({
         "(a) For reached/irrelevant/snooze (triage actions): call `leadhunter_mark_lead` with the matching " +
         "status (reached_out / irrelevant / snoozed; default snooze_days=7), then emit " +
         "`message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. " +
-        "STOP IMMEDIATELY AFTER THE DELETE. Your turn ends there. Do NOT emit any further `message` calls. " +
-        "Do NOT send confirmation phrases — the disappearing card is the only signal the user needs. " +
-        "Forbidden confirmation phrases (user has explicitly flagged these as redundant clutter): " +
-        "\"Marked the lead as reached out\", \"Marked that lead as irrelevant and removed the card\", " +
-        "\"Done.\", \"Removed the card\", \"Card deleted\", \"Snoozed for 7 days\", \"✓ Reached out\", " +
-        "\"✗ Marked irrelevant\", \"💤 Snoozed 7d\", or any paraphrase that narrates what just happened. " +
+        "ABSOLUTE RULE: after that delete, the count of further `message` tool calls for this turn is ZERO. " +
+        "Not one acknowledgment. Not a single word. Not an emoji. The disappearing card IS the acknowledgment. " +
+        "Same bypass-resistant rule as job triage above — short words like \"Handled\", \"OK\", \"Done\", " +
+        "\"Updated\", \"Noted\", a thumbs-up emoji, are all forbidden along with the longer narrations " +
+        "(\"Marked the lead as reached out\", \"Removed the card\", \"Snoozed 7d\", etc.). The pattern: ANY " +
+        "follow-up message after a delete is forbidden, regardless of length. If you find yourself reaching " +
+        "for any post-delete message, STOP — do not make it shorter, just don't send it. " +
         "Snoozed leads automatically reappear in the next `/leads` digest after their snooze window expires " +
         "(default 7 days; outreach cycles are longer than job triage). The DB row persists for audit. " +
         "The encoded `:<messageId>` is mandatory because the synthetic callback prompt does not carry the button message id. " +
