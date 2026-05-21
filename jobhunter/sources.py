@@ -801,6 +801,36 @@ def email_body(message) -> str:
     return "\n".join(part for part in (html, text) if part)
 
 
+# Detector helper: catalog of known job-posting URL patterns we can deterministically
+# count in an email body. Used by audit_email_extraction to decide whether the
+# Codex-extracted job count for an email is suspiciously low vs the link count.
+# Add new patterns conservatively — false positives here cause unnecessary
+# re-extraction (idempotent, but wastes Codex turns); false negatives let
+# under-extracted emails go undetected.
+JOB_URL_PATTERNS = [
+    re.compile(r"linkedin\.com/(?:comm/)?jobs/view/(\d+)", re.IGNORECASE),
+    re.compile(r"boards\.greenhouse\.io/[^/\"?>]+/jobs/(\d+)", re.IGNORECASE),
+    re.compile(r"jobs\.lever\.co/[^/\"?>]+/([a-f0-9-]{30,})", re.IGNORECASE),
+    re.compile(r"ashbyhq\.com/[^/\"?>]+/([a-f0-9-]{30,})", re.IGNORECASE),
+    re.compile(r"wellfound\.com/jobs/(\d+)", re.IGNORECASE),
+    re.compile(r"angel\.co/jobs/(\d+)", re.IGNORECASE),
+    re.compile(r"djinni\.co/(?:[a-z]+/)?jobs/([a-z0-9-]+)", re.IGNORECASE),
+    re.compile(r"weworkremotely\.com/(?:remote-jobs|listings)/([a-z0-9-]+)", re.IGNORECASE),
+]
+
+
+def count_known_job_links_in_html(html: str) -> int:
+    """Count distinct job-posting URLs across known source patterns in a raw email.
+    A coarse lower-bound on how many jobs that email actually contains."""
+    if not html:
+        return 0
+    found = set()
+    for pattern in JOB_URL_PATTERNS:
+        for match in pattern.findall(html):
+            found.add((pattern.pattern, match))
+    return len(found)
+
+
 def enrich_job_from_url(job_row) -> Dict:
     url = row_get(job_row, "url")
     snippet = row_get(job_row, "description")

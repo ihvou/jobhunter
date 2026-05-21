@@ -18,7 +18,7 @@ from .database import tomorrow_iso
 from .logging_setup import configure_logging, log_context, safe_log_text
 from .models import Job, Lead, SourceConfig
 from .scoring import load_scoring_rules, score_job
-from .sources import SourceError, enrich_job_from_url, validate_safe_url
+from .sources import SourceError, count_known_job_links_in_html, enrich_job_from_url, validate_safe_url
 
 LOGGER = logging.getLogger(__name__)
 JOB_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -327,6 +327,64 @@ class JobHunterService:
             "error": error,
         }
 
+    def audit_email_extraction(
+        self,
+        days: int = 7,
+        threshold: float = 0.5,
+        min_expected: int = 3,
+        unmark: bool = False,
+    ) -> Dict:
+        """Detect emails that look under-extracted (parsed_jobs_count low vs known
+        job-link count in raw_html) within the given window. If unmark=True,
+        clears parsed_at on flagged rows so they re-enter the queue."""
+        try:
+            threshold = max(0.0, min(1.0, float(threshold)))
+        except (TypeError, ValueError):
+            threshold = 0.5
+        min_expected = max(1, int(min_expected or 1))
+        alerts = self.bot.database.email_alerts_for_audit(days)
+        suspicious = []
+        checked = 0
+        for alert in alerts:
+            if alert.get("parsed_at") is None:
+                continue
+            checked += 1
+            expected = count_known_job_links_in_html(alert.get("raw_html") or "")
+            if expected < min_expected:
+                continue
+            parsed = int(alert.get("parsed_jobs_count") or 0)
+            if parsed < expected * threshold:
+                suspicious.append(
+                    {
+                        "email_alert_id": alert["id"],
+                        "sender": alert.get("sender") or "",
+                        "subject": alert.get("subject") or "",
+                        "received_at": alert.get("received_at"),
+                        "parsed_jobs_count": parsed,
+                        "expected_min": expected,
+                    }
+                )
+        unmarked = 0
+        if unmark and suspicious:
+            unmarked = self.bot.database.unmark_email_parsed(
+                [s["email_alert_id"] for s in suspicious]
+            )
+        return {
+            "ok": True,
+            "days": int(days),
+            "threshold": threshold,
+            "min_expected": min_expected,
+            "checked": checked,
+            "suspicious": suspicious,
+            "suspicious_count": len(suspicious),
+            "unmarked": unmarked,
+        }
+
+    def unmark_email_parsed(self, email_alert_ids: List[int]) -> Dict:
+        ids = [int(i) for i in (email_alert_ids or []) if i is not None]
+        unmarked = self.bot.database.unmark_email_parsed(ids)
+        return {"ok": True, "requested": len(ids), "unmarked": unmarked}
+
     def process_email(self, body: Dict) -> Dict:
         return self.bot.process_email_alert(
             source_id=str(body.get("source_id") or "email-job-alerts"),
@@ -625,6 +683,19 @@ def create_handler(app: JobHunterService):
                     payload = app.save_extracted_email_jobs(body)
                 elif method == "POST" and path == "/email/enrich_job_description":
                     payload = app.enrich_job_description(required(body, "job_id"))
+                elif method == "POST" and path == "/email/audit_extraction":
+                    payload = app.audit_email_extraction(
+                        days=optional_int(body.get("days")) or 7,
+                        threshold=float(body.get("threshold") or 0.5),
+                        min_expected=optional_int(body.get("min_expected")) or 3,
+                        unmark=bool(body.get("unmark", False)),
+                    )
+                elif method == "POST" and path == "/email/unmark_parsed":
+                    ids = body.get("email_alert_ids")
+                    if not isinstance(ids, list):
+                        single = optional_int(body.get("email_alert_id"))
+                        ids = [single] if single is not None else []
+                    payload = app.unmark_email_parsed(ids)
                 elif method == "POST" and path == "/leads/digest":
                     payload = app.leads_digest(optional_int(body.get("limit")), bool(body.get("mark_sent", False)))
                 elif method == "GET" and path == "/leads/icp/show":

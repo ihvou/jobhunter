@@ -23,6 +23,8 @@
       "jobhunter_process_unparsed_emails",
       "jobhunter_list_email_alerts",
       "jobhunter_email_alert_compare",
+      "jobhunter_audit_email_extraction",
+      "jobhunter_unmark_email_parsed",
       "leadhunter_get_more_leads",
       "leadhunter_show_icp",
       "leadhunter_save_leads",

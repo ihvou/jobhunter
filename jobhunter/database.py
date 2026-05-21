@@ -1270,6 +1270,57 @@ class Database:
             row = conn.execute("select count(*) as c from email_alert_raw where parsed_at is null").fetchone()
             return int(row["c"] or 0)
 
+    def email_alerts_for_audit(self, days: int = 7) -> List[Dict]:
+        """Return decompressed email_alert_raw rows from the last N days for audit.
+        Each row has raw_html (text), not raw_html_blob (bytes)."""
+        cutoff = (datetime.utcnow() - timedelta(days=max(1, int(days)))).isoformat() + "Z"
+        results: List[Dict] = []
+        with self.connection() as conn:
+            for row in conn.execute(
+                """
+                select id, source_id, sender, subject, received_at, parsed_at,
+                       parsed_jobs_count, raw_html_blob
+                from email_alert_raw
+                where received_at >= ?
+                order by received_at desc
+                """,
+                (cutoff,),
+            ):
+                raw_html = ""
+                if row["raw_html_blob"]:
+                    try:
+                        raw_html = gzip.decompress(row["raw_html_blob"]).decode("utf-8", errors="replace")
+                    except Exception:
+                        raw_html = ""
+                results.append(
+                    {
+                        "id": int(row["id"]),
+                        "source_id": row["source_id"],
+                        "sender": row["sender"],
+                        "subject": row["subject"],
+                        "received_at": row["received_at"],
+                        "parsed_at": row["parsed_at"],
+                        "parsed_jobs_count": int(row["parsed_jobs_count"] or 0),
+                        "raw_html": raw_html,
+                    }
+                )
+        return results
+
+    def unmark_email_parsed(self, email_alert_ids: List[int]) -> int:
+        """Clear parsed_at + parsed_jobs_count on the given email_alert_raw rows so the
+        next Codex extraction round picks them up. Returns rowcount."""
+        ids = [int(i) for i in (email_alert_ids or []) if i is not None]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        sql = (
+            "update email_alert_raw set parsed_at = null, parsed_jobs_count = 0 "
+            "where id in (%s)" % placeholders
+        )
+        with self.connection() as conn:
+            cursor = conn.execute(sql, ids)
+            return int(cursor.rowcount or 0)
+
 
 def migrate_v1(conn) -> None:
     conn.executescript(

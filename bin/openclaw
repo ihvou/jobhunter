@@ -429,6 +429,13 @@ install_cron_jobs() {
     "1800" \
     "telegram" \
     "Scheduled source review: use exa/firecrawl/web tools to look for better job aggregators or public boards for the current profile. If changes are warranted, call jobhunter_propose_actions with sources_proposal. Do not apply changes without user approval."
+  cron_upsert_agent_job \
+    "email-audit-nightly" \
+    "0 7 * * *" \
+    "jobs" \
+    "300" \
+    "telegram" \
+    "Scheduled email extraction audit. Call jobhunter_audit_email_extraction({days:7, threshold:0.5, min_expected:3, unmark:true}). If unmarked > 0, send ONE short Telegram message listing the recovered count and sender names (e.g. 'Email audit: recovered N likely-under-extracted email(s) from <senders>. They will re-process on next Get more jobs.'). If unmarked == 0, stay silent. Then emit NO_REPLY as your final assistant text. Do NOT call message again."
 }
 
 print_config() {

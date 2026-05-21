@@ -642,6 +642,36 @@ export default definePluginEntry({
     });
 
     register(api, {
+      name: "jobhunter_audit_email_extraction",
+      label: "Jobhunter Audit Email Extraction",
+      description:
+        "Detect emails where Codex's extraction looks suspiciously short vs the deterministic count of known job-posting URLs in the raw HTML. " +
+        "For each email_alert_raw row in the last `days` window (default 7), the server counts unique LinkedIn / Greenhouse / Lever / Ashby / Wellfound / Djinni / WeWorkRemotely job URLs in raw_html and compares to parsed_jobs_count. " +
+        "An email is flagged when `expected >= min_expected` (default 3) AND `parsed_jobs_count < expected * threshold` (default 0.5). " +
+        "If `unmark=true`, clears parsed_at on flagged rows so the next jobhunter_process_unparsed_emails call re-extracts them; jobs are upserted, so re-processing is safe and idempotent. " +
+        "Use this as a nightly health check via the email-audit-nightly cron, or on-demand whenever you suspect an email was missed. Returns {checked, suspicious[], suspicious_count, unmarked}.",
+      parameters: schema({
+        days: intSchema(1, 90),
+        threshold: { type: "number" },
+        min_expected: intSchema(1, 50),
+        unmark: { type: "boolean" },
+      }),
+      execute: async (_toolCallId, params = {}) => jsonResult(await post("/email/audit_extraction", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_unmark_email_parsed",
+      label: "Jobhunter Unmark Email Parsed",
+      description:
+        "Force one or more email_alert_raw rows back into the unparsed queue by clearing parsed_at and parsed_jobs_count. Use this manually after `jobhunter_email_alert_compare` reveals Codex extracted fewer jobs than the raw HTML contained, or programmatically via jobhunter_audit_email_extraction(unmark=true). Idempotent: jobs already saved are not deleted; re-extraction upserts.",
+      parameters: schema({
+        email_alert_id: { type: "integer" },
+        email_alert_ids: { type: "array", items: { type: "integer" } },
+      }),
+      execute: async (_toolCallId, params = {}) => jsonResult(await post("/email/unmark_parsed", params)),
+    });
+
+    register(api, {
       name: "leadhunter_get_more_leads",
       label: "Leadhunter Get More Leads",
       description:

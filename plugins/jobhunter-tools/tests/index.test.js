@@ -21,6 +21,8 @@ const expectedToolNames = [
   "jobhunter_process_unparsed_emails",
   "jobhunter_list_email_alerts",
   "jobhunter_email_alert_compare",
+  "jobhunter_audit_email_extraction",
+  "jobhunter_unmark_email_parsed",
   "leadhunter_get_more_leads",
   "leadhunter_show_icp",
   "leadhunter_save_leads",
@@ -154,6 +156,16 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   const compareEmailAlertDescription = tools.get("jobhunter_email_alert_compare").description;
   for (const phrase of ["raw_html", "raw_text", "jobs.email_alert_id"]) {
     assert.match(compareEmailAlertDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const auditExtractionDescription = tools.get("jobhunter_audit_email_extraction").description;
+  for (const phrase of ["email-audit-nightly", "expected", "threshold", "unmark", "min_expected", "idempotent"]) {
+    assert.match(auditExtractionDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const unmarkParsedDescription = tools.get("jobhunter_unmark_email_parsed").description;
+  for (const phrase of ["unparsed queue", "parsed_at", "Idempotent"]) {
+    assert.match(unmarkParsedDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 
   const showProfileDescription = tools.get("jobhunter_show_profile").description;
