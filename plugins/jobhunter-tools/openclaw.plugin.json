@@ -20,6 +20,7 @@
       "jobhunter_cover_note",
       "jobhunter_query_sql",
       "jobhunter_process_email",
+      "jobhunter_process_unparsed_emails",
       "jobhunter_list_email_alerts",
       "jobhunter_email_alert_compare",
       "leadhunter_get_more_leads",

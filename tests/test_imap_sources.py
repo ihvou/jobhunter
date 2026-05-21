@@ -101,12 +101,32 @@ class ImapSourceTests(unittest.TestCase):
                     url="imap://job-alerts",
                     query='FROM "alerts@wellfound.com"',
                 )
+                raw_rows = []
+
+                def raw_writer(source_id, message_id, sender, subject, received_at, raw_html, raw_text):
+                    raw_rows.append(
+                        {
+                            "source_id": source_id,
+                            "message_id": message_id,
+                            "sender": sender,
+                            "subject": subject,
+                            "received_at": received_at,
+                            "raw_html": raw_html,
+                            "raw_text": raw_text,
+                        }
+                    )
+                    return len(raw_rows), True
+
+                djinni.raw_email_writer = raw_writer
+                wellfound.raw_email_writer = raw_writer
 
                 djinni_jobs = collect_imap_alerts(djinni)
                 wellfound_jobs = collect_imap_alerts(wellfound)
 
-                self.assertEqual([job.url for job in djinni_jobs], ["https://djinni.co/jobs/1"])
-                self.assertEqual([job.url for job in wellfound_jobs], ["https://wellfound.com/jobs/2"])
+                self.assertEqual(djinni_jobs, [])
+                self.assertEqual(wellfound_jobs, [])
+                self.assertEqual([row["source_id"] for row in raw_rows], ["djinni", "wellfound"])
+                self.assertIn("Apply: https://djinni.co/jobs/1", raw_rows[0]["raw_text"])
                 self.assertEqual(djinni.last_seen_uid, 1)
                 self.assertEqual(wellfound.last_seen_uid, 2)
                 self.assertIn((None, "UID", "1:*", "FROM", '"no-reply@djinni.co"'), mailbox.searches)

@@ -16,8 +16,9 @@ from .app import JobHunter
 from .config import load_app_config, load_sources
 from .database import tomorrow_iso
 from .logging_setup import configure_logging, log_context, safe_log_text
-from .models import Lead
-from .sources import SourceError, validate_safe_url
+from .models import Job, Lead, SourceConfig
+from .scoring import load_scoring_rules, score_job
+from .sources import SourceError, enrich_job_from_url, validate_safe_url
 
 LOGGER = logging.getLogger(__name__)
 JOB_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -89,7 +90,13 @@ class JobHunterService:
         digest_id = ""
         if mark_sent and jobs:
             digest_id = self.bot.database.mark_digested([job["id"] for job in jobs])
-        payload = {"jobs": jobs, "count": len(jobs), "digest_id": digest_id, "marked_sent": bool(digest_id)}
+        payload = {
+            "jobs": jobs,
+            "count": len(jobs),
+            "digest_id": digest_id,
+            "marked_sent": bool(digest_id),
+            "unparsed_email_count": self.bot.database.unparsed_email_count(),
+        }
         payload.update(self.bot.collection_freshness())
         return payload
 
@@ -235,6 +242,90 @@ class JobHunterService:
         if not payload:
             raise ServiceError(404, "Email alert not found: %s" % email_alert_id)
         return {"ok": True, "email_alert": payload}
+
+    def unparsed_emails(self, limit: int = 20) -> Dict:
+        emails = self.bot.database.unparsed_email_alerts(limit)
+        return {"ok": True, "emails": emails, "count": len(emails)}
+
+    def save_extracted_email_jobs(self, body: Dict) -> Dict:
+        email_alert_id = required_int(body, "email_alert_id")
+        alert = self.bot.database.email_alert_compare(email_alert_id)
+        if not alert:
+            raise ServiceError(404, "Email alert not found: %s" % email_alert_id)
+        raw_jobs = body.get("jobs")
+        if not isinstance(raw_jobs, list):
+            raise ServiceError(400, "jobs must be an array")
+        if len(raw_jobs) > 50:
+            raise ServiceError(400, "At most 50 jobs can be saved per email")
+        ruleset = load_scoring_rules(self.bot.config.scoring_path)
+        source_id = alert.get("source_id") or "email-job-alerts"
+        source_name = self.source_name_for(source_id)
+        saved = []
+        skipped = []
+        enriched = 0
+        enrich_failed = 0
+        l2_candidates = []
+        source = SourceConfig(id=source_id, name=source_name, type="imap", url="imap://job-alerts")
+        for index, raw_job in enumerate(raw_jobs):
+            try:
+                job = normalize_extracted_alert_job(raw_job, source_id, source_name)
+            except ServiceError as exc:
+                skipped.append({"index": index, "reason": exc.message})
+                continue
+            job.email_alert_id = email_alert_id
+            job_id, inserted = self.bot.database.upsert_job(job)
+            enrichment = self.enrich_job_description(job_id, fail_soft=True)
+            if enrichment.get("status") == "enriched":
+                enriched += 1
+            else:
+                enrich_failed += 1
+            row = self.bot.database.get_job(job_id)
+            if row:
+                scored_job = job_from_row(row)
+                result = score_job(scored_job, self.bot.profile, ruleset)
+                self.bot.database.save_score(job_id, result)
+                if self.bot.should_l2_score(source, scored_job, result.score, len(l2_candidates)):
+                    refreshed = self.bot.database.get_job(job_id)
+                    if refreshed:
+                        l2_candidates.append(refreshed)
+            saved.append({"id": job_id, "id_prefix": job_id[:12], "inserted": inserted, "url": job.url})
+        self.bot.database.mark_email_alert_parsed(email_alert_id, len(saved))
+        if l2_candidates:
+            self.bot.run_l2_relevance(l2_candidates)
+        return {
+            "ok": True,
+            "email_alert_id": email_alert_id,
+            "saved": len(saved),
+            "enriched": enriched,
+            "enrich_failed": enrich_failed,
+            "skipped": skipped,
+            "jobs": saved,
+            "l2_candidates": len(l2_candidates),
+        }
+
+    def enrich_job_description(self, job_id: str, fail_soft: bool = False) -> Dict:
+        row = self.bot.database.get_job(job_id)
+        if not row:
+            raise ServiceError(404, "Job not found: %s" % safe_log_text(job_id, 120))
+        fields = enrich_job_from_url(row)
+        status = fields.pop("enrich_status", "skipped")
+        error = fields.pop("error", "")
+        try:
+            self.bot.database.update_job_enrichment(job_id, fields)
+        except Exception as exc:
+            if not fail_soft:
+                raise
+            status = "failed"
+            error = "%s: %s" % (exc.__class__.__name__, safe_log_text(exc, 200))
+        updated = self.bot.database.get_job(job_id)
+        description_length = len((updated["description"] if updated else row["description"]) or "")
+        return {
+            "ok": status != "failed" or fail_soft,
+            "job_id": job_id,
+            "status": status,
+            "description_length": description_length,
+            "error": error,
+        }
 
     def process_email(self, body: Dict) -> Dict:
         return self.bot.process_email_alert(
@@ -452,6 +543,11 @@ class JobHunterService:
         with self.bot.database.connection() as conn:
             return int(conn.execute("select count(*) as c from jobs").fetchone()["c"] or 0)
 
+    def source_name_for(self, source_id: str) -> str:
+        with self.bot.database.connection() as conn:
+            row = conn.execute("select name from sources where id = ?", (source_id,)).fetchone()
+        return row["name"] if row and row["name"] else "Email Alerts"
+
 
 class ServiceError(RuntimeError):
     def __init__(self, status: int, message: str):
@@ -495,6 +591,8 @@ def create_handler(app: JobHunterService):
                     if email_alert_id is None:
                         raise ServiceError(400, "Missing required integer field: id")
                     payload = app.email_alert_compare(email_alert_id)
+                elif method == "GET" and path == "/email/unparsed":
+                    payload = app.unparsed_emails(optional_int(first(query, "limit", "")) or 20)
                 elif method == "POST" and path == "/collect":
                     payload = app.collect()
                 elif method == "POST" and path == "/rescore":
@@ -523,6 +621,10 @@ def create_handler(app: JobHunterService):
                     payload = app.query_sql(required(body, "sql"), body.get("params") or [], optional_int(body.get("limit")) or 50)
                 elif method == "POST" and path == "/email/process":
                     payload = app.process_email(body)
+                elif method == "POST" and path == "/email/save_extracted_jobs":
+                    payload = app.save_extracted_email_jobs(body)
+                elif method == "POST" and path == "/email/enrich_job_description":
+                    payload = app.enrich_job_description(required(body, "job_id"))
                 elif method == "POST" and path == "/leads/digest":
                     payload = app.leads_digest(optional_int(body.get("limit")), bool(body.get("mark_sent", False)))
                 elif method == "GET" and path == "/leads/icp/show":
@@ -778,6 +880,66 @@ def normalize_lead_candidate(candidate) -> Lead:
         risk_level=normalize_risk(candidate.get("risk_level") or candidate.get("risk")),
         status=normalize_lead_status(candidate.get("status") or "new"),
         notes=safe_log_text(candidate.get("notes") or "", 1000),
+    )
+
+
+def normalize_extracted_alert_job(raw_job, source_id: str, source_name: str) -> Job:
+    if not isinstance(raw_job, dict):
+        raise ServiceError(400, "Extracted job must be an object")
+    title = clean_email_artifact(first_non_empty(raw_job, "title"))
+    company = clean_email_artifact(first_non_empty(raw_job, "company"))
+    url = first_non_empty(raw_job, "url")
+    if not title:
+        raise ServiceError(400, "Extracted job needs title")
+    if not company:
+        raise ServiceError(400, "Extracted job needs company")
+    if not url:
+        raise ServiceError(400, "Extracted job needs url")
+    try:
+        validate_safe_url(url)
+    except SourceError as exc:
+        raise ServiceError(400, str(exc))
+    snippet = safe_log_text(first_non_empty(raw_job, "snippet", "description"), 4000)
+    location = safe_log_text(first_non_empty(raw_job, "location_hint", "location"), 300)
+    return Job(
+        source_id=source_id,
+        source_name=source_name,
+        external_id=url,
+        url=url,
+        title=title[:180],
+        company=company[:180],
+        location=location,
+        remote_policy="unknown",
+        description=snippet,
+    )
+
+
+def clean_email_artifact(value: str) -> str:
+    text = safe_log_text(value or "", 240)
+    text = re.sub(r"\s+role\s+at\s+.+?\s+is available(?:\s+LinkedIn)?$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+role$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+\|\s*LinkedIn$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+-\s*LinkedIn$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+is available(?:\s+LinkedIn)?$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+LinkedIn$", "", text, flags=re.IGNORECASE)
+    return " ".join(text.split())
+
+
+def job_from_row(row) -> Job:
+    return Job(
+        source_id=row["source_id"],
+        source_name=row["source_name"],
+        external_id=row["external_id"],
+        url=row["url"],
+        title=row["title"],
+        company=row["company"],
+        location=row["location"] or "",
+        remote_policy=row["remote_policy"] or "unknown",
+        salary_min=row["salary_min"],
+        salary_max=row["salary_max"],
+        currency=row["currency"],
+        description=row["description"] or "",
+        posted_at=row["posted_at"],
     )
 
 

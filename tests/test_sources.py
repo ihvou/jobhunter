@@ -1,10 +1,9 @@
 import unittest
-import email
 from unittest import mock
 
 from jobhunter.models import SourceConfig
 from jobhunter import sources as source_module
-from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, fetch_source_text, infer_company, jobs_from_email, strip_html, validate_safe_url
+from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, enrich_job_from_url, fetch_source_text, infer_company, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -184,115 +183,23 @@ class SourceTests(unittest.TestCase):
             with self.assertRaisesRegex(SourceError, "JavaScript SPA"):
                 collect_link_page(source)
 
-    def test_email_template_parses_distinct_job_rows(self):
-        source = SourceConfig(id="email", name="Email", type="imap", url="imap://job-alerts")
-        source.email_templates = [
-            {
-                "id": "linkedin",
-                "source_id": "email",
-                "sender_pattern": "linkedin",
-                "subject_pattern": "jobs",
-                "parser_config": {"max_jobs": 5},
-            }
-        ]
-        message = email.message_from_string(
-            """From: jobs-noreply@linkedin.com
-Subject: 2 new product jobs
-Message-ID: <m1>
-Content-Type: text/html; charset=utf-8
-
-<a href="https://www.linkedin.com/jobs/view/1">Senior Product Manager</a>
-<a href="https://www.linkedin.com/jobs/view/2">AI Product Lead</a>
+    def test_enrich_job_from_url_uses_json_ld_jobposting(self):
+        html = """
+<html><head>
+<script type="application/ld+json">
+{"@type":"JobPosting","title":"AI Product Manager","description":"<p>Build AI workflows with product teams and agents. This description is intentionally long enough to prove enrichment replaced the short snippet.</p>","hiringOrganization":{"name":"ExampleCo"},"jobLocation":{"address":{"addressLocality":"Remote","addressCountry":"US"}},"baseSalary":{"currency":"USD","value":{"minValue":120000,"maxValue":160000}}}
+</script>
+</head><body></body></html>
 """
-        )
+        row = {"url": "https://example.com/jobs/ai-pm", "description": "short"}
+        with mock.patch("jobhunter.sources.fetch_text", return_value=html):
+            fields = enrich_job_from_url(row)
 
-        jobs = jobs_from_email(source, message)
-
-        self.assertEqual([job.title for job in jobs], ["Senior Product Manager", "AI Product Lead"])
-        self.assertEqual(jobs[0].url, "https://www.linkedin.com/jobs/view/1")
-
-    def test_email_template_invalid_regex_falls_back_to_generic(self):
-        source = SourceConfig(id="email", name="Email", type="imap", url="imap://job-alerts")
-        source.email_templates = [
-            {
-                "id": "bad",
-                "source_id": "email",
-                "sender_pattern": "alerts",
-                "subject_pattern": "jobs",
-                "parser_config": {"title_pattern": "(", "max_jobs": "many"},
-            }
-        ]
-        message = email.message_from_string(
-            """From: alerts@example.com
-Subject: 1 new jobs
-Message-ID: <m2>
-Content-Type: text/html; charset=utf-8
-
-<a href="https://example.com/jobs/1">Product Builder</a>
-"""
-        )
-
-        jobs = jobs_from_email(source, message)
-
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].title, "Product Builder")
-
-    def test_email_alert_parser_drops_linkedin_wrapper_rows(self):
-        source = SourceConfig(id="email-job-alerts", name="Email Alerts", type="imap", url="imap://job-alerts")
-        source.email_templates = [
-            {
-                "id": "linkedin",
-                "source_id": "email-job-alerts",
-                "sender_pattern": "linkedin",
-                "subject_pattern": "jobs",
-                "parser_config": {"max_jobs": 10},
-            }
-        ]
-        message = email.message_from_string(
-            """From: jobs-noreply@linkedin.com
-Subject: Product Manager jobs
-Message-ID: <linkedin-wrapper>
-Content-Type: text/html; charset=utf-8
-
-<a href="https://www.linkedin.com/jobs/view/1">Senior Product Manager</a>
-<a href="https://www.linkedin.com/jobs/view/2">Read more</a>
-<a href="https://www.linkedin.com/jobs/search/?currentJobId=3">30+ new jobs match your preferences</a>
-<a href="https://www.linkedin.com/jobs/view/4">Top job picks for you</a>
-<a href="https://www.linkedin.com/jobs/view/5">PM</a>
-"""
-        )
-
-        jobs = jobs_from_email(source, message)
-
-        self.assertEqual([job.title for job in jobs], ["Senior Product Manager"])
-        self.assertEqual(jobs[0].url, "https://www.linkedin.com/jobs/view/1")
-
-    def test_linkedin_email_artifacts_are_removed_from_title_and_company(self):
-        source = SourceConfig(id="email-job-alerts", name="LinkedIn Email Alerts", type="imap", url="imap://job-alerts")
-        source.email_templates = [
-            {
-                "id": "linkedin",
-                "source_id": "email-job-alerts",
-                "sender_pattern": "linkedin",
-                "subject_pattern": "jobs",
-                "parser_config": {"max_jobs": 5},
-            }
-        ]
-        message = email.message_from_string(
-            """From: jobs-noreply@linkedin.com
-Subject: Product jobs
-Message-ID: <linkedin-artifacts>
-Content-Type: text/html; charset=utf-8
-
-<a href="https://www.linkedin.com/jobs/view/42">Senior Product Manager role at Anthropic is available</a>
-"""
-        )
-
-        jobs = jobs_from_email(source, message)
-
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].title, "Senior Product Manager")
-        self.assertEqual(jobs[0].company, "Anthropic")
+        self.assertEqual(fields["enrich_status"], "enriched")
+        self.assertEqual(fields["title"], "AI Product Manager")
+        self.assertEqual(fields["company"], "ExampleCo")
+        self.assertEqual(fields["salary_min"], 120000)
+        self.assertIn("Build AI workflows", fields["description"])
 
 
 if __name__ == "__main__":

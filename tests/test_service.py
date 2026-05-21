@@ -129,8 +129,37 @@ class ServiceTests(unittest.TestCase):
             email_alert = compared["email_alert"]
             self.assertIn("<html><body>", email_alert["raw_html"])
             self.assertEqual(email_alert["raw_text"], "")
-            self.assertEqual(len(email_alert["jobs"]), 1)
-            self.assertEqual(email_alert["jobs"][0]["email_alert_id"], email_alert_id)
+            self.assertEqual(email_alert["jobs"], [])
+
+            pending = service.unparsed_emails(limit=20)
+            self.assertEqual(pending["count"], 1)
+            self.assertIn("AI Product Manager", pending["emails"][0]["raw_html"])
+            enrichment_html = """
+<script type="application/ld+json">
+{"@type":"JobPosting","title":"AI Product Manager","description":"Build AI workflow products with agents, automation, customer discovery, roadmaps, experiments, and cross-functional product teams. This longer text proves URL enrichment happened after Codex extraction.","hiringOrganization":{"name":"ExampleCo"},"jobLocation":{"address":{"addressLocality":"Remote"}}}
+</script>
+"""
+            with mock.patch("jobhunter.service.validate_safe_url"), mock.patch("jobhunter.sources.fetch_text", return_value=enrichment_html):
+                saved = service.save_extracted_email_jobs(
+                    {
+                        "email_alert_id": email_alert_id,
+                        "jobs": [
+                            {
+                                "title": "AI Product Manager role at ExampleCo is available",
+                                "company": "ExampleCo LinkedIn",
+                                "url": "https://example.com/email-job",
+                                "snippet": "Short snippet",
+                            }
+                        ],
+                    }
+                )
+            self.assertEqual(saved["saved"], 1)
+            self.assertEqual(saved["enriched"], 1)
+            compared = service.email_alert_compare(email_alert_id)["email_alert"]
+            self.assertEqual(compared["parsed_jobs_count"], 1)
+            self.assertEqual(len(compared["jobs"]), 1)
+            self.assertEqual(compared["jobs"][0]["email_alert_id"], email_alert_id)
+            self.assertGreater(len(compared["jobs"][0]["description"]), 100)
 
     def test_show_profile_and_icp_return_local_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:

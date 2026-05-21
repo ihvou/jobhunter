@@ -115,7 +115,7 @@ class AppTests(unittest.TestCase):
             ):
                 self.assertTrue(bot.source_candidate_reachable("https://jobs.dou.ua/vacancies/", "community", "test"))
 
-    def test_process_email_alert_ingests_and_scores_jobs(self):
+    def test_process_email_alert_persists_raw_for_codex_extraction(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = config_for(tmp)
             config.sources_path.write_text(
@@ -133,11 +133,14 @@ class AppTests(unittest.TestCase):
                 "<message-1>",
             )
 
-            self.assertEqual(result["jobs_found"], 1)
-            self.assertEqual(result["inserted"], 1)
-            rows = bot.database.recent_jobs(5)
-            self.assertEqual(rows[0]["title"], "Senior Product Manager")
-            self.assertGreaterEqual(rows[0]["score"], 0)
+            self.assertEqual(result["jobs_found"], 0)
+            self.assertEqual(result["inserted"], 0)
+            self.assertTrue(result["email_alert_id"])
+            self.assertEqual(result["unparsed_email_count"], 1)
+            alerts = bot.database.unparsed_email_alerts(5)
+            self.assertEqual(len(alerts), 1)
+            self.assertIn("Senior Product Manager", alerts[0]["raw_html"])
+            self.assertEqual(bot.database.recent_jobs(5), [])
 
 
 if __name__ == "__main__":

@@ -900,6 +900,8 @@ class Database:
             )
 
     def upsert_email_template(self, template: Dict) -> None:
+        # TODO: drop email_templates/email_parser_configs after confirming the
+        # Phase 6 Codex extraction path has fully replaced local email parsing.
         parser_config = template.get("parser_config") or {}
         parser_id = template.get("parser_config_id") or ("%s-parser" % template["id"])
         with self.connection() as conn:
@@ -1199,6 +1201,69 @@ class Database:
         data["raw_text"] = decompress_text(data.pop("raw_text_blob", None))
         data["jobs"] = [row_to_plain_dict(row) for row in jobs]
         return data
+
+    def unparsed_email_alerts(self, limit: int = 20) -> List[Dict]:
+        limit = min(max(1, int(limit or 20)), 20)
+        with self.connection() as conn:
+            rows = list(
+                conn.execute(
+                    """
+                    select *
+                    from email_alert_raw
+                    where parsed_at is null
+                    order by received_at asc, id asc
+                    limit ?
+                    """,
+                    (limit,),
+                )
+            )
+        alerts = []
+        for row in rows:
+            data = row_to_plain_dict(row)
+            data["raw_html"] = decompress_text(data.pop("raw_html_blob", None))
+            data["raw_text"] = decompress_text(data.pop("raw_text_blob", None))
+            alerts.append(data)
+        return alerts
+
+    def mark_email_alert_parsed(self, email_alert_id: int, parsed_jobs_count: int) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                update email_alert_raw
+                set parsed_at = ?,
+                    parsed_jobs_count = ?
+                where id = ?
+                """,
+                (utc_now_iso(), max(0, int(parsed_jobs_count or 0)), email_alert_id),
+            )
+
+    def update_job_enrichment(self, job_id: str, fields: Dict) -> None:
+        allowed = {
+            "company",
+            "location",
+            "remote_policy",
+            "salary_min",
+            "salary_max",
+            "currency",
+            "description",
+        }
+        assignments = []
+        params = []
+        for key in allowed:
+            if key not in fields:
+                continue
+            value = fields.get(key)
+            if value in (None, ""):
+                continue
+            assignments.append("%s = ?" % key)
+            params.append(value)
+        if not assignments:
+            return
+        assignments.append("last_seen_at = ?")
+        params.append(utc_now_iso())
+        params.append(job_id)
+        with self.connection() as conn:
+            conn.execute("update jobs set %s where id = ?" % ", ".join(assignments), tuple(params))
 
     def unparsed_email_count(self) -> int:
         with self.connection() as conn:

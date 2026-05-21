@@ -149,7 +149,9 @@ export default definePluginEntry({
         " " +
         "STALENESS RULE: response includes queue_freshness_hours, queue_last_collected, queue_is_stale. " +
         "If queue_is_stale is true OR queue_freshness_hours >= 6, you MUST first call jobhunter_collect_all_sources, " +
-        "then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
+        "then inspect its unparsed_email_count. If unparsed_email_count > 0, call jobhunter_process_unparsed_emails. " +
+        "If jobhunter_process_unparsed_emails returns needs_extraction=true, extract strict JSON jobs from the returned raw_html/raw_text " +
+        "and call jobhunter_process_unparsed_emails AGAIN with the extractions payload. Repeat until processed, then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
         "\"Collecting fresh jobs, back in ~1 min.\" " +
         "RENDERING (Telegram digest requests only): for EACH job in jobs[], use the two-call messageId workaround. " +
         "BUTTON SHAPE (CRITICAL): each `presentation.blocks` entry of type `\"buttons\"` must contain a FLAT array of " +
@@ -217,7 +219,7 @@ export default definePluginEntry({
       name: "jobhunter_collect_all_sources",
       label: "Jobhunter Collect All Sources",
       description:
-        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly. Response includes unparsed_email_count: the count of persisted email_alert_raw rows awaiting Codex extraction.",
+        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly. Response includes unparsed_email_count: the count of persisted email_alert_raw rows awaiting Codex extraction. If unparsed_email_count > 0, you MUST call jobhunter_process_unparsed_emails before rendering the next digest.",
       parameters: schema({}),
       execute: async () => jsonResult(await collectWithSoftTimeout()),
     });
@@ -507,9 +509,8 @@ export default definePluginEntry({
       label: "Jobhunter Process Email",
       description:
         "Ingest one job-alert email that arrived through OpenClaw Gmail Pub/Sub, hooks, or an email skill. " +
-        "Pass the parsed sender, subject, body, and optional message_id/date. The service runs its existing " +
-        "email parser templates, drops known wrapper noise, inserts any jobs, scores them, and may run capped L2 relevance. " +
-        "Use this for email-triggered job alerts only; it does not send email or access Gmail directly.",
+        "Pass the parsed sender, subject, body, and optional message_id/date. The service persists the raw email into email_alert_raw only; " +
+        "Codex extraction happens later through jobhunter_process_unparsed_emails. Use this for email-triggered job alerts only; it does not send email or access Gmail directly.",
       parameters: schema(
         {
           source_id: { type: "string" },
@@ -522,6 +523,87 @@ export default definePluginEntry({
         ["sender", "subject", "body"],
       ),
       execute: async (_toolCallId, params) => jsonResult(await post("/email/process", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_process_unparsed_emails",
+      label: "Jobhunter Process Unparsed Emails",
+      description:
+        "Codex-driven raw email extraction loop. FIRST CALL with only {limit}: fetches /email/unparsed and returns needs_extraction plus emails[] with raw_html/raw_text. " +
+        "If emails[] is empty, return processed=0 to the user. If emails[] is non-empty, YOU (Codex) must extract every distinct job posting from each email " +
+        "and CALL THIS TOOL AGAIN with {extractions:[{email_alert_id, jobs:[...]}]}. Strict job keys only: title, company, url, optional location_hint, optional snippet. " +
+        "Do not include any other job keys. Filter out UI noise: Learn More, Update preferences, Unsubscribe, Ready to interview, Open to offers, Closed to offers, " +
+        "Message from <X>, New jobs:, Edit job alert, mailto links, tracking pixels, profile links, and search-result pages. Skip any row missing title, company, or url. " +
+        "Deduplicate within each email by exact url. Strip template artifacts from fields: title suffixes ` role at <X> is available`, ` role`, ` | LinkedIn`, ` - LinkedIn`; " +
+        "company suffixes ` is available LinkedIn`, ` LinkedIn`, ` is available`. SECOND CALL posts each extraction to /email/save_extracted_jobs; the server validates URLs, " +
+        "saves jobs with email_alert_id, enriches descriptions from the URL, scores L1, may run capped L2, and marks the raw email parsed. If the second call returns " +
+        "remaining_unparsed_count > 0, call this tool again with only {limit} and continue until the queue is empty or the requested limit is processed.",
+      parameters: schema({
+        limit: intSchema(1, 20),
+        extractions: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["email_alert_id", "jobs"],
+            properties: {
+              email_alert_id: { type: "integer" },
+              jobs: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["title", "company", "url"],
+                  properties: {
+                    title: { type: "string" },
+                    company: { type: "string" },
+                    url: { type: "string" },
+                    location_hint: { type: "string" },
+                    snippet: { type: "string" },
+                  },
+                  additionalProperties: false,
+                },
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+      }),
+      execute: async (_toolCallId, params = {}) => {
+        if (Array.isArray(params.extractions) && params.extractions.length > 0) {
+          const results = [];
+          let saved = 0;
+          let enriched = 0;
+          let enrich_failed = 0;
+          for (const item of params.extractions) {
+            const result = await post("/email/save_extracted_jobs", {
+              email_alert_id: item.email_alert_id,
+              jobs: item.jobs || [],
+            });
+            results.push(result);
+            saved += Number(result.saved || 0);
+            enriched += Number(result.enriched || 0);
+            enrich_failed += Number(result.enrich_failed || 0);
+          }
+          const remaining = await get("/email/unparsed?limit=1");
+          return jsonResult({
+            ok: true,
+            processed: results.length,
+            saved,
+            enriched,
+            enrich_failed,
+            remaining_unparsed_count: Number(remaining.count || 0),
+            results,
+          });
+        }
+        const limit = Number.isInteger(params.limit) ? params.limit : 20;
+        const pending = await get(`/email/unparsed?limit=${encodeURIComponent(String(limit))}`);
+        return jsonResult({
+          ok: true,
+          needs_extraction: pending.count > 0,
+          processed: 0,
+          emails: pending.emails || [],
+          count: pending.count || 0,
+        });
+      },
     });
 
     register(api, {

@@ -1,5 +1,6 @@
 import email
 import email.header
+import html as html_lib
 import ipaddress
 import imaplib
 import json
@@ -91,6 +92,38 @@ class HTMLLinkExtractor(HTMLParser):
             self.links.append((self._href, text))
             self._href = ""
             self._text = []
+
+
+class HTMLMetadataExtractor(HTMLParser):
+    def __init__(self):
+        HTMLParser.__init__(self)
+        self.meta = {}
+        self.ld_json = []
+        self._in_ld_json = False
+        self._ld_parts = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attrs_dict = {str(key).lower(): value for key, value in attrs}
+        if tag.lower() == "meta":
+            name = (attrs_dict.get("property") or attrs_dict.get("name") or "").lower()
+            content = attrs_dict.get("content") or ""
+            if name and content:
+                self.meta[name] = content
+        if tag.lower() == "script" and "ld+json" in (attrs_dict.get("type") or "").lower():
+            self._in_ld_json = True
+            self._ld_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_ld_json:
+            self._ld_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "script" and self._in_ld_json:
+            text = "".join(self._ld_parts).strip()
+            if text:
+                self.ld_json.append(text)
+            self._in_ld_json = False
+            self._ld_parts = []
 
 
 def strip_html(value: str) -> str:
@@ -641,13 +674,6 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
             raw_id, raw_inserted = persist_raw_email(source, message, str(message_id.decode("utf-8", errors="ignore")))
             if raw_id:
                 log_context(LOGGER, logging.DEBUG, "email_alert_raw_saved", source_id=source.id, email_alert_id=raw_id, inserted=raw_inserted)
-            if raw_id and not raw_inserted:
-                continue
-            email_jobs = jobs_from_email(source, message)
-            if raw_id:
-                for job in email_jobs:
-                    setattr(job, "email_alert_id", raw_id)
-            jobs.extend(email_jobs)
         source.last_seen_uid = max_uid
         return jobs
     finally:
@@ -656,18 +682,6 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
         except Exception:
             pass
         mailbox.logout()
-
-
-def jobs_from_email(source: SourceConfig, message) -> List[Job]:
-    subject = decoded_header(message.get("Subject", ""))
-    sender = decoded_header(message.get("From", ""))
-    body = email_body(message)
-    for template in getattr(source, "email_templates", []) or []:
-        if email_template_matches(template, sender, subject):
-            jobs = jobs_from_email_template(source, message, subject, sender, body, template)
-            if jobs:
-                return filter_email_alert_jobs(source, jobs)
-    return filter_email_alert_jobs(source, generic_jobs_from_email(source, message, subject, sender, body))
 
 
 def persist_raw_email(source: SourceConfig, message, sample_id: str = "") -> tuple:
@@ -739,198 +753,6 @@ def slug_for_path(value: str, fallback: str) -> str:
     return text[:120] or fallback
 
 
-def generic_jobs_from_email(source: SourceConfig, message, subject: str, sender: str, body: str) -> List[Job]:
-    links = email_links(body)
-    urls = [url for url, _text in links] or extract_urls(body)
-    jobs = []
-    for idx, url in enumerate(urls[:10]):
-        link_text = clean_title(links[idx][1]) if idx < len(links) else ""
-        title = link_text if link_text and not link_text.lower().startswith("http") else subject
-        company = infer_company(title + " " + sender, body)
-        jobs.append(
-            Job(
-                source_id=source.id,
-                source_name=source.name,
-                external_id=message.get("Message-ID", "") + str(idx),
-                url=url,
-                title=clean_title(title),
-                company=company,
-                location=infer_location(body),
-                remote_policy=infer_remote_policy(body),
-                description=strip_html(("[needs template config]\n" + body)[:4000]),
-                posted_at=parse_date(message.get("Date")),
-            )
-        )
-    return jobs
-
-
-def jobs_from_email_template(source: SourceConfig, message, subject: str, sender: str, body: str, template: Dict) -> List[Job]:
-    config = template.get("parser_config") or {}
-    max_jobs = bounded_int(config.get("max_jobs"), 10, 1, 50)
-    jobs = jobs_from_pattern_config(source, message, body, config, max_jobs)
-    if not jobs:
-        jobs = jobs_from_link_config(source, message, subject, sender, body, max_jobs)
-    return jobs
-
-
-def jobs_from_pattern_config(source: SourceConfig, message, body: str, config: Dict, max_jobs: int) -> List[Job]:
-    title_pattern = config.get("title_pattern")
-    url_pattern = config.get("url_pattern")
-    if not title_pattern and not url_pattern:
-        return []
-    pattern = url_pattern or title_pattern
-    jobs = []
-    try:
-        matches = list(re.finditer(pattern, body, re.IGNORECASE | re.DOTALL))
-    except re.error as exc:
-        log_context(LOGGER, logging.WARNING, "email_template_regex_invalid", error=str(exc))
-        return []
-    for idx, match in enumerate(matches):
-        groups = match.groupdict()
-        window = body[max(0, match.start() - 500) : min(len(body), match.end() + 500)]
-        url = groups.get("url") or first_url(match.group(0)) or first_url(window)
-        title = groups.get("title") or regex_first(config.get("title_pattern"), window) or ""
-        company = groups.get("company") or regex_first(config.get("company_pattern"), window) or infer_company(title, window)
-        if not url or not title:
-            continue
-        jobs.append(email_job(source, message, idx, url, title, company, window))
-        if len(jobs) >= max_jobs:
-            break
-    return jobs
-
-
-def jobs_from_link_config(source: SourceConfig, message, subject: str, sender: str, body: str, max_jobs: int) -> List[Job]:
-    jobs = []
-    seen = set()
-    for href, text in email_links(body):
-        url = href.strip()
-        title = clean_title(text)
-        if not url or url in seen or not title or not looks_like_job_link(title, url):
-            continue
-        seen.add(url)
-        window = surrounding_text(body, title, 800)
-        company = infer_company(title + " " + sender, window or body)
-        jobs.append(email_job(source, message, len(jobs), url, title or subject, company, window or body))
-        if len(jobs) >= max_jobs:
-            break
-    return jobs
-
-
-def email_job(source: SourceConfig, message, idx: int, url: str, title: str, company: str, description: str) -> Job:
-    title, company = normalize_email_job_fields(source, url, title, company)
-    return Job(
-        source_id=source.id,
-        source_name=source.name,
-        external_id=message.get("Message-ID", "") + str(idx),
-        url=url,
-        title=title,
-        company=company or "Unknown company",
-        location=infer_location(description),
-        remote_policy=infer_remote_policy(description),
-        description=strip_html(description[:4000]),
-        posted_at=parse_date(message.get("Date")),
-    )
-
-
-def normalize_email_job_fields(source: SourceConfig, url: str, title: str, company: str) -> tuple:
-    title = clean_title(title)
-    company = clean_title(company)
-    if not is_linkedin_email_job(source, url):
-        return title, company
-    match = re.match(r"(.+?)\s+at\s+(.+?)\s+is available(?:\s+LinkedIn)?$", title, re.IGNORECASE)
-    if match:
-        title = re.sub(r"\s+role$", "", clean_title(match.group(1)), flags=re.IGNORECASE)
-        if not company or is_linkedin_company_artifact(company):
-            company = clean_linkedin_company(match.group(2))
-    company = clean_linkedin_company(company)
-    return title, company
-
-
-def is_linkedin_email_job(source: SourceConfig, url: str) -> bool:
-    host = urlparse(url or "").netloc.lower()
-    haystack = "%s %s %s" % (source.id, source.name, host)
-    return "linkedin" in haystack.lower()
-
-
-def is_linkedin_company_artifact(company: str) -> bool:
-    normalized = clean_title(company).lower()
-    return " is available" in normalized or normalized.endswith(" linkedin") or normalized == "linkedin"
-
-
-def clean_linkedin_company(company: str) -> str:
-    company = clean_title(company)
-    company = re.sub(r"\s+is available(?:\s+on)?(?:\s+LinkedIn)?$", "", company, flags=re.IGNORECASE)
-    company = re.sub(r"\s+LinkedIn$", "", company, flags=re.IGNORECASE)
-    return clean_title(company)
-
-
-def filter_email_alert_jobs(source: SourceConfig, jobs: List[Job]) -> List[Job]:
-    filtered = []
-    for job in jobs:
-        if is_email_alert_noise(job.title):
-            log_context(LOGGER, logging.DEBUG, "email_alert_noise_dropped", source_id=source.id, title=job.title)
-            continue
-        filtered.append(job)
-    return filtered
-
-
-def is_email_alert_noise(title: str) -> bool:
-    normalized = clean_title(title).lower()
-    if len(normalized) < 8:
-        return True
-    return normalized == "read more" or "new jobs match" in normalized or "top job picks" in normalized
-
-
-def email_template_matches(template: Dict, sender: str, subject: str) -> bool:
-    return pattern_matches(template.get("sender_pattern", ".*"), sender) and pattern_matches(template.get("subject_pattern", ".*"), subject)
-
-
-def pattern_matches(pattern: str, value: str) -> bool:
-    try:
-        return re.search(pattern or ".*", value or "", re.IGNORECASE) is not None
-    except re.error:
-        return (pattern or "").lower() in (value or "").lower()
-
-
-def bounded_int(value, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return min(maximum, max(minimum, parsed))
-
-
-def email_links(body: str) -> List[tuple]:
-    parser = HTMLLinkExtractor()
-    try:
-        parser.feed(body or "")
-        links = [(href, text) for href, text in parser.links if href and href.startswith(("http://", "https://"))]
-        if links:
-            return links
-    except Exception:
-        pass
-    return [(url, "") for url in extract_urls(body)]
-
-
-def first_url(text: str) -> str:
-    urls = extract_urls(text)
-    return urls[0] if urls else ""
-
-
-def regex_first(pattern: Optional[str], text: str) -> str:
-    if not pattern:
-        return ""
-    try:
-        match = re.search(pattern, text or "", re.IGNORECASE | re.DOTALL)
-    except re.error:
-        return ""
-    if not match:
-        return ""
-    if match.groupdict():
-        return match.groupdict().get("title") or match.groupdict().get("company") or ""
-    return match.group(1) if match.groups() else match.group(0)
-
-
 def surrounding_text(body: str, needle: str, size: int) -> str:
     plain = strip_html(body)
     idx = plain.lower().find((needle or "").lower())
@@ -977,6 +799,220 @@ def email_body_parts(message) -> tuple:
 def email_body(message) -> str:
     html, text = email_body_parts(message)
     return "\n".join(part for part in (html, text) if part)
+
+
+def enrich_job_from_url(job_row) -> Dict:
+    url = row_get(job_row, "url")
+    snippet = row_get(job_row, "description")
+    if not url:
+        return {"description": snippet or "", "enrich_status": "skipped"}
+    try:
+        html = fetch_text(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Jobhunter/1.0)",
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            },
+            timeout=10,
+            robots_check=False,
+        )
+    except Exception as exc:
+        log_context(LOGGER, logging.WARNING, "job_enrichment_fetch_failed", url=url, error=str(exc))
+        return {"description": snippet or "", "enrich_status": "failed", "error": str(exc)}
+    fields = (
+        extract_greenhouse_job(url, html)
+        or extract_lever_job(url, html)
+        or extract_ashby_job(url, html)
+        or extract_linkedin_job(url, html)
+        or extract_generic_job_posting(html)
+        or extract_open_graph_job(html)
+    )
+    if not fields:
+        fields = {"description": strip_html(html)[:4000]}
+    if snippet and len(fields.get("description") or "") < len(snippet):
+        fields["description"] = snippet
+    fields["enrich_status"] = "enriched" if fields.get("description") else "failed"
+    return fields
+
+
+def row_get(row, key: str, default=None):
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
+
+
+def extract_greenhouse_job(url: str, html: str) -> Dict:
+    parsed = urlparse(url or "")
+    if "greenhouse.io" not in parsed.netloc.lower():
+        return {}
+    data = extract_generic_job_posting(html)
+    if data:
+        return data
+    return extract_open_graph_job(html)
+
+
+def extract_lever_job(url: str, html: str) -> Dict:
+    parsed = urlparse(url or "")
+    if "lever.co" not in parsed.netloc.lower():
+        return {}
+    data = extract_generic_job_posting(html)
+    if data:
+        return data
+    return extract_open_graph_job(html)
+
+
+def extract_ashby_job(url: str, html: str) -> Dict:
+    parsed = urlparse(url or "")
+    if "ashbyhq.com" not in parsed.netloc.lower():
+        return {}
+    data = extract_generic_job_posting(html)
+    if data:
+        return data
+    return extract_open_graph_job(html)
+
+
+def extract_linkedin_job(url: str, html: str) -> Dict:
+    parsed = urlparse(url or "")
+    if "linkedin.com" not in parsed.netloc.lower() or "/jobs/view/" not in parsed.path.lower() and "/comm/jobs/view/" not in parsed.path.lower():
+        return {}
+    patterns = [
+        r'<div[^>]+class=["\'][^"\']*description__text[^"\']*["\'][^>]*>(?P<body>.*?)</div>\s*</div>',
+        r'<div[^>]+class=["\'][^"\']*show-more-less-html__markup[^"\']*["\'][^>]*>(?P<body>.*?)</div>',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html or "", re.IGNORECASE | re.DOTALL)
+        if match:
+            description = strip_html(html_lib.unescape(match.group("body")))
+            if description:
+                return {"description": description[:4000], "remote_policy": infer_remote_policy(description), "location": infer_location(description)}
+    return extract_generic_job_posting(html) or extract_open_graph_job(html)
+
+
+def extract_generic_job_posting(html: str) -> Dict:
+    metadata = html_metadata(html)
+    for raw in metadata.ld_json:
+        for item in flatten_json_ld(raw):
+            if not is_job_posting(item):
+                continue
+            fields = {}
+            description = strip_html(str(item.get("description") or ""))
+            if description:
+                fields["description"] = description[:4000]
+                fields["remote_policy"] = infer_remote_policy(description)
+            title = clean_title(str(item.get("title") or ""))
+            if title:
+                fields["title"] = title[:180]
+            company = organization_name(item.get("hiringOrganization"))
+            if company:
+                fields["company"] = company
+            location = job_location_text(item.get("jobLocation") or item.get("applicantLocationRequirements"))
+            if location:
+                fields["location"] = location
+            salary = salary_fields(item.get("baseSalary"))
+            fields.update(salary)
+            if fields:
+                return fields
+    return {}
+
+
+def extract_open_graph_job(html: str) -> Dict:
+    metadata = html_metadata(html)
+    description = metadata.meta.get("og:description") or metadata.meta.get("description") or ""
+    title = metadata.meta.get("og:title") or metadata.meta.get("twitter:title") or ""
+    fields = {}
+    if description:
+        fields["description"] = strip_html(html_lib.unescape(description))[:4000]
+        fields["remote_policy"] = infer_remote_policy(description)
+    if title:
+        fields["title"] = clean_title(html_lib.unescape(title))[:180]
+    return fields
+
+
+def html_metadata(html: str) -> HTMLMetadataExtractor:
+    parser = HTMLMetadataExtractor()
+    try:
+        parser.feed(html or "")
+    except Exception:
+        pass
+    return parser
+
+
+def flatten_json_ld(raw: str) -> List[Dict]:
+    try:
+        parsed = json.loads(html_lib.unescape(raw))
+    except json.JSONDecodeError:
+        return []
+    items = []
+    stack = parsed if isinstance(parsed, list) else [parsed]
+    while stack:
+        item = stack.pop(0)
+        if isinstance(item, dict):
+            items.append(item)
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                stack.extend(graph)
+        elif isinstance(item, list):
+            stack.extend(item)
+    return items
+
+
+def is_job_posting(item: Dict) -> bool:
+    kind = item.get("@type") or item.get("type") or ""
+    if isinstance(kind, list):
+        return any(str(value).lower() == "jobposting" for value in kind)
+    return str(kind).lower() == "jobposting"
+
+
+def organization_name(value) -> str:
+    if isinstance(value, dict):
+        return clean_title(str(value.get("name") or ""))
+    if isinstance(value, str):
+        return clean_title(value)
+    return ""
+
+
+def job_location_text(value) -> str:
+    if isinstance(value, list):
+        return "; ".join(part for part in (job_location_text(item) for item in value) if part)[:300]
+    if not isinstance(value, dict):
+        return clean_title(str(value or ""))
+    address = value.get("address")
+    if isinstance(address, dict):
+        parts = [
+            address.get("addressLocality"),
+            address.get("addressRegion"),
+            address.get("addressCountry"),
+        ]
+        text = ", ".join(str(part) for part in parts if part)
+        if text:
+            return clean_title(text)
+    return clean_title(str(value.get("name") or value.get("address") or ""))
+
+
+def salary_fields(value) -> Dict:
+    if not isinstance(value, dict):
+        return {}
+    currency = value.get("currency") or value.get("salaryCurrency")
+    raw_value = value.get("value")
+    if isinstance(raw_value, dict):
+        min_value = parse_int(raw_value.get("minValue") or raw_value.get("min"))
+        max_value = parse_int(raw_value.get("maxValue") or raw_value.get("max"))
+        unit_currency = raw_value.get("currency") or raw_value.get("salaryCurrency")
+    else:
+        min_value = parse_int(raw_value)
+        max_value = None
+        unit_currency = None
+    fields = {}
+    if min_value is not None:
+        fields["salary_min"] = min_value
+    if max_value is not None:
+        fields["salary_max"] = max_value
+    if currency or unit_currency:
+        fields["currency"] = str(currency or unit_currency)[:12]
+    return fields
 
 
 def extract_urls(text: str) -> List[str]:

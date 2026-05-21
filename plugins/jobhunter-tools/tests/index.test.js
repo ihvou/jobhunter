@@ -18,6 +18,7 @@ const expectedToolNames = [
   "jobhunter_cover_note",
   "jobhunter_query_sql",
   "jobhunter_process_email",
+  "jobhunter_process_unparsed_emails",
   "jobhunter_list_email_alerts",
   "jobhunter_email_alert_compare",
   "leadhunter_get_more_leads",
@@ -136,8 +137,13 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   }
 
   const processEmailDescription = tools.get("jobhunter_process_email").description;
-  for (const phrase of ["Gmail Pub/Sub", "email parser", "scores"]) {
+  for (const phrase of ["Gmail Pub/Sub", "email_alert_raw", "jobhunter_process_unparsed_emails"]) {
     assert.match(processEmailDescription, new RegExp(phrase));
+  }
+
+  const processUnparsedDescription = tools.get("jobhunter_process_unparsed_emails").description;
+  for (const phrase of ["Codex-driven", "needs_extraction", "email_alert_id", "location_hint", "snippet", "remaining_unparsed_count"]) {
+    assert.match(processUnparsedDescription, new RegExp(phrase));
   }
 
   const listEmailAlertsDescription = tools.get("jobhunter_list_email_alerts").description;
@@ -276,4 +282,40 @@ test("email alert audit tools call read-only endpoints", async () => {
     "http://jobhunter-service:8765/email/alerts?limit=5&since=2026-05-20T00%3A00%3A00Z&only_unparsed=1",
     "http://jobhunter-service:8765/email/alert/compare?id=7",
   ]);
+});
+
+test("process unparsed emails supports fetch and save phases", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+    if (String(url).includes("/email/unparsed")) {
+      return jsonResponse({
+        ok: true,
+        count: 1,
+        emails: [{ id: 9, raw_html: "<a>AI PM</a>", raw_text: "" }],
+      });
+    }
+    return jsonResponse({ ok: true, saved: 1, enriched: 1, enrich_failed: 0 });
+  };
+  const tool = registeredTools().find((item) => item.name === "jobhunter_process_unparsed_emails");
+
+  const first = await tool.execute("tool-call-id", { limit: 3 });
+  assert.equal(first.details.needs_extraction, true);
+  assert.equal(first.details.emails[0].id, 9);
+
+  const second = await tool.execute("tool-call-id", {
+    extractions: [
+      {
+        email_alert_id: 9,
+        jobs: [{ title: "AI PM", company: "ExampleCo", url: "https://example.com/job", snippet: "Build AI tools." }],
+      },
+    ],
+  });
+  assert.equal(second.details.saved, 1);
+  assert.equal(second.details.enriched, 1);
+  assert.equal(calls[1].url, "http://jobhunter-service:8765/email/save_extracted_jobs");
+  assert.deepEqual(calls[1].body, {
+    email_alert_id: 9,
+    jobs: [{ title: "AI PM", company: "ExampleCo", url: "https://example.com/job", snippet: "Build AI tools." }],
+  });
 });
