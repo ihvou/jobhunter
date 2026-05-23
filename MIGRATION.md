@@ -1098,6 +1098,610 @@ No autonomous merge to main. The user merges after trajectory-based acceptance a
 
 No cron added in this phase. The interactive `Get more jobs` flow drives the pipeline. A nightly email-processing cron may be added in a later phase if interactive triggering proves insufficient.
 
+## Phase 7 — Autonomous self-improving team
+
+### Why
+
+Through Phases 1.5–6 the user and Claude operated as a two-person team: Claude reviewed code, audited data quality, proposed pivots; the user provided strategic direction, made final approvals, supplied real-world context. Phases 5–6 surfaced a pattern: most of the operational checks (audit data, spot under-extraction, notice misclassified jobs, propose scoring tightenings, draft architectural pivots) are tasks Codex can execute given clearly defined roles and tools — they don't intrinsically require a different intelligence tier, they require structure and goals.
+
+Phase 7 builds that structure as a five-agent team running on OpenClaw's existing multi-agent infrastructure. The team operates autonomously overnight; the user wakes to a single morning stakeholder report and a small queue of approval-required proposals or PR reviews. Claude remains in the loop for non-trivial code review (PRs opened by the Engineer agent come to Claude for review before merge) and occasional architectural pivots.
+
+Brutal honesty about ceilings (recorded so we don't pretend otherwise):
+
+- **Researcher in invent-strategy mode plateaus in 5–10 nights.** The Researcher agent executes against an externally-generated `input/research-playbook.local.md` that the user refreshes monthly via Claude Deep Research / ChatGPT Deep Research / similar. It does NOT invent strategy from scratch.
+- **PM is bounded by KPI signal quality.** Without enough Applied / Reached out click data, PM judgment degrades to mechanical thresholds. As click volume grows, judgment improves.
+- **Engineer handles small well-defined tasks well; medium/large refactors still require manual Codex sessions** driven by the user with Claude review. Engineer is not a replacement for those.
+- **Stakeholder oversight (the user) does not go away.** The team automates ~70-80% of tactical work. Strategic pivots, multi-week direction changes, and high-stakes config trade-offs remain user-driven. Plan to evaluate after 4–6 weeks of operation.
+
+### Layered conceptual model
+
+Three layers, with strict ownership and edit cadence:
+
+| Layer | What it is | Source of truth | Edit cadence | Edited by |
+|---|---|---|---|---|
+| **Goals** | Outcomes the system must produce (rates, quality bars, constraints) | `input/goals.local.md` | Rare (months) | User only |
+| **Working hypotheses** | Profile, ICP, scoring rules, source mix, search angles | `input/profile.local.md`, `input/icp.local.md`, `input/research-playbook.local.md`, `config/sources.local.json`, `config/scoring.local.json` | Often (weekly) | User + PM (audited) + proposals + Engineer (via tasks) |
+| **State** | DB content — jobs, leads, scores, triage outcomes, reports, tasks | SQLite | Continuous | The pipeline |
+
+The PM agent makes state move toward goals by adjusting working hypotheses. Profile and ICP are tools PM can edit, not constraints it must respect. The Goals file is the only stable anchor and is user-owned.
+
+### Team composition
+
+| Agent id | Role | Cron | Skill |
+|---|---|---|---|
+| `collector` | Run sources, persist raw inputs, extract jobs, score | every 4h (replaces `jobs-collection`) | `skills/data-collector/SKILL.md` |
+| `qa` | Detect data-quality issues; file bugs to Engineer | 05:30 UTC daily | `skills/qa/SKILL.md` |
+| `pm` | Own outcomes; orchestrate the team; edit hypotheses; stakeholder report | 06:30 UTC daily | `skills/pm/SKILL.md` |
+| `researcher` | Execute playbook angles; file Collector/Engineer tasks | 03:00 UTC daily | `skills/researcher/SKILL.md` |
+| `engineer` | Implement tasks from QA/PM/Researcher; open PRs | 04:00 UTC daily | `skills/engineer/SKILL.md` |
+
+Run order each night: Researcher (03:00) → Engineer (04:00) → Collector continues every 4h → QA (05:30) → PM (06:30, stakeholder report ends the night).
+
+### 7a. Shared agent infrastructure
+
+**DB migration (schema_version 13 → 14).** Add `migrate_v14`:
+
+- New table `agent_tasks`:
+  - `id` INTEGER PRIMARY KEY AUTOINCREMENT
+  - `from_agent` TEXT NOT NULL (one of: `collector`, `qa`, `pm`, `researcher`, `engineer`, `user`)
+  - `to_agent` TEXT NOT NULL (same enum)
+  - `kind` TEXT NOT NULL (taxonomy below)
+  - `summary` TEXT NOT NULL (≤300 chars human-readable)
+  - `payload_json` TEXT NOT NULL (kind-specific structured payload)
+  - `status` TEXT NOT NULL DEFAULT `'open'` (one of: `open`, `picked`, `completed`, `cancelled`, `needs_clarification`)
+  - `priority` INTEGER DEFAULT 50 (0-100, lower = higher priority)
+  - `created_at` TEXT NOT NULL
+  - `picked_at` TEXT (when an agent picked it)
+  - `completed_at` TEXT
+  - `result_json` TEXT (completion payload; e.g. for engineer tasks contains `{pr_url}` or `{result: "skill_only", commit_sha}`)
+  - Indexes: `(to_agent, status, priority)`, `(from_agent, created_at)`, `(kind, created_at)`
+
+- New table `agent_reports`:
+  - `id` INTEGER PRIMARY KEY AUTOINCREMENT
+  - `agent` TEXT NOT NULL (the writing agent)
+  - `report_date` TEXT NOT NULL (ISO date, YYYY-MM-DD, UTC)
+  - `summary` TEXT NOT NULL (one-paragraph summary; ≤800 chars)
+  - `details_json` TEXT (structured details, free schema per agent)
+  - `created_at` TEXT NOT NULL
+  - UNIQUE `(agent, report_date)` — one report per agent per day; re-running cron updates the existing row
+
+- Extend `agent_actions` with new status value `'applied_by_pm'`. Already covered by existing `status TEXT` column — no schema change needed; just expand the documented enum.
+
+**Task kind taxonomy** (the `agent_tasks.kind` field):
+
+| Kind | from → to | Payload shape |
+|---|---|---|
+| `qa.bug` | qa → engineer | `{source_id?, repro_steps[], expected, actual, sample_ids[]}` |
+| `qa.investigate` | pm → qa | `{question, scope, hint?}` |
+| `pm.source_degraded` | pm → researcher | `{source_id, irrelevant_rate, window_days, sample_titles[]}` |
+| `pm.coverage_gap` | pm → researcher | `{missing_segment, observation, target_sources_count}` |
+| `pm.angle_request` | pm → researcher | `{focus, reason}` |
+| `pm.priority_review` | pm → engineer | `{task_ids[], reason}` |
+| `pm.fix_for_kpi` | pm → engineer | `{kpi_name, current, target, suggested_fix?}` |
+| `researcher.new_skill` | researcher → collector | `{markdown, source_config?, angle_summary}` |
+| `researcher.new_tool` | researcher → engineer | `{description, requirements, suggested_approach, why}` |
+| `researcher.icp_proposal` | researcher → pm | `{proposed_icp_diff, evidence, conflict_with_current[]}` |
+
+Server validates `from_agent`/`to_agent` against the enum and rejects malformed `kind` strings. Unknown kinds remain as `open` so the receiving agent can choose to ignore.
+
+**Plugin tools (new):**
+
+- `jobhunter_file_task({to_agent, kind, summary, payload?, priority?})` — INSERT into `agent_tasks`. Returns `{task_id}`.
+- `jobhunter_pick_task({agent, kinds?, max_age_days?})` — SELECT the highest-priority `open` task for this agent (kind filter optional). Atomically marks status `picked` and sets `picked_at`. Returns row or `{task: null}`.
+- `jobhunter_complete_task({task_id, status, result?})` — UPDATE row; status one of `completed`, `cancelled`, `needs_clarification`. Stores `result_json`.
+- `jobhunter_write_status_report({agent, summary, details?})` — UPSERT into `agent_reports` keyed on `(agent, today_utc)`. Re-running the same agent's cron the same day updates the row.
+- `jobhunter_read_reports({agent?, since?, limit?})` — SELECT recent reports; PM reads everyone else's reports each morning via this.
+- `jobhunter_list_open_tasks({to_agent?, from_agent?, limit?})` — diagnostic surface for the user and for PM oversight.
+
+All six tools land in `plugins/jobhunter-tools/index.js` and the manifest. Existing schema constraints (`jobhunter_query_sql` SELECT-only, etc.) unchanged.
+
+**Acceptance (`Verified:` lines on the 7a commit):**
+
+- `Verified: schema_version=14; PRAGMA table_info(agent_tasks) and PRAGMA table_info(agent_reports) show expected columns.`
+- `Verified: jobhunter_file_task({to_agent:"engineer", kind:"qa.bug", summary:"test", payload:{}}) returns task_id; jobhunter_pick_task({agent:"engineer"}) returns same row with status='picked'; jobhunter_complete_task({task_id, status:"completed"}) closes it.`
+- `Verified: jobhunter_write_status_report twice in same day updates rather than inserts; jobhunter_read_reports returns the upserted row.`
+
+### 7b. Goals layer + PM v2
+
+**New file `input/goals.local.md`** (user-maintained, gitignored alongside profile/ICP). Initial template seeded by Engineer the first time PM runs and the file is missing:
+
+```
+# Outcome goals
+
+## Job search
+- Target: >=3 applications/week where I'd be net-happy if I got the interview
+- Target: >=1 interview/week from a submitted application
+- Quality bar: <=50% of digest jobs marked Irrelevant — if higher, the profile or scoring is wrong, not the world
+
+## Lead search
+- Target: >=2 leads/week I'd be net-happy reaching out to
+- Target: >=30% reply rate on actual outreach sent
+- Quality bar: <=40% of digest leads marked Irrelevant
+
+## Pipeline health
+- Coverage: >=5 distinct sources producing non-Irrelevant rows in any 7-day window
+- Latency: median email-arrival → digest <=2h
+- No silent failures: a source dark >24h should produce a stakeholder alert
+
+## Cost
+- Stay within configured OpenAI daily/monthly budget (config/jobhunter.json)
+- Firecrawl: <=30 scrapes/day across all agents combined
+
+## Constraints (non-negotiable)
+- No automated outreach. Drafts only.
+- No logged-in scraping. No browser cookies. No LinkedIn auth.
+- No impersonation.
+- No silent profile/ICP wipes — every edit lands in agent_actions with reason.
+- Stakeholder Telegram pings <=1/day under normal operation.
+```
+
+**New plugin tools (for PM):**
+
+- `jobhunter_show_goals()` → returns `{path, text, parsed:{kpis:[...], constraints:[...], exists:bool}}`. Service-side parses the markdown into a structured KPI list using a tight regex (lines under headings like `## Job search` / `## Lead search` etc.); raw text always also returned for fallback reasoning.
+- `jobhunter_kpi_snapshot({window_days?})` → SQL aggregate over `job_feedback`, `lead_feedback`, `jobs`, `leads`, `source_runs`, `usage_log`. Returns dict per KPI:
+  - `applications_this_week`: count(jobs.status='applied' AND first_seen_at >= 7d ago)
+  - `interviews_this_week`: count(job_feedback.kind IN ('interview_request','interview_scheduled') AND created_at >= 7d ago) — requires existing feedback kinds or adds new ones
+  - `reach_outs_this_week`, `replies_this_week` (analogous on leads)
+  - `irrelevant_rate_jobs_7d`, `irrelevant_rate_leads_7d`
+  - `active_sources_7d`: distinct(source_id) where any non-Irrelevant row first_seen in 7d
+  - `latency_email_to_digest_p50_minutes`: median(jobs.first_seen_at − email_alert_raw.received_at) over last 7d
+  - `openai_spend_today_usd`, `openai_spend_month_usd`
+  - `firecrawl_calls_today`: count(usage_log.task LIKE 'firecrawl%' AND created_at >= today) — requires logging firecrawl calls; covered by 7e infrastructure
+- `jobhunter_kpi_history({weeks?})` → rolling weekly aggregates of the above for trend detection. PM uses to spot "Reach-out rate stuck below target 2 weeks running".
+- `jobhunter_apply_directive_edit({text, reason})` — appends a dated bullet to the `# Directives` section of `input/profile.local.md`. Backs up the file first (same archive pattern as existing `directive_edit` action). Records an `agent_actions` row with `kind='directive_edit'`, `status='applied_by_pm'`, `result_message=reason`. Returns `{ok, archive_path, action_id}`.
+- `jobhunter_apply_icp_edit({text, reason})` — writes new ICP wholesale to `input/icp.local.md`. Same archive + audit pattern. Status `'applied_by_pm'`.
+- `jobhunter_set_source_priority({source_id, priority, reason})` — sets `sources.priority`. Audited via `agent_actions` row with `kind='source_priority_set'`.
+- `jobhunter_set_source_status({source_id, status, reason})` — sets `sources.status` (allowed values: `active`, `test`, `disabled`). Audited.
+- All four "apply" tools record audit rows that the existing `jobhunter_revert_action` can reverse.
+
+**Trust delegation policy** (decisions locked here):
+
+- `directive_edit` → PM applies directly (audited, revertible). Low stakes, additive, easy to undo.
+- `icp_edit` → PM applies directly (audited, revertible). Mid stakes, but ICP is by definition a working hypothesis we expect to iterate.
+- `profile_edit` (full `# About me` rewrite) → still gated. PM proposes via existing `propose_actions`, user approves in Telegram. High stakes — the candidate's identity declaration.
+- `scoring_rule_proposal` → still gated. Scoring is structural.
+- `sources_proposal` (adding new sources) → still gated. PM can disable directly but adding requires user approval (consistent with existing `created_by='agent'` + user-approval flow).
+- `bulk_update_jobs` archive → still gated when triggered by PM. Affects user-visible state.
+
+**PM skill content** (the SKILL.md file at `skills/pm/SKILL.md`):
+
+```
+# PM agent
+
+## Role
+Own the outcomes defined in input/goals.local.md. Direct the rest of the team
+(Collector, QA, Researcher, Engineer) by filing tasks. Adjust working
+hypotheses (profile directives, ICP, source priorities/status) when state is
+not converging toward goals. Report to the user once per day in Telegram.
+
+## Goal source of truth
+input/goals.local.md is the only valid goal definition. NEVER invent goals,
+NEVER widen scope beyond what is written. If the goals file does not exist on
+first run, file an engineer.new_tool task asking Engineer to seed the template
+and STOP for today.
+
+## Daily routine (cron: 0 6:30 * * * UTC)
+
+1. Read state:
+   - jobhunter_show_goals
+   - jobhunter_show_profile, leadhunter_show_icp
+   - jobhunter_kpi_snapshot({window_days:7})
+   - jobhunter_kpi_history({weeks:8})
+   - jobhunter_read_reports({since: today-1, agent: null})  (all agents)
+   - jobhunter_list_open_tasks({to_agent: "engineer"}), etc.
+
+2. Compare current to target per KPI. Categorize each as on-track / at-risk
+   (within 25% of failing) / failing (worse than target).
+
+3. Diagnose failing/at-risk KPIs. For each one, identify the most likely
+   working hypothesis to adjust based on the evidence in DB:
+
+   * Quality bar failing (Irrelevant rate too high)
+     → look at per-source irrelevant rate via SQL
+     → if one source dominates → set_source_status disabled + file
+       pm.source_degraded to researcher
+     → if pattern is keyword-level mismatch → apply_directive_edit (with
+       reason citing 3-5 specific misclassified jobs by id)
+     → if scoring is the wrong shape → propose scoring_rule_proposal
+       (user-gated)
+
+   * Coverage failing (<5 sources producing in 7d)
+     → file pm.coverage_gap to researcher
+     → if Researcher has unresolved task from yesterday on coverage →
+       file pm.priority_review to engineer asking to unblock
+
+   * Latency failing (email-to-digest > 2h)
+     → file qa.investigate task to investigate IMAP/cron/queue chain
+
+   * Cost failing (budget overrun)
+     → set_source_priority lower on highest-LLM-burn sources OR file
+       engineer task to reduce LLM use
+
+   * Applications/Reach-outs failing AND quality bar passing
+     → not enough volume reaching user; file pm.angle_request to researcher
+
+4. Apply direct adjustments (audited):
+   - apply_directive_edit when evidence is concrete (cite at least 3 job_ids
+     or feedback rows in the reason field)
+   - apply_icp_edit when off-ICP reached-out leads suggest ICP missing a
+     segment (cite the reached-out leads in reason)
+   - set_source_priority / set_source_status for source-level tuning
+
+5. File tasks to other agents (taxonomy in MIGRATION.md Phase 7a).
+
+6. Propose user-gated changes via jobhunter_propose_actions for scoring rule
+   changes and bulk archive operations.
+
+7. Write internal status: jobhunter_write_status_report({agent:"pm", summary,
+   details}). Details should include the structured KPI snapshot, list of
+   actions taken, list of tasks filed, list of proposals awaiting approval.
+
+8. Send stakeholder report to Telegram. ONE message, structured:
+
+   Morning stakeholder report (YYYY-MM-DD):
+
+   KPIs vs target:
+     • Applied this week: N/target [status icon]
+     • [... per KPI ...]
+
+   Actions taken overnight (audited via jobhunter_history):
+     • [audited action 1 with reason]
+     • [...]
+
+   Filed tasks:
+     • Researcher: N
+     • Engineer: M
+     • QA: K
+
+   Awaiting your approval (tap to review):
+     • Action #X: [summary]
+     • [...]
+
+   Concerns escalated:
+     • [pattern observation 1]
+     • [...]
+
+   STOP after the stakeholder send. Do not chase replies.
+
+## Tools allowed
+Reading: jobhunter_show_goals, jobhunter_show_profile, leadhunter_show_icp,
+jobhunter_kpi_snapshot, jobhunter_kpi_history, jobhunter_query_sql,
+jobhunter_read_reports, jobhunter_list_open_tasks, jobhunter_history,
+jobhunter_list_email_alerts, jobhunter_email_alert_compare.
+Direct action (audited): jobhunter_apply_directive_edit,
+jobhunter_apply_icp_edit, jobhunter_set_source_priority,
+jobhunter_set_source_status.
+Proposals (user-gated): jobhunter_propose_actions.
+Coordination: jobhunter_file_task, jobhunter_complete_task,
+jobhunter_write_status_report.
+Reporting: message (Telegram, stakeholder report only).
+
+NOT allowed: jobhunter_apply_action (user-only), any web/firecrawl/exa tool
+(PM does not research), any code/file-edit tool, jobhunter_save_extracted_jobs
+(Collector's job), leadhunter_save_leads (Collector's job), profile full
+rewrite via raw write.
+
+## Hard rules
+- Never invent goals — goals.local.md is authoritative.
+- Never modify code (Engineer's job).
+- Never modify scoring rules directly — always via scoring_rule_proposal.
+- Never delete jobs/leads — use status changes (all reversible).
+- Every direct action MUST include a reason field with concrete evidence
+  (cite row ids or feedback rows). Vague reasons like "looked irrelevant"
+  are forbidden.
+- Stakeholder report is the ONE Telegram message per day under normal
+  operation. Don't ping mid-day. Acceptable mid-day pings: every source
+  is dark; budget overrun is imminent; a critical task has been blocked
+  for >72h.
+```
+
+**Cron**: `30 6 * * *` UTC (replaces `jobs-rescore-on-feedback-change` cron — PM calls `jobhunter_rescore_recent_jobs` as step 1 of its routine).
+
+**Acceptance (7b commit):**
+
+- `Verified: input/goals.local.md template seeded; jobhunter_show_goals returns parsed dict with N kpis; jobhunter_kpi_snapshot returns all expected KPI keys against live DB.`
+- `Verified: jobhunter_apply_directive_edit appended dated bullet to profile.local.md; agent_actions has one new row with kind='directive_edit', status='applied_by_pm', and reason field populated; jobhunter_revert_action on that row restored the original file (verified by archive_path comparison).`
+- `Verified: jobhunter_apply_icp_edit similar round-trip works.`
+- `Verified: jobhunter_set_source_status changes sources.status with audit row; jobhunter_revert_action restores.`
+- `Verified: pm agent registered in agents.list; cron 'pm-stakeholder' installed; manual `./bin/openclaw cron-run pm-stakeholder` (or equivalent) produces one Telegram stakeholder report and one agent_reports row.`
+
+### 7c. QA + Researcher
+
+**QA skill** (`skills/qa/SKILL.md`):
+
+```
+# QA agent
+
+## Role
+Detect when collected data doesn't match what's at the source. File bugs to
+Engineer or PM. Don't fix anything yourself.
+
+## Daily routine (cron: 30 5 * * * UTC)
+
+1. Deterministic audit: jobhunter_audit_email_extraction({days:7,
+   threshold:0.5, min_expected:3, unmark:true}).
+
+2. Spot-check 5 randomly sampled new jobs per active source from last 24h:
+   - Get (id, url, title, company, description) via jobhunter_query_sql
+   - firecrawl_scrape(url) — read actual page
+   - Compare: extraction vs source. If description < 300 chars but page has
+     a full job posting, flag.
+   - If >=2 of 5 samples per source mismatch → jobhunter_file_task(
+     {to_agent:"engineer", kind:"qa.bug", payload:{...}, summary})
+
+3. Sanity-check L2 verdicts: query for jobs with l2_score>70 AND
+   length(description)<200. If found → file engineer task for "require min
+   description length before L2 runs".
+
+4. Pick any pm.investigate tasks → execute the investigation, report results
+   via jobhunter_complete_task with structured result_json. Mostly these
+   will be latency or coverage investigations requiring SQL drilling.
+
+5. jobhunter_write_status_report. Silent on Telegram unless a CRITICAL bug
+   (whole source pipeline broken across all sources).
+
+## Tools allowed
+jobhunter_audit_email_extraction, jobhunter_email_alert_compare,
+jobhunter_unmark_email_parsed, jobhunter_query_sql, firecrawl_scrape,
+web_fetch, jobhunter_pick_task, jobhunter_complete_task, jobhunter_file_task,
+jobhunter_write_status_report.
+
+## Hard rules
+- Don't fix anything (Engineer's job)
+- Don't propose scoring changes (PM's job)
+- Don't propose source changes (PM's job)
+```
+
+**Researcher skill** (`skills/researcher/SKILL.md`):
+
+```
+# Researcher agent
+
+## Role
+Execute against input/research-playbook.local.md to keep the pipeline
+supplied with fresh angles. Validate angles before filing tasks. NEVER
+invent strategy from scratch — playbook is authoritative.
+
+## Daily routine (cron: 0 3 * * * UTC)
+
+1. Read input/research-playbook.local.md via jobhunter_show_research_playbook
+   (NEW tool). If file missing or empty → file engineer.new_tool task asking
+   to seed a template + write status report and STOP for tonight.
+
+2. Read recent angles tried: jobhunter_history({limit:30, kind_filter:
+   "lead_research"}) for the last 14 nights. Avoid repeating recent angles.
+
+3. Read pending tasks: jobhunter_pick_task({agent:"researcher"}).
+   pm.source_degraded / pm.coverage_gap / pm.angle_request override playbook
+   rotation tonight.
+
+4. Pick ONE unexplored angle from playbook (or task focus).
+
+5. Check ICP conflict: read leadhunter_show_icp. If the angle requires
+   widening the ICP segment definition → DO NOT proceed; instead file
+   researcher.icp_proposal to PM with the conflict noted + evidence why
+   widening might be productive. Complete tonight's run there.
+
+6. Bounded execution: <=8 firecrawl_search + <=5 firecrawl_scrape +
+   <=10 web_search calls TONIGHT to validate the angle. Find 1-3
+   representative candidates. DO NOT save them yet.
+
+7. Decision branch:
+   - Angle executable with current Collector tools (existing source types)
+     → file researcher.new_skill task to Collector with markdown describing
+     the new search approach
+   - Angle needs new tooling → file researcher.new_tool task to Engineer
+     with description, requirements, suggested approach
+
+8. jobhunter_write_status_report. Silent on Telegram.
+
+## Tools allowed
+jobhunter_show_research_playbook (NEW), jobhunter_show_profile,
+leadhunter_show_icp, jobhunter_history, jobhunter_query_sql,
+firecrawl_search, firecrawl_scrape, exa, web_search, web_fetch,
+jobhunter_pick_task, jobhunter_complete_task, jobhunter_file_task,
+jobhunter_write_status_report.
+
+## Hard rules
+- Never invent angles outside the playbook (except for PM source_degraded
+  tasks where the explicit ask is to find an alternative).
+- Never save leads/jobs (Collector's job).
+- Never write code (Engineer's job).
+- Always file a task — don't try to execute end-to-end yourself.
+```
+
+**New tool: `jobhunter_show_research_playbook`** — reads `input/research-playbook.local.md`. Returns `{path, text, exists}`. Service-side helper, no parsing.
+
+**New input file**: `input/research-playbook.local.md` — user-maintained, gitignored. Initial template seeded by Engineer the first time Researcher runs and the file is missing:
+
+```
+# Research playbook
+# Refresh ~monthly via external deep-research tools (Claude Deep Research,
+# ChatGPT Deep Research, etc.). Researcher executes against this; do not
+# expect Researcher to invent new entries on its own.
+
+## Industry verticals worth hunting (lead-side)
+- Healthcare admin: bills, prior auth, scheduling
+- Legal ops: contract review, compliance workflows
+- Compliance: SOC2/ISO/audit automation
+- Financial operations: AP/AR, reconciliation, fraud
+- Manufacturing/supply chain: RFQ, supplier ops
+- Construction: bid/RFI/design coordination
+- HR/recruiting ops: ATS automation, screening
+
+## Funding stages
+- Pre-seed (under $1M raised) — most product-builder demand
+- Recently angel-funded — operator+builder gap
+- Just-graduated YC/accelerator batches — distribution wedge
+
+## Discovery channels
+- Recent YC batches (filter: B2B + AI)
+- ProductHunt last 30 days (filter: AI + B2B + workflow)
+- AngelList recently funded (filter: <$2M, B2B)
+- Niche newsletters: <list>
+- Founder hiring posts on X / LinkedIn (signals: "looking for founding PM")
+- Communities: <list>
+- Accelerators other than YC: SignalFire, Sequoia Scout, On Deck
+
+## Founder background filters
+- Technical founders building agentic workflow tools
+- Ex-FAANG building B2B AI
+- Domain-expert founders without product muscle
+- Designer-founders shipping AI products
+- Second-time founders in vertical software
+
+## Job-side angles
+- Founding PM at AI-native startups
+- Embedded/fractional product builder roles
+- AI implementation specialist roles (not generic PM)
+
+## (Refresh notes)
+- Last refreshed: <date> from <source>
+- Next refresh due: <date>
+```
+
+**Acceptance (7c commit):**
+
+- `Verified: qa agent + researcher agent registered in agents.list; SKILL.md files live in skills/qa and skills/researcher.`
+- `Verified: jobhunter_show_research_playbook returns text content of seeded file.`
+- `Verified: manual cron-run of qa agent files 0-N tasks based on current DB state; manual cron-run of researcher with seeded playbook files 1 task (either researcher.new_skill or researcher.new_tool).`
+- `Verified: tasks land in agent_tasks with correct from_agent/to_agent/kind/payload_json.`
+
+### 7d. Engineer + writable workspace + git/gh
+
+**Critical security note.** This sub-phase introduces the only NON-read-only path in our gateway. Engineer needs to write code and push to GitHub. Real surface change; merits its own threat model paragraph.
+
+**Workspace setup:**
+
+- Mount a separate writable workspace at `/workspace` in the gateway container. NOT `/opt/jobhunter` (which stays read-only).
+- `/workspace` is a fresh `git clone` of the repo, owned by `node` user.
+- At gateway startup or via `./bin/openclaw ensure-engineer-workspace` (NEW launcher subcommand): if `/workspace/.git` missing, clone from origin; if present, `git fetch && git reset --hard origin/main`.
+- Engineer's codex-home has `--sandbox workspace-write` (not the default `read-only`). Apply via per-agent codex-home `config.toml` override.
+
+**Auth:**
+
+- New env var `GITHUB_PAT` (Personal Access Token with `repo` scope) in `docker-compose.yml`, defaults empty.
+- If empty, Engineer agent runs but skips PR creation (skill-only changes still work via direct push to `main` — also requires auth).
+- Token mounted into Engineer's codex-home env, NOT global gateway env. Other agents do not see it.
+- `gh auth login --with-token` runs at workspace setup using the PAT.
+
+**Engineer skill** (`skills/engineer/SKILL.md`):
+
+```
+# Engineer agent
+
+## Role
+Implement tasks from QA, PM, Researcher. Open PRs that survive human review.
+Never auto-merge. Stay in the /workspace directory.
+
+## Workspace
+- Writable workspace: /workspace (full git clone, gh CLI authed)
+- Production mount: /opt/jobhunter (read-only — DO NOT touch)
+- All work happens in /workspace. Never edit /opt/jobhunter.
+
+## Daily routine (cron: 0 4 * * * UTC)
+
+1. cd /workspace; git fetch origin; git checkout main; git reset --hard
+   origin/main. Ensures clean starting state.
+
+2. jobhunter_pick_task({agent:"engineer", max_age_days:7}). Priority order:
+   qa.bug > researcher.new_tool > pm.priority_review > pm.fix_for_kpi.
+
+3. If no task: write empty status report and exit silently.
+
+4. Read task payload thoroughly. If requirements unclear → complete task as
+   needs_clarification with specific questions in result_json + write status
+   report flagging the blocked task. Do NOT guess.
+
+5. Decide implementation path:
+   - SKILL-ONLY change (instructions for Collector, new SKILL.md file, no
+     code, no tests): write markdown to skills/data-collector/extra-
+     instructions/<slug>.md, commit, push to main directly. NO PR.
+   - CODE change: branch from main as engineer/<task-id>-<short-slug>.
+     Implement. Write or update tests. Run full test suite. If passes,
+     commit, push, open GitHub PR via `gh pr create`. PR body MUST include:
+       * link to originating task (jobhunter task id)
+       * what changed and why
+       * test results
+       * "Security-review-needed:" line if touching agent_actions.py,
+         bin/openclaw, Dockerfile, security config, or workspace permissions.
+
+6. Mandatory pre-push checks for code changes (any fail = abort + retry):
+   - PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest
+     discover -s tests
+   - cd plugins/jobhunter-tools && node --test tests/index.test.js
+   - docker compose --profile openclaw config --quiet
+   If any fails, do NOT push. Investigate, fix, retest.
+
+7. jobhunter_complete_task({task_id, status:"completed", result:{
+   pr_url? or "skill_only_push_sha":..., summary}}).
+
+8. jobhunter_write_status_report. Silent on Telegram unless open PR count
+   >3 (then ping user with PR list).
+
+## Tools allowed
+Read, Edit, Write, Bash (within /workspace only), Grep, Glob,
+jobhunter_pick_task, jobhunter_complete_task, jobhunter_write_status_report,
+jobhunter_query_sql (SELECT, read-only research), firecrawl_search,
+firecrawl_scrape (for understanding third-party APIs/docs).
+
+## Hard rules
+- Workspace is /workspace ONLY. Never touch /opt/jobhunter or any path
+  outside /workspace.
+- Never merge own PRs (`gh pr merge` is FORBIDDEN). User merges manually
+  with Claude review.
+- Never push to main for code changes. Only allowed direct-push: skill-only
+  markdown under skills/<role>/extra-instructions/.
+- Never modify production DB.
+- Never disable existing tests. Tests must pass before push.
+- Never bypass auth, secret handling, or sandbox config.
+- For PRs touching jobhunter/agent_actions.py, bin/openclaw, security
+  config, or Dockerfile: include "Security-review-needed:" line in PR body.
+- Each completed task must have either a PR URL or a "skill_only_push_sha"
+  result. No completion without an artifact.
+```
+
+**New launcher subcommand**: `./bin/openclaw ensure-engineer-workspace` — clone or reset `/workspace` inside the gateway container. Idempotent. Called by `./bin/openclaw onboard` if `GITHUB_PAT` is set; manual otherwise.
+
+**Acceptance (7d commit):**
+
+- `Verified: ./bin/openclaw ensure-engineer-workspace produced fresh /workspace with .git directory; gh auth status inside the gateway shows authenticated when GITHUB_PAT set; engineer codex-home config.toml shows sandbox=workspace-write.`
+- `Verified: manual cron-run of engineer agent with one synthetic qa.bug task results in either: (a) a PR opened on origin matching engineer/<task-id>-* branch with required body fields, OR (b) a skill_only commit pushed to main, depending on task shape. Cycle completes within timeout. Task marked completed with PR URL or commit SHA.`
+- `Verified: engineer DOES NOT push to main for code changes; verified by inspecting `git log origin/main --since=cron-run-start` shows only skill-only commits.`
+- `Verified: with GITHUB_PAT unset, engineer runs without crashing and either defers PR-needing tasks or completes skill-only tasks.`
+
+### 7e. Branch + verification policy
+
+Branch: `codex/phase-7-autonomous-team` off `main` at the latest `phase-6-passed-*` (or its successor).
+
+Four atomic sub-phase commits (7a, 7b, 7c, 7d). Each commit message includes `Verified:` lines per its acceptance criteria. No autonomous merge to main. The user merges after trajectory-based acceptance, tags as `phase-7-passed-<date>`.
+
+Phase 7 acceptance is the most multi-faceted yet. Recommended user verification:
+
+1. **Phase 7a alone**: tasks/reports tables and tools work end-to-end. Manually file/pick/complete a synthetic task.
+2. **Phase 7b alone**: PM cron runs nightly for 3-5 nights with PRE-EXISTING profile/ICP unchanged. Verify the stakeholder report makes sense; verify any direct edits PM made are revertible.
+3. **Phase 7c alone**: QA cron runs nightly with PRE-EXISTING data. Verify bugs filed are real, not spurious. Researcher runs nightly with PRE-EXISTING playbook. Verify angle picks vary night-to-night.
+4. **Phase 7d alone**: Engineer cron picks ONE synthetic task; produces PR; user reviews PR before merge. Verify the security guards hold (no main push of code; no merge of own PR; tests pass before push).
+5. **Full integration**: all 5 agents running for 2 weeks. Tune from observed behavior.
+
+### Hard limits — what's NOT in scope for Phase 7
+
+- Engineer doing major architectural refactors autonomously. Engineer is for small well-defined tasks (new parser for source X, add a column, write a skill update). Anything touching multiple files in `jobhunter/app.py` or core service shape goes to manual Codex sessions you trigger, with Claude review.
+- Researcher inventing strategy from scratch. Playbook is authoritative.
+- PM modifying scoring rules directly. Scoring stays user-gated.
+- PM full profile (`about_me`) rewrites. Stay user-gated.
+- Auto-merging PRs. Engineer never has merge authority.
+- Auto-applying user-gated proposals (scoring, sources_proposal, profile_edit, bulk_update_jobs). User taps Approve.
+- Multi-user. This is single-stakeholder; the user IS the human in the loop.
+
+### External setup the user must complete before/after Phase 7 lands
+
+1. **Create `input/goals.local.md`** from the template. The first PM run will block on this; Engineer can seed a template via a self-task if the user prefers Engineer to bootstrap.
+2. **Create `input/research-playbook.local.md`** from the template. Engineer can seed; user must hand-refine within a week or so to match real targeting.
+3. **Generate a GitHub PAT** with `repo` scope and add to `.env` as `GITHUB_PAT=...`. Without this Engineer cannot open PRs; skill-only changes still work because they push to `main` which a PAT-authed deploy key also handles.
+4. **Decide trust delegation**: confirm the policy table above (PM applies directive_edit + icp_edit + source priority/status directly; everything else gated). Lock or amend before merging Phase 7.
+5. **Plan to evaluate after 4–6 weeks.** Concrete checkpoint: does the morning stakeholder report consistently surface useful insight you'd otherwise dig out yourself? If yes, consider expanding Engineer scope. If no, prune which roles or routines stop adding value.
+
 ## Security configuration (mandatory)
 
 OpenClaw's default is FULL host access for main session. We override to match-or-exceed our current safety.
