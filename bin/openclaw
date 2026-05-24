@@ -23,8 +23,9 @@ Commands:
   set-keyboard  Apply the persistent Telegram 2x2 reply keyboard
   reset-sessions  Clear cached Telegram direct sessions for fresh tool prompts
   set-thinking [<level>]  Set Codex model_reasoning_effort across all agents (default: high)
+  ensure-engineer-workspace  Prepare /workspace clone and Engineer Codex sandbox
   watchdog [--auto]  Detect Telegram sessions wedged in "processing" state and (with --auto) reset them
-  cron-install  Register the Phase 4 OpenClaw cron jobs
+  cron-install  Register the OpenClaw cron jobs
   cron-list     List OpenClaw cron jobs
   doctor    Run OpenClaw doctor inside the gateway image
   migrate-codex  Run OpenClaw Codex auth migration inside the gateway image
@@ -272,6 +273,118 @@ set_thinking() {
   fi' sh "$level"
 }
 
+read_github_pat() {
+  if [ -n "${GITHUB_PAT:-}" ]; then
+    printf "%s" "$GITHUB_PAT"
+    return 0
+  fi
+  if [ ! -f "$ROOT/.env" ]; then
+    return 0
+  fi
+  python3 - "$ROOT/.env" <<'PY'
+import shlex
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    for raw in handle:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if not line.startswith("GITHUB_PAT="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if not value:
+            break
+        try:
+            parts = shlex.split(value, comments=False, posix=True)
+        except ValueError:
+            parts = []
+        print(parts[0] if parts else value.strip("\"'"))
+        break
+PY
+}
+
+ensure_engineer_workspace() {
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker exec -u root openclaw-gateway sh -c %q\n' 'mkdir -p /workspace && chown -R node:node /workspace'
+    printf '+ docker exec -i openclaw-gateway sh -c %q < ensure-engineer-workspace-script\n' 'sh -s'
+    return 0
+  fi
+  local github_pat
+  local docker_exec=(docker exec -i)
+  github_pat="$(read_github_pat)"
+  docker exec -u root openclaw-gateway sh -c 'mkdir -p /workspace && chown -R node:node /workspace'
+  if [ -n "$github_pat" ]; then
+    docker_exec+=(-e "GITHUB_PAT=$github_pat")
+  fi
+  docker_exec+=(openclaw-gateway sh -s)
+  "${docker_exec[@]}" <<'SH'
+set -eu
+workspace=/workspace
+repo_ro=/opt/jobhunter
+remote_url="$(git -C "$repo_ro" config --get remote.origin.url 2>/dev/null || printf '%s' 'https://github.com/ihvou/jobhunter.git')"
+
+mkdir -p "$workspace"
+if [ ! -d "$workspace/.git" ]; then
+  rmdir "$workspace" 2>/dev/null || true
+  if ! git clone "$remote_url" "$workspace"; then
+    git clone "$repo_ro" "$workspace"
+    git -C "$workspace" remote set-url origin "$remote_url" || true
+  fi
+else
+  git -C "$workspace" remote set-url origin "$remote_url" || true
+  git -C "$workspace" fetch origin || true
+  if git -C "$workspace" rev-parse --verify origin/main >/dev/null 2>&1; then
+    git -C "$workspace" checkout main >/dev/null 2>&1 || git -C "$workspace" checkout -B main
+    git -C "$workspace" reset --hard origin/main
+  fi
+fi
+
+if [ -n "${GITHUB_PAT:-}" ]; then
+  if command -v gh >/dev/null 2>&1; then
+    printf '%s\n' "$GITHUB_PAT" | gh auth login --with-token >/dev/null 2>&1 || true
+    gh auth setup-git >/dev/null 2>&1 || true
+    gh auth status || true
+  else
+    echo "gh CLI is not installed; Engineer can prepare workspace but cannot open PRs" >&2
+  fi
+else
+  echo "GITHUB_PAT unset; Engineer will defer PR-needing tasks"
+fi
+
+codex_home=/home/node/.openclaw/agents/engineer/agent/codex-home
+mkdir -p "$codex_home"
+config="$codex_home/config.toml"
+touch "$config"
+if grep -q '^sandbox = ' "$config"; then
+  sed -i 's/^sandbox = .*/sandbox = "workspace-write"/' "$config"
+else
+  printf '\nsandbox = "workspace-write"\n' >> "$config"
+fi
+if grep -q '^approval_policy = ' "$config"; then
+  sed -i 's/^approval_policy = .*/approval_policy = "on-request"/' "$config"
+else
+  printf 'approval_policy = "on-request"\n' >> "$config"
+fi
+echo "engineer workspace ready: $(git -C "$workspace" rev-parse --show-toplevel 2>/dev/null || echo "$workspace")"
+SH
+}
+
+maybe_ensure_engineer_workspace() {
+  if [ "$DRY_RUN" = "1" ]; then
+    ensure_engineer_workspace
+    return 0
+  fi
+  if [ -n "$(read_github_pat)" ]; then
+    ensure_engineer_workspace
+  else
+    printf "Engineer workspace not initialized automatically because GITHUB_PAT is unset in the shell and .env. Run './bin/openclaw ensure-engineer-workspace' when ready.\n"
+  fi
+}
+
 watchdog() {
   # Detect Telegram direct sessions where the trajectory file hasn't been written
   # for WATCHDOG_STALE_SECONDS (default 21600 = 6h). OpenClaw 2026.5.7 occasionally
@@ -394,7 +507,29 @@ patch_jobhunter_openclaw_config() {
       { "id": "collector", "name": "Jobhunter Collector", "skills": ["data-collector"] },
       { "id": "qa", "name": "Jobhunter QA", "skills": ["qa"] },
       { "id": "pm", "name": "Jobhunter PM", "skills": ["pm"] },
-      { "id": "researcher", "name": "Jobhunter Researcher", "skills": ["researcher"] }
+      { "id": "researcher", "name": "Jobhunter Researcher", "skills": ["researcher"] },
+      {
+        "id": "engineer",
+        "name": "Jobhunter Engineer",
+        "skills": ["engineer"],
+        "workspace": "/workspace",
+        "tools": {
+          "profile": "coding",
+          "alsoAllow": ["jobhunter-tools", "web_search", "web_fetch", "firecrawl", "exa"],
+          "deny": ["group:automation"],
+          "exec": {
+            "host": "gateway",
+            "security": "allowlist",
+            "ask": "always",
+            "safeBins": ["git", "gh", "python3", "node", "npm"],
+            "timeoutSec": 1200,
+            "applyPatch": { "enabled": true, "workspaceOnly": true }
+          },
+          "fs": { "workspaceOnly": true },
+          "elevated": { "enabled": false }
+        },
+        "sandbox": { "mode": "off", "workspaceAccess": "rw", "workspaceRoot": "/workspace" }
+      }
     ]
   },
   "plugins": {
@@ -527,6 +662,13 @@ install_cron_jobs() {
     "none" \
     "QA routine: run jobhunter_audit_email_extraction, inspect suspicious recent rows with SELECT-only SQL, file qa.bug tasks with sample ids for real bugs, complete one qa.investigate task if present, and write jobhunter_write_status_report."
   cron_upsert_agent_job \
+    "engineer-nightly" \
+    "0 4 * * *" \
+    "engineer" \
+    "3600" \
+    "none" \
+    "Engineer routine: work only in /workspace, pick one engineer task, create an engineer/<task-id>-<slug> branch for any change, run tests, push the branch, open a PR with evidence, complete the task with pr_url, and never push or merge main. If gh auth is unavailable, mark PR-needing tasks needs_clarification."
+  cron_upsert_agent_job \
     "pm-stakeholder" \
     "30 6 * * *" \
     "pm" \
@@ -606,6 +748,28 @@ print_config() {
         id: "researcher",
         name: "Jobhunter Researcher",
         skills: ["researcher"]
+      },
+      {
+        id: "engineer",
+        name: "Jobhunter Engineer",
+        skills: ["engineer"],
+        workspace: "/workspace",
+        tools: {
+          profile: "coding",
+          alsoAllow: ["jobhunter-tools", "web_search", "web_fetch", "firecrawl", "exa"],
+          deny: ["group:automation"],
+          exec: {
+            host: "gateway",
+            security: "allowlist",
+            ask: "always",
+            safeBins: ["git", "gh", "python3", "node", "npm"],
+            timeoutSec: 1200,
+            applyPatch: { enabled: true, workspaceOnly: true }
+          },
+          fs: { workspaceOnly: true },
+          elevated: { enabled: false }
+        },
+        sandbox: { mode: "off", workspaceAccess: "rw", workspaceRoot: "/workspace" }
       }
     ]
   },
@@ -739,6 +903,7 @@ case "${1:-help}" in
     patch_jobhunter_openclaw_config
     remove_codex_mcp_jobhunter
     set_thinking high
+    maybe_ensure_engineer_workspace
     set_keyboard
     if install_cron_jobs; then
       printf "\nOnboarding finished. Jobhunter OpenClaw plugin, skills, Telegram, Codex runtime, and cron jobs are configured.\n"
@@ -763,6 +928,9 @@ case "${1:-help}" in
   set-thinking)
     shift
     set_thinking "${1:-high}"
+    ;;
+  ensure-engineer-workspace)
+    ensure_engineer_workspace
     ;;
   watchdog)
     shift

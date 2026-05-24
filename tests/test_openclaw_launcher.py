@@ -31,6 +31,7 @@ class OpenClawLauncherTests(unittest.TestCase):
             "doctor",
             "migrate-codex",
             "config",
+            "ensure-engineer-workspace",
         ):
             self.assertIn(command, result.stdout)
 
@@ -56,6 +57,10 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn('sandbox: "read-only"', result.stdout)
         self.assertIn("/opt/jobhunter/plugins/jobhunter-tools", result.stdout)
         self.assertIn('"jobhunter-tools"', result.stdout)
+        self.assertIn('id: "engineer"', result.stdout)
+        self.assertIn('workspace: "/workspace"', result.stdout)
+        self.assertIn('security: "allowlist"', result.stdout)
+        self.assertIn('safeBins: ["git", "gh", "python3", "node", "npm"]', result.stdout)
 
     def test_onboard_dry_run_uses_docker_gateway(self):
         result = self.run_launcher("onboard", env={"OPENCLAW_DRY_RUN": "1"})
@@ -72,8 +77,40 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("jobhunter_rescore_recent_jobs", result.stdout)
         self.assertIn("leadhunter", result.stdout)
         self.assertIn("mcp remove jobhunter", result.stdout)
+        self.assertIn("ensure-engineer-workspace-script", result.stdout)
         self.assertNotIn("jobhunter.openclaw_mcp", result.stdout)
         self.assertNotIn("default_tools_approval_mode", result.stdout)
+
+    def run_openclaw_dry_run(self, *args):
+        env = os.environ.copy()
+        env["OPENCLAW_DRY_RUN"] = "1"
+        return subprocess.run(
+            [str(LAUNCHER), *args],
+            cwd=str(ROOT),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+
+    def test_cron_install_declares_phase7_agents(self):
+        out = self.run_openclaw_dry_run("cron-install")
+        self.assertIn("--name jobs-collection", out)
+        self.assertIn("--agent collector", out)
+        self.assertIn("--name researcher-nightly", out)
+        self.assertIn("--agent researcher", out)
+        self.assertIn("--name qa-nightly", out)
+        self.assertIn("--agent qa", out)
+        self.assertIn("--name engineer-nightly", out)
+        self.assertIn("--agent engineer", out)
+        self.assertIn("--name pm-stakeholder", out)
+        self.assertIn("--agent pm", out)
+        self.assertNotIn("jobs-discovery-monthly", out)
+        self.assertNotIn("email-audit-nightly", out)
+
+    def test_engineer_workspace_dry_run_is_available(self):
+        out = self.run_openclaw_dry_run("ensure-engineer-workspace")
+        self.assertIn("ensure-engineer-workspace-script", out)
 
 
 if __name__ == "__main__":

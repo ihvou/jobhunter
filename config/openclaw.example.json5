@@ -92,6 +92,28 @@
         name: "Jobhunter Researcher",
         skills: ["researcher"],
       },
+      {
+        id: "engineer",
+        name: "Jobhunter Engineer",
+        skills: ["engineer"],
+        workspace: "/workspace",
+        tools: {
+          profile: "coding",
+          alsoAllow: ["jobhunter-tools", "web_search", "web_fetch", "firecrawl", "exa"],
+          deny: ["group:automation"],
+          exec: {
+            host: "gateway",
+            security: "allowlist",
+            ask: "always",
+            safeBins: ["git", "gh", "python3", "node", "npm"],
+            timeoutSec: 1200,
+            applyPatch: { enabled: true, workspaceOnly: true },
+          },
+          fs: { workspaceOnly: true },
+          elevated: { enabled: false },
+        },
+        sandbox: { mode: "off", workspaceAccess: "rw", workspaceRoot: "/workspace" },
+      },
     ],
   },
   plugins: {

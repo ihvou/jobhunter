@@ -1580,9 +1580,9 @@ jobhunter_write_status_report.
 
 **Auth:**
 
-- New env var `GITHUB_PAT` (Personal Access Token with `repo` scope) in `docker-compose.yml`, defaults empty.
-- If empty, Engineer agent runs but skips PR creation (skill-only changes still work via direct push to `main` — also requires auth).
-- Token mounted into Engineer's codex-home env, NOT global gateway env. Other agents do not see it.
+- New env var `GITHUB_PAT` (Personal Access Token with `repo` scope) in `.env` or the shell running `./bin/openclaw ensure-engineer-workspace`.
+- If empty, Engineer agent runs but skips PR creation and marks PR-needing tasks `needs_clarification`.
+- `./bin/openclaw ensure-engineer-workspace` passes `GITHUB_PAT` only to the one setup `docker exec` process that runs `gh auth login --with-token`. The token is not added to the long-running `openclaw-gateway` Compose environment. OpenClaw 2026.5.7 does not expose a clean per-agent env mount for this, so the practical boundary is: only the Engineer agent gets a writable workspace and shell/gh tools; the other agents keep non-coding tool policies.
 - `gh auth login --with-token` runs at workspace setup using the PAT.
 
 **Engineer skill** (`skills/engineer/SKILL.md`):
@@ -1613,18 +1613,16 @@ Never auto-merge. Stay in the /workspace directory.
    needs_clarification with specific questions in result_json + write status
    report flagging the blocked task. Do NOT guess.
 
-5. Decide implementation path:
-   - SKILL-ONLY change (instructions for Collector, new SKILL.md file, no
-     code, no tests): write markdown to skills/data-collector/extra-
-     instructions/<slug>.md, commit, push to main directly. NO PR.
-   - CODE change: branch from main as engineer/<task-id>-<short-slug>.
-     Implement. Write or update tests. Run full test suite. If passes,
-     commit, push, open GitHub PR via `gh pr create`. PR body MUST include:
-       * link to originating task (jobhunter task id)
-       * what changed and why
-       * test results
-       * "Security-review-needed:" line if touching agent_actions.py,
-         bin/openclaw, Dockerfile, security config, or workspace permissions.
+5. Implementation path: every change, including skill-only markdown changes,
+   goes through a branch and PR. Branch from main as
+   engineer/<task-id>-<short-slug>. Implement. Write or update tests where
+   relevant. Run the full test suite. If passes, commit, push, open GitHub PR
+   via `gh pr create`. PR body MUST include:
+     * link to originating task (jobhunter task id)
+     * what changed and why
+     * test results
+     * "Security-review-needed:" line if touching agent_actions.py,
+       bin/openclaw, Dockerfile, security config, or workspace permissions.
 
 6. Mandatory pre-push checks for code changes (any fail = abort + retry):
    - PYTHONPYCACHEPREFIX=/private/tmp/jobhunter_pycache python3 -m unittest
@@ -1650,15 +1648,13 @@ firecrawl_scrape (for understanding third-party APIs/docs).
   outside /workspace.
 - Never merge own PRs (`gh pr merge` is FORBIDDEN). User merges manually
   with Claude review.
-- Never push to main for code changes. Only allowed direct-push: skill-only
-  markdown under skills/<role>/extra-instructions/.
+- Never push to main, including skill-only markdown changes.
 - Never modify production DB.
 - Never disable existing tests. Tests must pass before push.
 - Never bypass auth, secret handling, or sandbox config.
 - For PRs touching jobhunter/agent_actions.py, bin/openclaw, security
   config, or Dockerfile: include "Security-review-needed:" line in PR body.
-- Each completed task must have either a PR URL or a "skill_only_push_sha"
-  result. No completion without an artifact.
+- Each completed task must have a PR URL. No completion without an artifact.
 ```
 
 **New launcher subcommand**: `./bin/openclaw ensure-engineer-workspace` — clone or reset `/workspace` inside the gateway container. Idempotent. Called by `./bin/openclaw onboard` if `GITHUB_PAT` is set; manual otherwise.
@@ -1666,9 +1662,9 @@ firecrawl_scrape (for understanding third-party APIs/docs).
 **Acceptance (7d commit):**
 
 - `Verified: ./bin/openclaw ensure-engineer-workspace produced fresh /workspace with .git directory; gh auth status inside the gateway shows authenticated when GITHUB_PAT set; engineer codex-home config.toml shows sandbox=workspace-write.`
-- `Verified: manual cron-run of engineer agent with one synthetic qa.bug task results in either: (a) a PR opened on origin matching engineer/<task-id>-* branch with required body fields, OR (b) a skill_only commit pushed to main, depending on task shape. Cycle completes within timeout. Task marked completed with PR URL or commit SHA.`
-- `Verified: engineer DOES NOT push to main for code changes; verified by inspecting `git log origin/main --since=cron-run-start` shows only skill-only commits.`
-- `Verified: with GITHUB_PAT unset, engineer runs without crashing and either defers PR-needing tasks or completes skill-only tasks.`
+- `Verified: manual cron-run of engineer agent with one synthetic qa.bug task results in a PR opened on origin matching engineer/<task-id>-* branch with required body fields. Cycle completes within timeout. Task marked completed with PR URL.`
+- `Verified: engineer DOES NOT push to main, including skill-only changes; verified by inspecting `git log origin/main --since=cron-run-start` shows no Engineer commits.`
+- `Verified: with GITHUB_PAT unset, engineer runs without crashing and defers PR-needing tasks as `needs_clarification`.`
 
 ### 7e. Branch + verification policy
 
@@ -1698,7 +1694,7 @@ Phase 7 acceptance is the most multi-faceted yet. Recommended user verification:
 
 1. **Create `input/goals.local.md`** from the template. The first PM run will block on this; Engineer can seed a template via a self-task if the user prefers Engineer to bootstrap.
 2. **Create `input/research-playbook.local.md`** from the template. Engineer can seed; user must hand-refine within a week or so to match real targeting.
-3. **Generate a GitHub PAT** with `repo` scope and add to `.env` as `GITHUB_PAT=...`. Without this Engineer cannot open PRs; skill-only changes still work because they push to `main` which a PAT-authed deploy key also handles.
+3. **Generate a GitHub PAT** with `repo` scope and add to `.env` as `GITHUB_PAT=...`, then run `./bin/openclaw ensure-engineer-workspace`. Without this Engineer cannot open PRs.
 4. **Decide trust delegation**: confirm the policy table above (PM applies directive_edit + icp_edit + source priority/status directly; everything else gated). Lock or amend before merging Phase 7.
 5. **Plan to evaluate after 4–6 weeks.** Concrete checkpoint: does the morning stakeholder report consistently surface useful insight you'd otherwise dig out yourself? If yes, consider expanding Engineer scope. If no, prune which roles or routines stop adding value.
 

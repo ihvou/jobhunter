@@ -3,7 +3,7 @@ FROM ${OPENCLAW_BASE_IMAGE}
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 ca-certificates \
+    && apt-get install -y --no-install-recommends python3 ca-certificates git gh \
     && rm -rf /var/lib/apt/lists/*
 
 USER node
