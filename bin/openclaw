@@ -23,6 +23,7 @@ Commands:
   set-keyboard  Apply the persistent Telegram 2x2 reply keyboard
   reset-sessions  Clear cached Telegram direct sessions for fresh tool prompts
   set-thinking [<level>]  Set Codex model_reasoning_effort across all agents (default: high)
+  watchdog [--auto]  Detect Telegram sessions wedged in "processing" state and (with --auto) reset them
   cron-install  Register the Phase 4 OpenClaw cron jobs
   cron-list     List OpenClaw cron jobs
   doctor    Run OpenClaw doctor inside the gateway image
@@ -193,24 +194,42 @@ reset_sessions() {
   docker exec -i openclaw-gateway sh -c 'node - "$1"' sh "$chat_id" <<'NODE'
 const fs = require("node:fs");
 
+// Walk every agent's sessions.json (jobs, main, future leads/qa/pm/researcher/engineer).
+// Older versions of this script only touched agent:jobs:* and silently missed
+// agent:main:telegram:direct:* entries, leaving sessions wedged across restarts.
 const chatId = process.argv[2] || "";
-const path = "/home/node/.openclaw/agents/jobs/sessions/sessions.json";
-const prefix = "agent:jobs:telegram:direct:";
-const expected = chatId ? `${prefix}${chatId}` : "";
-const data = JSON.parse(fs.readFileSync(path, "utf8"));
+const agentsRoot = "/home/node/.openclaw/agents";
 const removed = [];
 
-for (const key of Object.keys(data)) {
-  if (!key.startsWith(prefix)) continue;
-  if (expected && key !== expected) continue;
-  removed.push(key);
-  delete data[key];
+if (!fs.existsSync(agentsRoot)) {
+  console.log("removed session keys: none (agents dir absent)");
+  process.exit(0);
 }
 
-if (removed.length) {
-  const tmp = `${path}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`);
-  fs.renameSync(tmp, path);
+for (const agent of fs.readdirSync(agentsRoot)) {
+  const sessionsPath = `${agentsRoot}/${agent}/sessions/sessions.json`;
+  if (!fs.existsSync(sessionsPath)) continue;
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(sessionsPath, "utf8"));
+  } catch (err) {
+    console.error(`skip ${sessionsPath}: ${err.message}`);
+    continue;
+  }
+  let touched = false;
+  for (const key of Object.keys(data)) {
+    if (!key.includes(":telegram:direct:")) continue;
+    const chatPart = key.split(":").pop();
+    if (chatId && chatPart !== chatId) continue;
+    removed.push(`${agent}::${key}`);
+    delete data[key];
+    touched = true;
+  }
+  if (touched) {
+    const tmp = `${sessionsPath}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`);
+    fs.renameSync(tmp, sessionsPath);
+  }
 }
 
 if (removed.length) {
@@ -251,6 +270,80 @@ set_thinking() {
     echo "set-thinking: no agent codex-home config files found (run start/onboard first)" >&2
     exit 3
   fi' sh "$level"
+}
+
+watchdog() {
+  # Detect Telegram direct sessions where the trajectory file hasn't been written
+  # for WATCHDOG_STALE_SECONDS (default 21600 = 6h). OpenClaw 2026.5.7 occasionally
+  # leaves sessions stuck in "processing" with last=embedded_run:ended for many
+  # hours after the underlying Codex turn ended cleanly. Queued user messages
+  # then pile up behind the phantom-active session and never dispatch. The fix is
+  # the same delete-from-sessions.json + restart that ./bin/openclaw reset-sessions
+  # already does; this just automates the detection.
+  local auto_mode=""
+  local stale_threshold="${WATCHDOG_STALE_SECONDS:-21600}"
+  case "${1:-}" in
+    "") ;;
+    --auto) auto_mode=1 ;;
+    *)
+      printf "watchdog: unknown arg '%s' (allowed: --auto)\n" "$1" >&2
+      return 2
+      ;;
+  esac
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker exec openclaw-gateway python3 watchdog-scan (threshold=%ss, auto=%s)\n' "$stale_threshold" "${auto_mode:-0}"
+    return 0
+  fi
+  local scan_output
+  scan_output="$(docker exec -i openclaw-gateway python3 - "$stale_threshold" <<'PY'
+import glob, json, os, sys, time
+threshold = int(sys.argv[1])
+now = time.time()
+# Walk every agent's sessions.json so we don't lock the watchdog to a single
+# agent id; today only the jobs agent exists, Phase 7 will add more.
+for sessions_path in glob.glob('/home/node/.openclaw/agents/*/sessions/sessions.json'):
+    try:
+        with open(sessions_path) as f:
+            sessions = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        continue
+    for key, sess in sessions.items():
+        if ':telegram:direct:' not in key:
+            continue
+        chat_id = key.rsplit(':', 1)[-1]
+        session_file = sess.get('sessionFile', '')
+        if not session_file:
+            continue
+        traj = session_file.replace('.jsonl', '.trajectory.jsonl')
+        if not os.path.exists(traj):
+            continue
+        age = int(now - os.path.getmtime(traj))
+        if age > threshold:
+            print(f"{chat_id}\t{age}")
+PY
+)" || true
+  if [ -z "$scan_output" ]; then
+    printf "watchdog: 0 stale sessions (threshold=%ss)\n" "$stale_threshold"
+    return 0
+  fi
+  local stale_count
+  stale_count="$(printf "%s\n" "$scan_output" | grep -c '^')"
+  printf "watchdog: %s stale Telegram session(s) detected (threshold=%ss):\n" "$stale_count" "$stale_threshold"
+  printf "%s\n" "$scan_output" | while IFS=$'\t' read -r chat_id age; do
+    [ -n "$chat_id" ] || continue
+    printf "  chat=%s age=%ss (%sh)\n" "$chat_id" "$age" "$((age / 3600))"
+  done
+  if [ -z "$auto_mode" ]; then
+    printf "(rerun with --auto to reset; or set WATCHDOG_STALE_SECONDS=<seconds> to adjust threshold)\n"
+    return 0
+  fi
+  # Reset each. Each reset_sessions call restarts the gateway, so multiple stale
+  # chats means multiple restarts — fine in practice because stale-pile-ups are rare.
+  printf "%s\n" "$scan_output" | while IFS=$'\t' read -r chat_id age; do
+    [ -n "$chat_id" ] || continue
+    printf "watchdog: auto-resetting chat=%s (age=%ss)\n" "$chat_id" "$age"
+    reset_sessions --chat "$chat_id"
+  done
 }
 
 config_patch() {
@@ -646,6 +739,10 @@ case "${1:-help}" in
   set-thinking)
     shift
     set_thinking "${1:-high}"
+    ;;
+  watchdog)
+    shift
+    watchdog "${1:-}"
     ;;
   doctor)
     shift
