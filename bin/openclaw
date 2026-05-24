@@ -640,6 +640,12 @@ cron_upsert_agent_job() {
 }
 
 install_cron_jobs() {
+  # Phase 7 retired three pre-Phase-7 crons. Remove them on every install so
+  # upgrading users don't leave orphan crons firing against retired flows.
+  # Safe to call when the crons don't exist — `cron rm` is no-op in that case.
+  for stale in jobs-rescore-on-feedback-change email-audit-nightly jobs-discovery-monthly; do
+    cron_exec rm "$stale" 2>/dev/null || true
+  done
   cron_upsert_agent_job \
     "jobs-collection" \
     "0 */4 * * *" \

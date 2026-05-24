@@ -105,8 +105,16 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("--agent engineer", out)
         self.assertIn("--name pm-stakeholder", out)
         self.assertIn("--agent pm", out)
-        self.assertNotIn("jobs-discovery-monthly", out)
-        self.assertNotIn("email-audit-nightly", out)
+        # Pre-Phase-7 crons must not be ADDED (--name with cron add). They MAY
+        # appear under `cron rm` because install_cron_jobs explicitly removes
+        # them on every install to clean up upgrading users — that's expected.
+        self.assertNotIn("--name jobs-discovery-monthly", out)
+        self.assertNotIn("--name email-audit-nightly", out)
+        self.assertNotIn("--name jobs-rescore-on-feedback-change", out)
+        # And the explicit cleanup of those three stale crons IS expected.
+        self.assertIn("cron rm jobs-rescore-on-feedback-change", out)
+        self.assertIn("cron rm email-audit-nightly", out)
+        self.assertIn("cron rm jobs-discovery-monthly", out)
 
     def test_engineer_workspace_dry_run_is_available(self):
         out = self.run_openclaw_dry_run("ensure-engineer-workspace")

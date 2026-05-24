@@ -28,13 +28,18 @@ GOALS_TEMPLATE = """# Outcome goals
 
 ## Job search
 - Target: >=3 applications/week where I'd be net-happy if I got the interview
-- Target: >=1 interview/week from a submitted application
 - Quality bar: <=50% of digest jobs marked Irrelevant
+# NOTE: interviews_this_week KPI is computed but currently reads 0 — there is
+# no Telegram surface yet to mark a job as interview_request / interview_scheduled.
+# Treat the target below as aspirational; do not act on it until the signal exists.
+- Target (aspirational): >=1 interview/week from a submitted application
 
 ## Lead search
 - Target: >=2 leads/week I'd be net-happy reaching out to
-- Target: >=30% reply rate on actual outreach sent
 - Quality bar: <=40% of digest leads marked Irrelevant
+# NOTE: replies_this_week KPI is computed but currently reads 0 — there is no
+# surface yet for recording lead replies. Treat the target below as aspirational.
+- Target (aspirational): >=30% reply rate on actual outreach sent
 
 ## Pipeline health
 - Coverage: >=5 distinct sources producing non-Irrelevant rows in any 7-day window
@@ -43,7 +48,10 @@ GOALS_TEMPLATE = """# Outcome goals
 
 ## Cost
 - Stay within configured OpenAI daily/monthly budget
-- Firecrawl: <=30 scrapes/day across all agents combined
+# NOTE: firecrawl_calls_today KPI reads 0 today — firecrawl calls happen
+# OpenClaw-side and aren't logged in jobhunter-service.usage_log. The hard
+# limit below is a documented guardrail, not currently enforced or measured.
+- Firecrawl: <=30 scrapes/day across all agents combined (documented guardrail; not yet enforced)
 
 ## Constraints (non-negotiable)
 - No automated outreach. Drafts only.
