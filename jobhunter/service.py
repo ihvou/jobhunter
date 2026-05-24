@@ -484,6 +484,89 @@ class JobHunterService:
         )
         return {"ok": True, "lead_id": lead_id, "status": status, "snoozed_until": snoozed_until or ""}
 
+    def rescore_leads(self, body: Dict) -> Dict:
+        """Re-evaluate confidence + why_match for saved leads against the CURRENT ICP.
+
+        Body params (all optional):
+        - statuses: list of lead statuses to include, default ['new', 'shortlisted']
+        - limit: cap on rows processed in one call, default 50, max 200
+        - override_budget: bool, default False — set true to force run when budget gate would block
+
+        Returns summary with per-lead deltas and biggest movers; persists via update_lead_score.
+        Each run records ONE agent_actions audit row with kind='lead_rescore' and status='applied'.
+        """
+        statuses = body.get("statuses") or ["new", "shortlisted"]
+        if not isinstance(statuses, list) or not statuses:
+            raise ServiceError(400, "statuses must be a non-empty list")
+        bad = [s for s in statuses if s not in LEAD_STATUS_VALUES]
+        if bad:
+            raise ServiceError(400, "unknown lead statuses: %s" % ", ".join(bad))
+        limit = max(1, min(int(body.get("limit") or 50), 200))
+        override_budget = bool(body.get("override_budget", False))
+
+        icp_text = read_text_if_exists(self.bot.config.icp_path)
+        if not icp_text.strip():
+            raise ServiceError(400, "Leadhunter ICP is empty — set it via icp_edit before rescoring")
+        self.bot.refresh_profile()
+        rows = self.bot.database.leads_for_rescore(statuses, limit)
+        if not rows:
+            return {"ok": True, "rescored": 0, "skipped": 0, "errors": 0, "deltas": [], "biggest_movers": [], "message": "No leads matched the requested statuses"}
+
+        deltas = []  # one entry per successfully rescored lead
+        skipped = 0
+        errors: List[str] = []
+        for row in rows:
+            previous = int(row["confidence"] or 0)
+            previous_why = (row["why_match"] or "")
+            try:
+                result = self.bot.llm.lead_score(self.bot.profile, icp_text, row, override_budget=override_budget)
+            except Exception as exc:  # LLMError, BudgetExceeded, etc.
+                errors.append("%s: %s" % (row["id"][:12], safe_log_text(exc, 160)))
+                skipped += 1
+                continue
+            if not result:
+                skipped += 1
+                continue
+            new_conf = int(result["confidence"])
+            new_why = result["why_match"]
+            if new_conf == previous and new_why.strip() == previous_why.strip():
+                # No-op update — still bump last_seen_at so user can see the rescore happened
+                self.bot.database.update_lead_score(row["id"], new_conf, new_why)
+                deltas.append({"lead_id": row["id"], "company": row["company"] or "", "person_name": row["person_name"] or "", "previous": previous, "new": new_conf, "delta": 0})
+                continue
+            self.bot.database.update_lead_score(row["id"], new_conf, new_why)
+            deltas.append({
+                "lead_id": row["id"],
+                "company": row["company"] or "",
+                "person_name": row["person_name"] or "",
+                "previous": previous,
+                "new": new_conf,
+                "delta": new_conf - previous,
+            })
+
+        biggest_movers = sorted(deltas, key=lambda d: abs(d["delta"]), reverse=True)[:5]
+        summary = {
+            "rescored": len(deltas),
+            "skipped": skipped,
+            "errors_count": len(errors),
+            "errors": errors[:5],
+            "biggest_movers": biggest_movers,
+            "statuses": statuses,
+            "limit": limit,
+        }
+        # Single audit row per run (no archive_path — rescore is not file-revertible
+        # in a meaningful way; the user would just run another rescore to change values).
+        self.bot.database.record_agent_action(
+            "rescore-leads",
+            "lead_rescore",
+            "User-requested lead rescore against current ICP",
+            "Rescored %s lead(s), %s skipped, %s errored" % (len(deltas), skipped, len(errors)),
+            summary,
+            "applied",
+            result_message="Rescored %s of %s leads against current ICP" % (len(deltas), len(rows)),
+        )
+        return {"ok": True, **summary, "checked": len(rows), "deltas": deltas}
+
     def draft_lead_pitch(self, lead_id: str, ask: str = "") -> Dict:
         lead = self.ensure_lead(lead_id)
         icp_text = read_text_if_exists(self.bot.config.icp_path)
@@ -696,6 +779,8 @@ def create_handler(app: JobHunterService):
                         single = optional_int(body.get("email_alert_id"))
                         ids = [single] if single is not None else []
                     payload = app.unmark_email_parsed(ids)
+                elif method == "POST" and path == "/leads/rescore":
+                    payload = app.rescore_leads(body)
                 elif method == "POST" and path == "/leads/digest":
                     payload = app.leads_digest(optional_int(body.get("limit")), bool(body.get("mark_sent", False)))
                 elif method == "GET" and path == "/leads/icp/show":

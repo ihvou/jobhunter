@@ -25,6 +25,7 @@ const expectedToolNames = [
   "jobhunter_unmark_email_parsed",
   "leadhunter_get_more_leads",
   "leadhunter_show_icp",
+  "leadhunter_rescore_leads",
   "leadhunter_save_leads",
   "leadhunter_add_lead_source",
   "leadhunter_mark_lead",
@@ -176,6 +177,15 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
   const showIcpDescription = tools.get("leadhunter_show_icp").description;
   for (const phrase of ["input/icp.local.md", "My ICP profile", "PERSISTENT TELEGRAM KEYBOARD"]) {
     assert.match(showIcpDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  // leadhunter_rescore_leads: regression guards ensure Codex's trigger phrases stay in the
+  // description (so 'rescore my leads' actually routes to this tool) AND that the tool is
+  // documented as auto-running after icp_edit. If either contract changes, update both the
+  // description and this list together.
+  const rescoreLeadsDescription = tools.get("leadhunter_rescore_leads").description;
+  for (const phrase of ["rescore my leads", "icp_edit", "biggest_movers", "CURRENT Leadhunter ICP", "Budget-gated"]) {
+    assert.match(rescoreLeadsDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 
   // Old leadhunter callback_data scheme (lead_shortlist/lead_reject/lead_pitch) was replaced

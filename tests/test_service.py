@@ -161,6 +161,72 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(compared["jobs"][0]["email_alert_id"], email_alert_id)
             self.assertGreater(len(compared["jobs"][0]["description"]), 100)
 
+    def test_rescore_leads_updates_confidence_and_why_match(self):
+        from jobhunter.models import Lead
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.icp_path.write_text(
+                "# Leadhunter ICP\n\nDomain-led non-technical founder, early B2B, execution gap.\n",
+                encoding="utf-8",
+            )
+            # Two leads with deliberately stale rationale (older workflow framing).
+            lead1_id, _ = bot.database.upsert_lead(Lead(
+                person_name="Alice Founder", company="Domain Co", role="Founder",
+                url="https://example.com/alice", why_match="Strong workflow automation signal",
+                confidence=80, status="new",
+            ))
+            lead2_id, _ = bot.database.upsert_lead(Lead(
+                person_name="Bob TechBuilder", company="DevTools Inc", role="Founder/CTO",
+                url="https://example.com/bob", why_match="Workflow product with engineering team",
+                confidence=72, status="new",
+            ))
+            service = JobHunterService(bot)
+
+            # Mock LLMClient.lead_score so the test doesn't require an OPENAI_API_KEY.
+            def fake_score(profile, icp, row, override_budget=False):
+                if "Domain Co" in (row["company"] or ""):
+                    return {"confidence": 85, "why_match": "Non-technical domain-led founder; ICP fit."}
+                if "DevTools" in (row["company"] or ""):
+                    return {"confidence": 30, "why_match": "Strong technical team; out of current ICP."}
+                return None
+            with mock.patch.object(bot.llm, "lead_score", side_effect=fake_score):
+                result = service.rescore_leads({"statuses": ["new"], "limit": 10})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["rescored"], 2)
+            self.assertEqual(result["skipped"], 0)
+            self.assertEqual(result["errors_count"], 0)
+            # Persisted values match the mocked scores.
+            self.assertEqual(bot.database.get_lead(lead1_id)["confidence"], 85)
+            self.assertIn("Non-technical domain-led", bot.database.get_lead(lead1_id)["why_match"])
+            self.assertEqual(bot.database.get_lead(lead2_id)["confidence"], 30)
+            self.assertIn("Strong technical team", bot.database.get_lead(lead2_id)["why_match"])
+            # Audit row was recorded with the run summary.
+            audit = bot.database.recent_agent_actions(5)
+            kinds = [row["kind"] for row in audit]
+            self.assertIn("lead_rescore", kinds)
+            # Biggest movers ordered by abs(delta); Bob (-42) outranks Alice (+5).
+            movers = result["biggest_movers"]
+            self.assertEqual(movers[0]["company"], "DevTools Inc")
+            self.assertEqual(movers[0]["delta"], -42)
+            self.assertEqual(movers[1]["company"], "Domain Co")
+
+    def test_rescore_leads_rejects_unknown_status_and_empty_icp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.icp_path.write_text("# Leadhunter ICP\n\nProvided.\n", encoding="utf-8")
+            service = JobHunterService(bot)
+            with self.assertRaises(ServiceError) as raised:
+                service.rescore_leads({"statuses": ["totally-fake-status"]})
+            self.assertEqual(raised.exception.status, 400)
+
+            bot.config.icp_path.write_text("", encoding="utf-8")
+            with self.assertRaises(ServiceError) as raised:
+                service.rescore_leads({})
+            self.assertEqual(raised.exception.status, 400)
+            self.assertIn("ICP is empty", raised.exception.message)
+
     def test_show_profile_and_icp_return_local_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot, _job_id = self.seeded_bot(tmp)

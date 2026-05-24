@@ -27,6 +27,7 @@
       "jobhunter_unmark_email_parsed",
       "leadhunter_get_more_leads",
       "leadhunter_show_icp",
+      "leadhunter_rescore_leads",
       "leadhunter_save_leads",
       "leadhunter_add_lead_source",
       "leadhunter_mark_lead",

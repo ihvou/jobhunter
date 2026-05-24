@@ -1118,6 +1118,30 @@ class Database:
                 (lead_id, status, details, utc_now_iso()),
             )
 
+    def update_lead_score(self, lead_id: str, confidence: int, why_match: str) -> None:
+        """Update a lead's confidence + why_match after rescore. Does not change status.
+        Bumps last_seen_at so the rescore is visible in queries that order by recency."""
+        with self.connection() as conn:
+            conn.execute(
+                "update leads set confidence = ?, why_match = ?, last_seen_at = ? where id = ?",
+                (max(0, min(100, int(confidence or 0))), str(why_match or ""), utc_now_iso(), lead_id),
+            )
+
+    def leads_for_rescore(self, statuses: List[str], limit: int) -> List[sqlite3.Row]:
+        """Pull leads matching the given statuses, ordered by current confidence desc.
+        Statuses default is handled by caller; this method takes the literal list."""
+        if not statuses:
+            return []
+        placeholders = ",".join("?" * len(statuses))
+        sql = (
+            "select * from leads where status in (%s) "
+            "order by confidence desc, last_seen_at desc "
+            "limit ?"
+        ) % placeholders
+        params = list(statuses) + [max(1, int(limit or 50))]
+        with self.connection() as conn:
+            return list(conn.execute(sql, params))
+
     def save_lead_draft(self, lead_id: str, draft_type: str, content: str) -> None:
         with self.connection() as conn:
             conn.execute(

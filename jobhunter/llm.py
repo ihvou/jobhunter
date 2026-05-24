@@ -266,6 +266,94 @@ Why this lead matches: %s
             return generated.strip()
         return None
 
+    def lead_score(
+        self,
+        profile: UserProfile,
+        icp_text: str,
+        lead_row,
+        override_budget: bool = False,
+    ) -> Optional[Dict]:
+        """Re-evaluate a lead's confidence and why_match against the CURRENT ICP.
+
+        Returns dict {confidence: int 0-100, why_match: str} or None on LLM
+        unavailable / budget exceeded / unparseable output. Caller persists the
+        result; this method never writes to the DB.
+        """
+        try:
+            evidence_text = lead_row["evidence_json"] or "[]"
+        except (KeyError, IndexError, TypeError):
+            evidence_text = "[]"
+        prompt = """Re-score a saved lead against the CURRENT Leadhunter ICP. Output strict JSON only.
+
+Output schema (REQUIRED — no other keys, no surrounding markdown, no code fences):
+{
+  "confidence": <integer 0-100>,
+  "why_match": "<1-3 sentence rationale, plain text, anchored ONLY in the current ICP framing>"
+}
+
+Calibration bands:
+- 90-100: textbook fit on every ICP dimension the ICP names as essential
+- 75-89: strong fit on most named dimensions, one minor gap
+- 60-74: partial fit, multiple gaps, still worth keeping in the queue
+- 40-59: weak fit, lead satisfies only one or two ICP dimensions
+- 0-39: should not be in the queue under the current ICP — recommend archive
+
+Hard rules:
+- Anchor on the CURRENT ICP only. If the ICP no longer mentions a framing
+  (e.g. "workflow automation") then DO NOT use that framing as the headline
+  reason, even if the lead's existing why_match leans on it.
+- Do not invent evidence not present in the lead row's evidence_json.
+- Do not be agreeable. If a lead is a 45/100 under the current ICP, return 45.
+- Output JSON only. No commentary. No code fences. No markdown.
+
+Candidate profile (user offering services to this lead):
+%s
+
+CURRENT Leadhunter ICP (authoritative):
+%s
+
+Lead data:
+Company: %s
+Person: %s
+Role: %s
+Existing why_match (may reflect older ICP; use only as supplementary signal):
+%s
+
+<<lead_evidence_untrusted>>
+%s
+<</lead_evidence_untrusted>>
+""" % (
+            profile_summary(profile),
+            (icp_text or "")[:4000],
+            lead_row["company"] or "",
+            lead_row["person_name"] or "",
+            lead_row["role"] or "",
+            (lead_row["why_match"] or "")[:600],
+            evidence_text[:3000],
+        )
+        generated = self.generate("lead_score", prompt, max_output_tokens=300, override_budget=override_budget)
+        if not generated:
+            return None
+        # Strict-JSON path: try direct parse, then fall back to extracted-object parse for
+        # the small percentage of times the model wraps output in stray prose despite the rule.
+        candidate = generated.strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                parsed = json.loads(extract_json_object(candidate))
+            except (json.JSONDecodeError, ValueError):
+                log_context(LOGGER, logging.WARNING, "lead_score_unparseable", preview=candidate[:200])
+                return None
+        confidence = parsed.get("confidence")
+        why_match = parsed.get("why_match")
+        if not isinstance(confidence, (int, float)):
+            return None
+        confidence = max(0, min(100, int(confidence)))
+        if not isinstance(why_match, str) or not why_match.strip():
+            return None
+        return {"confidence": confidence, "why_match": why_match.strip()}
+
     def relevance(self, profile: UserProfile, job_row) -> Dict:
         prompt = """Classify whether this job is relevant for the candidate.
 
