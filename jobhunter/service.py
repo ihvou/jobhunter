@@ -16,7 +16,7 @@ from .app import JobHunter
 from .config import load_app_config, load_sources
 from .database import tomorrow_iso
 from .logging_setup import configure_logging, log_context, safe_log_text
-from .models import Job, Lead, SourceConfig
+from .models import Job, Lead, SourceConfig, utc_now_iso
 from .scoring import load_scoring_rules, score_job
 from .sources import SourceError, count_known_job_links_in_html, enrich_job_from_url, validate_safe_url
 
@@ -501,13 +501,26 @@ class JobHunterService:
         bad = [s for s in statuses if s not in LEAD_STATUS_VALUES]
         if bad:
             raise ServiceError(400, "unknown lead statuses: %s" % ", ".join(bad))
-        limit = max(1, min(int(body.get("limit") or 50), 200))
+        # Default batch is 8 (about 24 seconds at gpt-4o-mini latency, under
+        # Codex's 30-second per-tool-call timeout). Caller can pass a larger
+        # limit if they have headroom — service caps at 200.
+        limit = max(1, min(int(body.get("limit") or 8), 200))
         override_budget = bool(body.get("override_budget", False))
 
         icp_text = read_text_if_exists(self.bot.config.icp_path)
         if not icp_text.strip():
             raise ServiceError(400, "Leadhunter ICP is empty — set it via icp_edit before rescoring")
         self.bot.refresh_profile()
+        # Wave tracking: caller passes `wave_start` from the previous call's
+        # response to continue the same wave; absent/empty means start a new
+        # wave NOW. Use microsecond precision so it sorts correctly against
+        # update_lead_score's microsecond-precise last_seen_at (ISO-8601 string
+        # comparison treats "...:00.123456Z" as LESS than "...:00Z" because
+        # "." < "Z" in ASCII — both ends of the comparison must use the same
+        # fractional format).
+        wave_start = str(body.get("wave_start") or "").strip()
+        if not wave_start:
+            wave_start = datetime.utcnow().isoformat(timespec="microseconds") + "Z"
         rows = self.bot.database.leads_for_rescore(statuses, limit)
         if not rows:
             return {"ok": True, "rescored": 0, "skipped": 0, "errors": 0, "deltas": [], "biggest_movers": [], "message": "No leads matched the requested statuses"}
@@ -545,6 +558,10 @@ class JobHunterService:
             })
 
         biggest_movers = sorted(deltas, key=lambda d: abs(d["delta"]), reverse=True)[:5]
+        # Leads still older than the wave start are not yet rescored. Codex
+        # loops by re-calling with the same wave_start until remaining=0.
+        remaining = self.bot.database.count_leads_not_yet_rescored(statuses, wave_start)
+        wave_done = remaining == 0
         summary = {
             "rescored": len(deltas),
             "skipped": skipped,
@@ -553,17 +570,20 @@ class JobHunterService:
             "biggest_movers": biggest_movers,
             "statuses": statuses,
             "limit": limit,
+            "wave_start": wave_start,
+            "remaining": remaining,
+            "wave_done": wave_done,
         }
-        # Single audit row per run (no archive_path — rescore is not file-revertible
-        # in a meaningful way; the user would just run another rescore to change values).
+        # Single audit row per BATCH (the loop produces N audit rows, one per
+        # tool call). Each row is searchable via jobhunter_history with kind=lead_rescore.
         self.bot.database.record_agent_action(
             "rescore-leads",
             "lead_rescore",
             "User-requested lead rescore against current ICP",
-            "Rescored %s lead(s), %s skipped, %s errored" % (len(deltas), skipped, len(errors)),
+            "Rescored %s lead(s), %s skipped, %s errored; remaining=%s" % (len(deltas), skipped, len(errors), remaining),
             summary,
             "applied",
-            result_message="Rescored %s of %s leads against current ICP" % (len(deltas), len(rows)),
+            result_message="Rescored %s of %s leads (wave remaining %s)" % (len(deltas), len(rows), remaining),
         )
         return {"ok": True, **summary, "checked": len(rows), "deltas": deltas}
 

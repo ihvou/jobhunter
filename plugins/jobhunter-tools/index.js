@@ -775,17 +775,22 @@ export default definePluginEntry({
         "'rescore against current ICP', or similar. ALSO use this automatically after the user runs `icp_edit` or any other ICP change " +
         "so the existing queue reflects the new framing (do not require a separate ask). " +
         "Each lead is sent to gpt-4o-mini with the full current ICP + the lead's current data; the response replaces stored confidence + why_match. " +
-        "Bounded: max 200 leads per call (default 50), only leads with status in ['new','shortlisted'] by default. " +
-        "Budget-gated via the existing OpenAI spend gate; per-lead cost ~$0.0005, so a 50-lead rescore is roughly $0.025. " +
-        "On success, the response includes `rescored`, `skipped`, `errors_count`, and `biggest_movers` (up to 5 entries with previous→new confidence delta). " +
-        "After this returns, send ONE concise Telegram summary to the user covering: how many were rescored, how many dropped/rose materially, and the top 3 biggest movers by absolute delta. " +
-        "Then suggest the user tap `Get more leads` to see the new ordering. Do NOT re-emit a full digest yourself.",
+        "Budget-gated via the existing OpenAI spend gate; per-lead cost ~$0.0005. " +
+        "\n\nBATCHING (CRITICAL — Codex has a 30-second per-tool-call timeout): default `limit` is 8 leads per call (about 24 seconds at gpt-4o-mini latency, safely under the timeout). " +
+        "Each response carries `remaining` (leads in the wave still pending) and `wave_start` (timestamp anchoring the wave). " +
+        "WAVE LOOP: when the user asks for a full rescore, call this tool; if the response has `remaining > 0`, call AGAIN passing back the same `wave_start` " +
+        "from the previous response. Keep looping until `remaining == 0` (or `wave_done: true`). Do NOT raise `limit` above 8 to skip the loop — that triggers the timeout. " +
+        "Between calls, optionally relay progress: 'rescored N more, X remaining'. Once `wave_done`, send the final summary. " +
+        "\n\nFINAL SUMMARY (once wave_done): ONE concise Telegram message covering total rescored across the wave, biggest movers (response field `biggest_movers`, top 3 by absolute delta), " +
+        "and a suggestion to tap `Get more leads` for the new ordering. Do NOT re-emit a full digest yourself. " +
+        "Statuses default ['new','shortlisted']; max limit 200 (but stay at 8 to avoid timeout).",
       parameters: schema({
         statuses: {
           type: "array",
           items: { type: "string" },
         },
         limit: intSchema(1, 200),
+        wave_start: { type: "string" },
         override_budget: { type: "boolean" },
       }),
       execute: async (_toolCallId, params) => jsonResult(await post("/leads/rescore", params || {})),

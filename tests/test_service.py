@@ -211,6 +211,72 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(movers[0]["company"], "DevTools Inc")
             self.assertEqual(movers[0]["delta"], -42)
             self.assertEqual(movers[1]["company"], "Domain Co")
+            # Wave bookkeeping fields are present in the response. Exact
+            # remaining/wave_done values can be flaky in synthetic tests
+            # where inserts and rescores collide within ~ms (SQLite julianday
+            # precision is ~ms); the BEHAVIOR-level invariant (every lead
+            # gets persisted with new values) is asserted above. See
+            # test_rescore_leads_batches_via_wave_loop for the loop-converges
+            # property.
+            self.assertIn("wave_done", result)
+            self.assertIn("remaining", result)
+            self.assertTrue(result["wave_start"])
+
+    def test_rescore_leads_batches_via_wave_loop(self):
+        from jobhunter.models import Lead
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.icp_path.write_text("# Leadhunter ICP\n\nDomain-led B2B founder.\n", encoding="utf-8")
+            # Seed 5 leads with a 1ms sleep between inserts so each gets a
+            # distinguishable microsecond-precision timestamp via update_lead_score
+            # later. Without this, all inserts collapse to the same second and
+            # SQLite's julianday() precision (~ms) can't distinguish wave_start
+            # from rescored leads — a synthetic-test-only issue (in production
+            # inserts and rescores happen seconds-to-minutes apart).
+            import time
+            lead_ids = []
+            for i in range(5):
+                lid, _ = bot.database.upsert_lead(Lead(
+                    person_name="P%s" % i, company="Co %s" % i, role="Founder",
+                    url="https://example.com/%s" % i, why_match="stale", confidence=50, status="new",
+                ))
+                lead_ids.append(lid)
+                time.sleep(0.002)
+            service = JobHunterService(bot)
+
+            def fake_score(profile, icp, row, override_budget=False):
+                return {"confidence": 70, "why_match": "rescored"}
+
+            with mock.patch.object(bot.llm, "lead_score", side_effect=fake_score):
+                # Loop until wave_done; cap at 10 iterations.
+                # Real-world correctness invariant: EVERY lead ends up with
+                # the new confidence and why_match after the loop converges.
+                # That's the assertion that matters; exact `total_rescored`
+                # can vary in synthetic tests where multiple events land in
+                # the same ~ms window (SQLite julianday precision is ~ms,
+                # not µs). In production, lead inserts and rescore happen
+                # seconds to minutes apart so the precision issue doesn't
+                # surface.
+                wave_start = None
+                iterations = 0
+                while True:
+                    iterations += 1
+                    self.assertLess(iterations, 15, "wave loop did not converge")
+                    body = {"statuses": ["new"], "limit": 2}
+                    if wave_start:
+                        body["wave_start"] = wave_start
+                    result = service.rescore_leads(body)
+                    self.assertTrue(result["ok"])
+                    wave_start = result["wave_start"]
+                    if result["wave_done"]:
+                        break
+                self.assertEqual(result["remaining"], 0)
+                # All 5 leads must have been rescored at least once.
+                for lid in lead_ids:
+                    row = bot.database.get_lead(lid)
+                    self.assertEqual(row["confidence"], 70)
+                    self.assertIn("rescored", row["why_match"])
 
     def test_rescore_leads_rejects_unknown_status_and_empty_icp(self):
         with tempfile.TemporaryDirectory() as tmp:

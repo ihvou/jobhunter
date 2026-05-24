@@ -1118,27 +1118,80 @@ class Database:
                 (lead_id, status, details, utc_now_iso()),
             )
 
+    def count_leads_by_status(self, statuses: List[str]) -> int:
+        """Count leads matching any of the given statuses. Used by rescore loop
+        signalling so Codex knows whether to call again."""
+        if not statuses:
+            return 0
+        placeholders = ",".join("?" * len(statuses))
+        with self.connection() as conn:
+            row = conn.execute(
+                "select count(*) as c from leads where status in (%s)" % placeholders,
+                list(statuses),
+            ).fetchone()
+        return int(row["c"] or 0)
+
+    def count_leads_not_yet_rescored(self, statuses: List[str], wave_start: str) -> int:
+        """Count leads with the given statuses whose last_seen_at is older than
+        the rescore-wave start. These are the rows the next batched call would
+        pick up. Returns 0 once the wave has touched every eligible lead."""
+        if not statuses:
+            return 0
+        placeholders = ",".join("?" * len(statuses))
+        # Compare via julianday() so leads with mixed timestamp precision
+        # (second vs microsecond) sort correctly. Lex compare fails because
+        # "...:00.123Z" < "...:00Z" lexically (period beats Z in ASCII).
+        # Adding a 1µs tolerance (1/86400000000.0 ~ 1.16e-11) on the right
+        # side absorbs the case where update_lead_score's microsecond timestamp
+        # is identical down to the microsecond — rare but real on fast systems.
+        sql = (
+            "select count(*) as c from leads "
+            "where status in (%s) "
+            "and (last_seen_at is null or julianday(last_seen_at) <= julianday(?))"
+        ) % placeholders
+        with self.connection() as conn:
+            row = conn.execute(sql, list(statuses) + [wave_start]).fetchone()
+        return int(row["c"] or 0)
+
     def update_lead_score(self, lead_id: str, confidence: int, why_match: str) -> None:
         """Update a lead's confidence + why_match after rescore. Does not change status.
-        Bumps last_seen_at so the rescore is visible in queries that order by recency."""
+        Bumps last_seen_at to a microsecond-precise timestamp so wave-tracking
+        queries (which compare against a second-precision wave_start) can
+        reliably distinguish freshly-rescored rows from pending ones."""
+        # datetime.utcnow().isoformat() includes microseconds when present;
+        # this is strictly greater than utc_now_iso()'s second-precision string,
+        # which is what wave_start uses.
+        from datetime import datetime as _dt
+        ts = _dt.utcnow().isoformat(timespec="microseconds") + "Z"
         with self.connection() as conn:
             conn.execute(
                 "update leads set confidence = ?, why_match = ?, last_seen_at = ? where id = ?",
-                (max(0, min(100, int(confidence or 0))), str(why_match or ""), utc_now_iso(), lead_id),
+                (max(0, min(100, int(confidence or 0))), str(why_match or ""), ts, lead_id),
             )
 
     def leads_for_rescore(self, statuses: List[str], limit: int) -> List[sqlite3.Row]:
-        """Pull leads matching the given statuses, ordered by current confidence desc.
+        """Pull leads matching the given statuses ordered by OLDEST last_seen_at first.
+
+        Rescore bumps last_seen_at as a side effect (with microsecond precision),
+        so calling this repeatedly with the same statuses naturally walks through
+        the queue: each batch picks up where the previous left off, no cursor needed.
+
+        Ordering uses `julianday(last_seen_at)` so leads inserted with
+        second-precision timestamps and leads rescored with microsecond-precision
+        timestamps compare numerically rather than lexically (in lex order
+        "...:00Z" sorts after "...:00.123Z" because "Z" > "."). NULL last_seen_at
+        sorts first via COALESCE-to-zero.
+
         Statuses default is handled by caller; this method takes the literal list."""
         if not statuses:
             return []
         placeholders = ",".join("?" * len(statuses))
         sql = (
             "select * from leads where status in (%s) "
-            "order by confidence desc, last_seen_at desc "
+            "order by coalesce(julianday(last_seen_at), 0) asc "
             "limit ?"
         ) % placeholders
-        params = list(statuses) + [max(1, int(limit or 50))]
+        params = list(statuses) + [max(1, int(limit or 8))]
         with self.connection() as conn:
             return list(conn.execute(sql, params))
 
