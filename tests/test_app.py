@@ -26,6 +26,8 @@ def config_for(tmp):
         profile_path=input_dir / "profile.local.md",
         cv_path=input_dir / "cv.local.md",
         icp_path=input_dir / "icp.local.md",
+        goals_path=input_dir / "goals.local.md",
+        research_playbook_path=input_dir / "research-playbook.local.md",
         profile_settings_path=config_dir / "profile.local.json",
         sources_path=config_dir / "sources.local.json",
         scoring_path=config_dir / "scoring.local.json",

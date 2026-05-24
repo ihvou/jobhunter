@@ -267,6 +267,108 @@ export default definePluginEntry({
     });
 
     register(api, {
+      name: "jobhunter_show_goals",
+      label: "Jobhunter Show Goals",
+      description:
+        "Return input/goals.local.md and a lightweight parsed KPI/constraint list. PM must treat this as the only goal source of truth. If the file is missing, the service seeds the safe template and returns created_template=true.",
+      parameters: schema({}),
+      execute: async () => jsonResult(await get("/goals/show")),
+    });
+
+    register(api, {
+      name: "jobhunter_kpi_snapshot",
+      label: "Jobhunter KPI Snapshot",
+      description:
+        "Return current KPI aggregates for the PM agent: applications, interviews, reach-outs, replies, irrelevant rates, active sources, email latency, OpenAI spend, and firecrawl calls. Use before editing any working hypothesis.",
+      parameters: schema({
+        window_days: intSchema(1, 90),
+      }),
+      execute: async (_toolCallId, params = {}) => {
+        const days = Number.isInteger(params.window_days) ? params.window_days : 7;
+        return jsonResult(await get(`/kpi/snapshot?window_days=${encodeURIComponent(String(days))}`));
+      },
+    });
+
+    register(api, {
+      name: "jobhunter_kpi_history",
+      label: "Jobhunter KPI History",
+      description: "Return rolling weekly KPI aggregates so PM can distinguish one bad day from a trend.",
+      parameters: schema({
+        weeks: intSchema(1, 26),
+      }),
+      execute: async (_toolCallId, params = {}) => {
+        const weeks = Number.isInteger(params.weeks) ? params.weeks : 8;
+        return jsonResult(await get(`/kpi/history?weeks=${encodeURIComponent(String(weeks))}`));
+      },
+    });
+
+    register(api, {
+      name: "jobhunter_apply_directive_edit",
+      label: "Jobhunter Apply Directive Edit",
+      description:
+        "PM-only audited direct action. Append a dated bullet to # Directives in input/profile.local.md. " +
+        "Must include concrete evidence in reason (job ids, feedback rows, or source ids). Records agent_actions status=applied_by_pm and is reversible via jobhunter_revert_action.",
+      parameters: schema(
+        {
+          text: { type: "string" },
+          reason: { type: "string" },
+        },
+        ["text", "reason"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/pm/directive", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_apply_icp_edit",
+      label: "Jobhunter Apply ICP Edit",
+      description:
+        "PM-only audited direct action. Replace input/icp.local.md wholesale when lead evidence supports an ICP hypothesis change. " +
+        "Must include concrete evidence in reason. Records agent_actions status=applied_by_pm and is reversible via jobhunter_revert_action.",
+      parameters: schema(
+        {
+          text: { type: "string" },
+          reason: { type: "string" },
+        },
+        ["text", "reason"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/pm/icp", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_set_source_priority",
+      label: "Jobhunter Set Source Priority",
+      description:
+        "PM-only audited direct source tuning. Set a source priority to high, medium, or low. " +
+        "Use when KPI evidence shows a source should run earlier/later, not for adding new sources. Reversible via jobhunter_revert_action.",
+      parameters: schema(
+        {
+          source_id: { type: "string" },
+          priority: { type: "string", enum: ["high", "medium", "low"] },
+          reason: { type: "string" },
+        },
+        ["source_id", "priority", "reason"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/pm/source/priority", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_set_source_status",
+      label: "Jobhunter Set Source Status",
+      description:
+        "PM-only audited direct source tuning. Set a source status to active, test, or disabled. " +
+        "Use disabling for degraded sources with high irrelevant rate. Adding sources still requires user-gated sources_proposal. Reversible via jobhunter_revert_action.",
+      parameters: schema(
+        {
+          source_id: { type: "string" },
+          status: { type: "string", enum: ["active", "test", "disabled"] },
+          reason: { type: "string" },
+        },
+        ["source_id", "status", "reason"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/pm/source/status", params)),
+    });
+
+    register(api, {
       name: "jobhunter_history",
       label: "Jobhunter History",
       description: "Return recent approved/applied agent action audit rows.",
@@ -442,8 +544,8 @@ export default definePluginEntry({
         "Leadhunter ICP file at `input/icp.local.md`. Use this when the user says \"save this as my Leadhunter " +
         "ICP\" or \"set my lead ICP to ...\". The file is the source of truth for `leadhunter_*` tools. Existing " +
         "ICP file is backed up timestamped before overwrite. Example: " +
-        "`{kind: \"icp_edit\", summary: \"Set Leadhunter ICP to early-stage AI workflow founders\", " +
-        "payload: {new_icp: \"# Leadhunter ICP\\n\\nPre-seed/seed B2B workflow SaaS founders, 1-15 people...\"}}`. " +
+        "`{kind: \"icp_edit\", summary: \"Replace Leadhunter ICP with whatever the user just dictated\", " +
+        "payload: {new_icp: \"# Leadhunter ICP\\n\\n<USE THE USER'S WORDS VERBATIM — do not paraphrase, do not inject framings like 'workflow automation', 'AI agent', 'productivity tool' unless the user used those exact words. The current ICP is authoritative; this is just the payload shape.>\"}}`. " +
         "Do NOT use profile_edit to write the ICP — that targets the jobhunter candidate profile, not the lead ICP.\n\n" +
         "For Update sources, propose kind=sources_proposal. For Tune scoring, kind=scoring_rule_proposal. " +
         "Do not call jobhunter_apply_action until explicit user approval. " +

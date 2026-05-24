@@ -32,6 +32,8 @@ class AppConfig:
     profile_path: Path
     cv_path: Path
     icp_path: Path
+    goals_path: Path
+    research_playbook_path: Path
     profile_settings_path: Path
     sources_path: Path
     scoring_path: Path
@@ -101,6 +103,8 @@ def load_app_config() -> AppConfig:
     profile_path = Path(os.getenv("JOBHUNTER_PROFILE_PATH", str(input_dir / "profile.local.md")))
     cv_path = Path(os.getenv("JOBHUNTER_CV_PATH", str(input_dir / "cv.local.md")))
     icp_path = Path(os.getenv("JOBHUNTER_ICP_PATH", str(input_dir / "icp.local.md")))
+    goals_path = Path(os.getenv("JOBHUNTER_GOALS_PATH", str(input_dir / "goals.local.md")))
+    research_playbook_path = Path(os.getenv("JOBHUNTER_RESEARCH_PLAYBOOK_PATH", str(input_dir / "research-playbook.local.md")))
     profile_settings_path = Path(
         os.getenv("JOBHUNTER_PROFILE_SETTINGS_PATH", str(config_dir / "profile.local.json"))
     )
@@ -133,6 +137,8 @@ def load_app_config() -> AppConfig:
         profile_path=profile_path,
         cv_path=cv_path,
         icp_path=icp_path,
+        goals_path=goals_path,
+        research_playbook_path=research_playbook_path,
         profile_settings_path=profile_settings_path,
         sources_path=sources_path,
         scoring_path=scoring_path,

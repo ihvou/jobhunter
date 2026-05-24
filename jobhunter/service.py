@@ -24,6 +24,34 @@ LOGGER = logging.getLogger(__name__)
 JOB_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
 LEAD_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
 LEAD_STATUS_VALUES = {"new", "shortlisted", "reached_out", "rejected", "snoozed", "pitched", "archived"}
+GOALS_TEMPLATE = """# Outcome goals
+
+## Job search
+- Target: >=3 applications/week where I'd be net-happy if I got the interview
+- Target: >=1 interview/week from a submitted application
+- Quality bar: <=50% of digest jobs marked Irrelevant
+
+## Lead search
+- Target: >=2 leads/week I'd be net-happy reaching out to
+- Target: >=30% reply rate on actual outreach sent
+- Quality bar: <=40% of digest leads marked Irrelevant
+
+## Pipeline health
+- Coverage: >=5 distinct sources producing non-Irrelevant rows in any 7-day window
+- Latency: median email-arrival to digest <=2h
+- No silent failures: a source dark >24h should produce a stakeholder alert
+
+## Cost
+- Stay within configured OpenAI daily/monthly budget
+- Firecrawl: <=30 scrapes/day across all agents combined
+
+## Constraints (non-negotiable)
+- No automated outreach. Drafts only.
+- No logged-in scraping. No browser cookies. No LinkedIn auth.
+- No impersonation.
+- No silent profile/ICP wipes; every edit lands in agent_actions with reason.
+- Stakeholder Telegram pings <=1/day under normal operation.
+"""
 
 
 class JobHunterService:
@@ -62,6 +90,177 @@ class JobHunterService:
             "text": text,
             "exists": self.bot.config.icp_path.exists(),
         }
+
+    def show_goals(self) -> Dict:
+        created = False
+        if not self.bot.config.goals_path.exists():
+            self.bot.config.goals_path.parent.mkdir(parents=True, exist_ok=True)
+            self.bot.config.goals_path.write_text(GOALS_TEMPLATE, encoding="utf-8")
+            created = True
+        text = read_text_if_exists(self.bot.config.goals_path)
+        return {
+            "ok": True,
+            "path": str(self.bot.config.goals_path),
+            "text": text,
+            "exists": self.bot.config.goals_path.exists(),
+            "created_template": created,
+            "parsed": parse_goals_markdown(text),
+        }
+
+    def kpi_snapshot(self, window_days: int = 7) -> Dict:
+        window_days = min(max(1, int(window_days or 7)), 90)
+        cutoff = (datetime.utcnow() - timedelta(days=window_days)).replace(microsecond=0).isoformat() + "Z"
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        with self.bot.database.connection() as conn:
+            snapshot = {
+                "applications_this_week": scalar_int(conn, "select count(*) from jobs where status = 'applied' and first_seen_at >= ?", (cutoff,)),
+                "interviews_this_week": scalar_int(
+                    conn,
+                    "select count(*) from job_feedback where action in ('interview_request','interview_scheduled') and created_at >= ?",
+                    (cutoff,),
+                ),
+                "reach_outs_this_week": scalar_int(conn, "select count(*) from leads where status = 'reached_out' and first_seen_at >= ?", (cutoff,)),
+                "replies_this_week": scalar_int(
+                    conn,
+                    "select count(*) from lead_feedback where action in ('reply','replied','positive_reply') and created_at >= ?",
+                    (cutoff,),
+                ),
+                "active_sources_7d": scalar_int(
+                    conn,
+                    """
+                    select count(distinct source_id)
+                    from jobs
+                    where first_seen_at >= ?
+                      and status not in ('rejected','archived')
+                    """,
+                    (cutoff,),
+                ),
+                "openai_spend_today_usd": scalar_float(conn, "select coalesce(sum(estimated_cost_usd), 0) from usage_log where created_at >= ?", (today,)),
+                "openai_spend_month_usd": scalar_float(conn, "select coalesce(sum(estimated_cost_usd), 0) from usage_log where created_at >= ?", (month,)),
+                "firecrawl_calls_today": scalar_int(conn, "select count(*) from usage_log where task like 'firecrawl%' and created_at >= ?", (today,)),
+            }
+            job_feedback_total = scalar_int(conn, "select count(*) from job_feedback where created_at >= ?", (cutoff,))
+            job_feedback_irrelevant = scalar_int(conn, "select count(*) from job_feedback where action in ('irrelevant','rejected') and created_at >= ?", (cutoff,))
+            lead_feedback_total = scalar_int(conn, "select count(*) from lead_feedback where created_at >= ?", (cutoff,))
+            lead_feedback_irrelevant = scalar_int(conn, "select count(*) from lead_feedback where action in ('irrelevant','rejected') and created_at >= ?", (cutoff,))
+            latency_rows = conn.execute(
+                """
+                select (julianday(j.first_seen_at) - julianday(e.received_at)) * 24.0 * 60.0 as minutes
+                from jobs j
+                join email_alert_raw e on e.id = j.email_alert_id
+                where e.received_at >= ? and j.first_seen_at is not null
+                order by minutes asc
+                """,
+                (cutoff,),
+            ).fetchall()
+        snapshot["irrelevant_rate_jobs_7d"] = ratio(job_feedback_irrelevant, job_feedback_total)
+        snapshot["irrelevant_rate_leads_7d"] = ratio(lead_feedback_irrelevant, lead_feedback_total)
+        snapshot["latency_email_to_digest_p50_minutes"] = median([float(row["minutes"] or 0) for row in latency_rows])
+        return {"ok": True, "window_days": window_days, "kpis": snapshot}
+
+    def kpi_history(self, weeks: int = 8) -> Dict:
+        weeks = min(max(1, int(weeks or 8)), 26)
+        history = []
+        for offset in range(weeks):
+            end = datetime.utcnow() - timedelta(days=offset * 7)
+            start = end - timedelta(days=7)
+            history.append(self.kpi_window(start, end))
+        return {"ok": True, "weeks": weeks, "history": history}
+
+    def kpi_window(self, start: datetime, end: datetime) -> Dict:
+        start_iso = start.replace(microsecond=0).isoformat() + "Z"
+        end_iso = end.replace(microsecond=0).isoformat() + "Z"
+        with self.bot.database.connection() as conn:
+            return {
+                "week_start": start_iso[:10],
+                "week_end": end_iso[:10],
+                "applications": scalar_int(conn, "select count(*) from jobs where status = 'applied' and first_seen_at >= ? and first_seen_at < ?", (start_iso, end_iso)),
+                "reach_outs": scalar_int(conn, "select count(*) from leads where status = 'reached_out' and first_seen_at >= ? and first_seen_at < ?", (start_iso, end_iso)),
+                "irrelevant_jobs": scalar_int(conn, "select count(*) from job_feedback where action in ('irrelevant','rejected') and created_at >= ? and created_at < ?", (start_iso, end_iso)),
+                "active_sources": scalar_int(conn, "select count(distinct source_id) from jobs where first_seen_at >= ? and first_seen_at < ? and status not in ('rejected','archived')", (start_iso, end_iso)),
+            }
+
+    def apply_directive_edit(self, body: Dict) -> Dict:
+        reason = required(body, "reason")
+        context = self.action_context()
+        result = apply_agent_action({"kind": "directive_edit", "payload": {"directive": required(body, "text")}}, context)
+        if not result.applied:
+            raise ServiceError(400, result.message)
+        action_id = self.bot.database.record_agent_action(
+            "pm-direct",
+            "directive_edit",
+            "PM direct hypothesis edit",
+            "PM appended a profile directive",
+            {"directive": required(body, "text"), "reason": reason},
+            "applied_by_pm",
+            archive_path=result.archive_path,
+            target_path=result.target_path,
+            result_message=reason,
+        )
+        self.after_action_file_change("directive_edit", result.target_path)
+        return {"ok": True, "action_id": action_id, "archive_path": result.archive_path, "message": result.message}
+
+    def apply_icp_edit(self, body: Dict) -> Dict:
+        reason = required(body, "reason")
+        context = self.action_context()
+        result = apply_agent_action({"kind": "icp_edit", "payload": {"new_icp": required(body, "text")}}, context)
+        if not result.applied:
+            raise ServiceError(400, result.message)
+        action_id = self.bot.database.record_agent_action(
+            "pm-direct",
+            "icp_edit",
+            "PM direct ICP edit",
+            "PM replaced Leadhunter ICP",
+            {"new_icp": required(body, "text"), "reason": reason},
+            "applied_by_pm",
+            archive_path=result.archive_path,
+            target_path=result.target_path,
+            result_message=reason,
+        )
+        return {"ok": True, "action_id": action_id, "archive_path": result.archive_path, "message": result.message}
+
+    def set_source_status(self, body: Dict) -> Dict:
+        status = required(body, "status")
+        if status not in {"active", "test", "disabled"}:
+            raise ServiceError(400, "status must be active, test, or disabled")
+        return self.update_source_field(required(body, "source_id"), "status", status, required(body, "reason"))
+
+    def set_source_priority(self, body: Dict) -> Dict:
+        priority = required(body, "priority")
+        if priority not in {"high", "medium", "low"}:
+            raise ServiceError(400, "priority must be high, medium, or low")
+        return self.update_source_field(required(body, "source_id"), "priority", priority, required(body, "reason"))
+
+    def update_source_field(self, source_id: str, field: str, value: str, reason: str) -> Dict:
+        rows = load_json_array(self.bot.config.sources_path)
+        matched = False
+        for row in rows:
+            if str(row.get("id")) != source_id:
+                continue
+            row[field] = value
+            if field == "status":
+                row["enabled"] = value != "disabled"
+            matched = True
+            break
+        if not matched:
+            raise ServiceError(404, "Source not found: %s" % safe_log_text(source_id, 120))
+        archive = archive_file(self.bot.config.sources_path)
+        self.bot.config.sources_path.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self.bot.database.upsert_sources(load_sources(self.bot.config.sources_path))
+        kind = "source_%s_set" % field
+        action_id = self.bot.database.record_agent_action(
+            "pm-direct",
+            kind,
+            "PM direct source edit",
+            "PM set source %s for %s" % (field, source_id),
+            {"source_id": source_id, field: value, "reason": reason},
+            "applied_by_pm",
+            archive_path=str(archive),
+            target_path=str(self.bot.config.sources_path),
+            result_message=reason,
+        )
+        return {"ok": True, "action_id": action_id, "source_id": source_id, field: value, "archive_path": str(archive)}
 
     def history(self, limit: int = 10) -> Dict:
         return {"actions": [row_to_dict(row) for row in self.bot.database.recent_agent_actions(limit)]}
@@ -811,6 +1010,12 @@ def create_handler(app: JobHunterService):
                     payload = app.usage()
                 elif method == "GET" and path == "/profile/show":
                     payload = app.show_profile()
+                elif method == "GET" and path == "/goals/show":
+                    payload = app.show_goals()
+                elif method == "GET" and path == "/kpi/snapshot":
+                    payload = app.kpi_snapshot(optional_int(first(query, "window_days", "")) or 7)
+                elif method == "GET" and path == "/kpi/history":
+                    payload = app.kpi_history(optional_int(first(query, "weeks", "")) or 8)
                 elif method == "GET" and path == "/history":
                     payload = app.history(int(first(query, "limit", "10")))
                 elif method == "GET" and path == "/agent/reports":
@@ -856,6 +1061,14 @@ def create_handler(app: JobHunterService):
                     payload = app.apply_action(optional_int(body.get("action_id")), str(body.get("session_id") or ""), optional_int(body.get("index")), bool(body.get("confirm", False)))
                 elif method == "POST" and path == "/action/revert":
                     payload = app.revert_action(required_int(body, "action_id"))
+                elif method == "POST" and path == "/pm/directive":
+                    payload = app.apply_directive_edit(body)
+                elif method == "POST" and path == "/pm/icp":
+                    payload = app.apply_icp_edit(body)
+                elif method == "POST" and path == "/pm/source/status":
+                    payload = app.set_source_status(body)
+                elif method == "POST" and path == "/pm/source/priority":
+                    payload = app.set_source_priority(body)
                 elif method == "POST" and path == "/query-sql":
                     payload = app.query_sql(required(body, "sql"), body.get("params") or [], optional_int(body.get("limit")) or 50)
                 elif method == "POST" and path == "/agent/task/file":
@@ -958,6 +1171,73 @@ def row_to_dict(row) -> Dict:
     if isinstance(row, sqlite3.Row):
         return {key: row[key] for key in row.keys()}
     return dict(row)
+
+
+def parse_goals_markdown(text: str) -> Dict:
+    current = ""
+    kpis = []
+    constraints = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            current = stripped[3:].strip()
+            continue
+        if not stripped.startswith("- "):
+            continue
+        item = stripped[2:].strip()
+        record = {"section": current, "text": item}
+        if current.lower().startswith("constraints"):
+            constraints.append(record)
+        else:
+            kpis.append(record)
+    return {"kpis": kpis, "constraints": constraints}
+
+
+def scalar_int(conn, sql: str, params=()) -> int:
+    row = conn.execute(sql, params).fetchone()
+    return int(row[0] or 0)
+
+
+def scalar_float(conn, sql: str, params=()) -> float:
+    row = conn.execute(sql, params).fetchone()
+    return float(row[0] or 0)
+
+
+def ratio(numerator: int, denominator: int):
+    if not denominator:
+        return None
+    return round(float(numerator) / float(denominator), 4)
+
+
+def median(values: List[float]):
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[middle], 2)
+    return round((ordered[middle - 1] + ordered[middle]) / 2.0, 2)
+
+
+def load_json_array(path: Path) -> List[Dict]:
+    if not path.exists():
+        return []
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8") or "[]")
+    except json.JSONDecodeError as exc:
+        raise ServiceError(400, "Invalid JSON in %s: %s" % (path, exc))
+    if not isinstance(parsed, list):
+        raise ServiceError(400, "%s must contain a JSON array" % path)
+    return [row for row in parsed if isinstance(row, dict)]
+
+
+def archive_file(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("", encoding="utf-8")
+    archive = path.with_name("%s.%s.bak" % (path.name, datetime.utcnow().strftime("%Y%m%d%H%M%S%f")))
+    shutil.copyfile(path, archive)
+    return archive
 
 
 def job_digest_row(row) -> Dict:

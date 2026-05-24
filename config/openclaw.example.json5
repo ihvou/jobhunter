@@ -72,6 +72,11 @@
         name: "Leadhunter",
         skills: ["leadhunter"],
       },
+      {
+        id: "pm",
+        name: "Jobhunter PM",
+        skills: ["pm"],
+      },
     ],
   },
   plugins: {

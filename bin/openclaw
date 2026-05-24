@@ -390,7 +390,8 @@ patch_jobhunter_openclaw_config() {
     },
     "list": [
       { "id": "jobs", "name": "Jobhunter", "skills": ["jobhunter"] },
-      { "id": "leads", "name": "Leadhunter", "skills": ["leadhunter"] }
+      { "id": "leads", "name": "Leadhunter", "skills": ["leadhunter"] },
+      { "id": "pm", "name": "Jobhunter PM", "skills": ["pm"] }
     ]
   },
   "plugins": {
@@ -509,12 +510,12 @@ install_cron_jobs() {
     "none" \
     "Scheduled maintenance: call jobhunter_collect_all_sources, then call jobhunter_get_more_jobs with mark_sent=false and summarize only counts. Do not render job cards unless a human asked."
   cron_upsert_agent_job \
-    "jobs-rescore-on-feedback-change" \
-    "0 6 * * *" \
-    "jobs" \
-    "900" \
-    "none" \
-    "Scheduled maintenance: call jobhunter_rescore_recent_jobs with limit=500, then send a concise diagnostic only if the tool reports an error."
+    "pm-stakeholder" \
+    "30 6 * * *" \
+    "pm" \
+    "1200" \
+    "telegram" \
+    "PM daily routine: call jobhunter_rescore_recent_jobs(limit=500) first to incorporate any overnight scoring updates, then read goals/profile/ICP/KPIs/reports/tasks, make only audited reversible direct edits when evidence is concrete, file tasks/proposals as needed, write jobhunter_write_status_report, then send exactly one Telegram stakeholder report. Do not chase replies."
   cron_upsert_agent_job \
     "jobs-discovery-monthly" \
     "0 0 1 * *" \
@@ -582,6 +583,11 @@ print_config() {
         id: "leads",
         name: "Leadhunter",
         skills: ["leadhunter"]
+      },
+      {
+        id: "pm",
+        name: "Jobhunter PM",
+        skills: ["pm"]
       }
     ]
   },

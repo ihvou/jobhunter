@@ -10,6 +10,9 @@ config/scoring.v*.json
 input/profile.local.md
 input/cv.local.md
 input/icp.local.md
+input/goals.local.md
+input/research-playbook.local.md
+input/research/
 input/*.private.md
 input/*.bak
 openclaw/config/

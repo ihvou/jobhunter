@@ -10,6 +10,13 @@ const expectedToolNames = [
   "jobhunter_rescore_recent_jobs",
   "jobhunter_usage",
   "jobhunter_show_profile",
+  "jobhunter_show_goals",
+  "jobhunter_kpi_snapshot",
+  "jobhunter_kpi_history",
+  "jobhunter_apply_directive_edit",
+  "jobhunter_apply_icp_edit",
+  "jobhunter_set_source_priority",
+  "jobhunter_set_source_status",
   "jobhunter_history",
   "jobhunter_file_task",
   "jobhunter_pick_task",
@@ -289,6 +296,35 @@ test("profile and ICP tools call the read-only service endpoints", async () => {
     "http://jobhunter-service:8765/profile/show",
     "http://jobhunter-service:8765/leads/icp/show",
   ]);
+});
+
+test("PM goal and tuning tools call their service endpoints", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+    return jsonResponse({ ok: true, action_id: 3, kpis: {}, history: [] });
+  };
+  const tools = new Map(registeredTools().map((tool) => [tool.name, tool]));
+
+  await tools.get("jobhunter_show_goals").execute("tool-call-id", {});
+  await tools.get("jobhunter_kpi_snapshot").execute("tool-call-id", { window_days: 7 });
+  await tools.get("jobhunter_kpi_history").execute("tool-call-id", { weeks: 8 });
+  await tools.get("jobhunter_apply_directive_edit").execute("tool-call-id", { text: "Prefer AI builder roles.", reason: "jobs a,b,c" });
+  await tools.get("jobhunter_apply_icp_edit").execute("tool-call-id", { text: "# ICP\n\nAI founders", reason: "leads x,y,z" });
+  await tools.get("jobhunter_set_source_priority").execute("tool-call-id", { source_id: "s", priority: "low", reason: "high irrelevant rate" });
+  await tools.get("jobhunter_set_source_status").execute("tool-call-id", { source_id: "s", status: "disabled", reason: "high irrelevant rate" });
+
+  assert.deepEqual(calls.map((call) => call.url), [
+    "http://jobhunter-service:8765/goals/show",
+    "http://jobhunter-service:8765/kpi/snapshot?window_days=7",
+    "http://jobhunter-service:8765/kpi/history?weeks=8",
+    "http://jobhunter-service:8765/pm/directive",
+    "http://jobhunter-service:8765/pm/icp",
+    "http://jobhunter-service:8765/pm/source/priority",
+    "http://jobhunter-service:8765/pm/source/status",
+  ]);
+  assert.equal(calls[3].body.reason, "jobs a,b,c");
+  assert.equal(calls[5].body.priority, "low");
 });
 
 test("email alert audit tools call read-only endpoints", async () => {

@@ -334,6 +334,21 @@ class ServiceTests(unittest.TestCase):
             bot, _job_id = self.seeded_bot(tmp)
             bot.config.profile_path.write_text("# About me\n\nAI PM.\n\n# Directives\n\nPrefer Claude.\n", encoding="utf-8")
             bot.config.icp_path.write_text("# ICP\n\nAI workflow founders.\n", encoding="utf-8")
+            bot.config.sources_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "s",
+                            "name": "Source",
+                            "type": "rss",
+                            "url": "https://example.com/rss",
+                            "status": "active",
+                            "priority": "medium",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
             service = JobHunterService(bot)
 
             profile = service.show_profile()
@@ -346,6 +361,74 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(icp["ok"])
             self.assertTrue(icp["exists"])
             self.assertIn("AI workflow founders", icp["text"])
+
+    def test_pm_goals_kpis_and_reversible_direct_edits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, job_id = self.seeded_bot(tmp)
+            service = JobHunterService(bot)
+            bot.config.profile_path.write_text("# About me\n\nAI PM.\n\n# Directives\n\nPrefer Claude.\n", encoding="utf-8")
+            bot.config.icp_path.write_text("# ICP\n\nAI workflow founders.\n", encoding="utf-8")
+            bot.config.sources_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "s",
+                            "name": "Source",
+                            "type": "rss",
+                            "url": "https://example.com/rss",
+                            "status": "active",
+                            "priority": "medium",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            goals = service.show_goals()
+            self.assertTrue(goals["created_template"])
+            self.assertGreaterEqual(len(goals["parsed"]["kpis"]), 4)
+
+            snapshot = service.kpi_snapshot(window_days=7)
+            for key in [
+                "applications_this_week",
+                "interviews_this_week",
+                "reach_outs_this_week",
+                "replies_this_week",
+                "irrelevant_rate_jobs_7d",
+                "irrelevant_rate_leads_7d",
+                "active_sources_7d",
+                "latency_email_to_digest_p50_minutes",
+                "openai_spend_today_usd",
+                "openai_spend_month_usd",
+                "firecrawl_calls_today",
+            ]:
+                self.assertIn(key, snapshot["kpis"])
+            self.assertEqual(service.kpi_history(weeks=2)["weeks"], 2)
+
+            before_profile = bot.config.profile_path.read_text(encoding="utf-8")
+            direct = service.apply_directive_edit(
+                {"text": "Prioritize Claude/Codex builder roles.", "reason": "job ids a,b,c were the only applied roles"}
+            )
+            action = bot.database.get_agent_action(direct["action_id"])
+            self.assertEqual(action["kind"], "directive_edit")
+            self.assertEqual(action["status"], "applied_by_pm")
+            self.assertIn("job ids a,b,c", action["result_message"])
+            self.assertIn("Prioritize Claude/Codex", bot.config.profile_path.read_text(encoding="utf-8"))
+            service.revert_action(direct["action_id"])
+            self.assertEqual(bot.config.profile_path.read_text(encoding="utf-8"), before_profile)
+
+            before_icp = bot.config.icp_path.read_text(encoding="utf-8")
+            icp = service.apply_icp_edit({"text": "# ICP\n\nAI workflow founders in healthcare.", "reason": "lead ids x,y,z"})
+            self.assertEqual(bot.database.get_agent_action(icp["action_id"])["status"], "applied_by_pm")
+            service.revert_action(icp["action_id"])
+            self.assertEqual(bot.config.icp_path.read_text(encoding="utf-8"), before_icp)
+
+            source = service.set_source_status({"source_id": "s", "status": "disabled", "reason": "irrelevant rate 90%"})
+            self.assertEqual(bot.database.get_agent_action(source["action_id"])["kind"], "source_status_set")
+            service.revert_action(source["action_id"])
+            sources = json.loads(bot.config.sources_path.read_text(encoding="utf-8"))
+            self.assertEqual(sources[0]["status"], "active")
+            self.assertTrue(job_id)
 
     def test_propose_apply_and_revert_agent_action(self):
         with tempfile.TemporaryDirectory() as tmp:
