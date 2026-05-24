@@ -309,14 +309,16 @@ PY
 
 ensure_engineer_workspace() {
   if [ "$DRY_RUN" = "1" ]; then
-    printf '+ docker exec -u root openclaw-gateway sh -c %q\n' 'mkdir -p /workspace && chown -R node:node /workspace'
+    printf '+ docker run --rm -v %s:/workspace busybox sh -c %q\n' 'jobhunter_engineer_workspace' 'chown -R 1000:1000 /workspace'
     printf '+ docker exec -i openclaw-gateway sh -c %q < ensure-engineer-workspace-script\n' 'sh -s'
     return 0
   fi
   local github_pat
   local docker_exec=(docker exec -i)
   github_pat="$(read_github_pat)"
-  docker exec -u root openclaw-gateway sh -c 'mkdir -p /workspace && chown -R node:node /workspace'
+  # Gateway runs with cap_drop: ALL, so even -u root can't chown a fresh named volume.
+  # Use a one-shot helper container (no cap_drop) to set ownership to node (uid 1000) once.
+  docker run --rm -v jobhunter_engineer_workspace:/workspace busybox sh -c 'chown -R 1000:1000 /workspace'
   if [ -n "$github_pat" ]; then
     docker_exec+=(-e "GITHUB_PAT=$github_pat")
   fi
