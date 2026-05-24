@@ -387,6 +387,9 @@ class ServiceTests(unittest.TestCase):
             goals = service.show_goals()
             self.assertTrue(goals["created_template"])
             self.assertGreaterEqual(len(goals["parsed"]["kpis"]), 4)
+            playbook = service.show_research_playbook()
+            self.assertTrue(playbook["created_template"])
+            self.assertIn("deep-research", playbook["text"])
 
             snapshot = service.kpi_snapshot(window_days=7)
             for key in [

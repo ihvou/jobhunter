@@ -73,9 +73,24 @@
         skills: ["leadhunter"],
       },
       {
+        id: "collector",
+        name: "Jobhunter Collector",
+        skills: ["data-collector"],
+      },
+      {
+        id: "qa",
+        name: "Jobhunter QA",
+        skills: ["qa"],
+      },
+      {
         id: "pm",
         name: "Jobhunter PM",
         skills: ["pm"],
+      },
+      {
+        id: "researcher",
+        name: "Jobhunter Researcher",
+        skills: ["researcher"],
       },
     ],
   },

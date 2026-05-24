@@ -303,6 +303,15 @@ export default definePluginEntry({
     });
 
     register(api, {
+      name: "jobhunter_show_research_playbook",
+      label: "Jobhunter Show Research Context",
+      description:
+        "Return input/research-playbook.local.md. This file may contain deep-research outputs, market notes, search angles, or source maps supplied by the user. Researcher must operationalize it into tasks and must not invent strategy from scratch when it is empty.",
+      parameters: schema({}),
+      execute: async () => jsonResult(await get("/research/playbook/show")),
+    });
+
+    register(api, {
       name: "jobhunter_apply_directive_edit",
       label: "Jobhunter Apply Directive Edit",
       description:

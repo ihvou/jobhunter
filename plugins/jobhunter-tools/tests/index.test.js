@@ -13,6 +13,7 @@ const expectedToolNames = [
   "jobhunter_show_goals",
   "jobhunter_kpi_snapshot",
   "jobhunter_kpi_history",
+  "jobhunter_show_research_playbook",
   "jobhunter_apply_directive_edit",
   "jobhunter_apply_icp_edit",
   "jobhunter_set_source_priority",
@@ -309,6 +310,7 @@ test("PM goal and tuning tools call their service endpoints", async () => {
   await tools.get("jobhunter_show_goals").execute("tool-call-id", {});
   await tools.get("jobhunter_kpi_snapshot").execute("tool-call-id", { window_days: 7 });
   await tools.get("jobhunter_kpi_history").execute("tool-call-id", { weeks: 8 });
+  await tools.get("jobhunter_show_research_playbook").execute("tool-call-id", {});
   await tools.get("jobhunter_apply_directive_edit").execute("tool-call-id", { text: "Prefer AI builder roles.", reason: "jobs a,b,c" });
   await tools.get("jobhunter_apply_icp_edit").execute("tool-call-id", { text: "# ICP\n\nAI founders", reason: "leads x,y,z" });
   await tools.get("jobhunter_set_source_priority").execute("tool-call-id", { source_id: "s", priority: "low", reason: "high irrelevant rate" });
@@ -318,13 +320,14 @@ test("PM goal and tuning tools call their service endpoints", async () => {
     "http://jobhunter-service:8765/goals/show",
     "http://jobhunter-service:8765/kpi/snapshot?window_days=7",
     "http://jobhunter-service:8765/kpi/history?weeks=8",
+    "http://jobhunter-service:8765/research/playbook/show",
     "http://jobhunter-service:8765/pm/directive",
     "http://jobhunter-service:8765/pm/icp",
     "http://jobhunter-service:8765/pm/source/priority",
     "http://jobhunter-service:8765/pm/source/status",
   ]);
-  assert.equal(calls[3].body.reason, "jobs a,b,c");
-  assert.equal(calls[5].body.priority, "low");
+  assert.equal(calls[4].body.reason, "jobs a,b,c");
+  assert.equal(calls[6].body.priority, "low");
 });
 
 test("email alert audit tools call read-only endpoints", async () => {

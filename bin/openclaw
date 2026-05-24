@@ -391,7 +391,10 @@ patch_jobhunter_openclaw_config() {
     "list": [
       { "id": "jobs", "name": "Jobhunter", "skills": ["jobhunter"] },
       { "id": "leads", "name": "Leadhunter", "skills": ["leadhunter"] },
-      { "id": "pm", "name": "Jobhunter PM", "skills": ["pm"] }
+      { "id": "collector", "name": "Jobhunter Collector", "skills": ["data-collector"] },
+      { "id": "qa", "name": "Jobhunter QA", "skills": ["qa"] },
+      { "id": "pm", "name": "Jobhunter PM", "skills": ["pm"] },
+      { "id": "researcher", "name": "Jobhunter Researcher", "skills": ["researcher"] }
     ]
   },
   "plugins": {
@@ -505,10 +508,24 @@ install_cron_jobs() {
   cron_upsert_agent_job \
     "jobs-collection" \
     "0 */4 * * *" \
-    "jobs" \
+    "collector" \
     "900" \
     "none" \
-    "Scheduled maintenance: call jobhunter_collect_all_sources, then call jobhunter_get_more_jobs with mark_sent=false and summarize only counts. Do not render job cards unless a human asked."
+    "Collector routine: call jobhunter_collect_all_sources, process unparsed emails if needed, call jobhunter_get_more_jobs with mark_sent=false to verify counts, complete at most one collector task, then write jobhunter_write_status_report. Do not render job cards unless a human asked."
+  cron_upsert_agent_job \
+    "researcher-nightly" \
+    "0 3 * * *" \
+    "researcher" \
+    "1800" \
+    "none" \
+    "Researcher routine: read research context/profile/ICP/tasks, validate one angle with bounded public web/firecrawl/exa search, file exactly one concrete task or complete a picked task, write jobhunter_write_status_report, and stay silent on Telegram."
+  cron_upsert_agent_job \
+    "qa-nightly" \
+    "30 5 * * *" \
+    "qa" \
+    "900" \
+    "none" \
+    "QA routine: run jobhunter_audit_email_extraction, inspect suspicious recent rows with SELECT-only SQL, file qa.bug tasks with sample ids for real bugs, complete one qa.investigate task if present, and write jobhunter_write_status_report."
   cron_upsert_agent_job \
     "pm-stakeholder" \
     "30 6 * * *" \
@@ -516,20 +533,6 @@ install_cron_jobs() {
     "1200" \
     "telegram" \
     "PM daily routine: call jobhunter_rescore_recent_jobs(limit=500) first to incorporate any overnight scoring updates, then read goals/profile/ICP/KPIs/reports/tasks, make only audited reversible direct edits when evidence is concrete, file tasks/proposals as needed, write jobhunter_write_status_report, then send exactly one Telegram stakeholder report. Do not chase replies."
-  cron_upsert_agent_job \
-    "jobs-discovery-monthly" \
-    "0 0 1 * *" \
-    "jobs" \
-    "1800" \
-    "telegram" \
-    "Scheduled source review: use exa/firecrawl/web tools to look for better job aggregators or public boards for the current profile. If changes are warranted, call jobhunter_propose_actions with sources_proposal. Do not apply changes without user approval."
-  cron_upsert_agent_job \
-    "email-audit-nightly" \
-    "0 7 * * *" \
-    "jobs" \
-    "300" \
-    "telegram" \
-    "Scheduled email extraction audit. Call jobhunter_audit_email_extraction({days:7, threshold:0.5, min_expected:3, unmark:true}). If unmarked > 0, send ONE short Telegram message listing the recovered count and sender names (e.g. 'Email audit: recovered N likely-under-extracted email(s) from <senders>. They will re-process on next Get more jobs.'). If unmarked == 0, stay silent. Then emit NO_REPLY as your final assistant text. Do NOT call message again."
 }
 
 print_config() {
@@ -585,9 +588,24 @@ print_config() {
         skills: ["leadhunter"]
       },
       {
+        id: "collector",
+        name: "Jobhunter Collector",
+        skills: ["data-collector"]
+      },
+      {
+        id: "qa",
+        name: "Jobhunter QA",
+        skills: ["qa"]
+      },
+      {
         id: "pm",
         name: "Jobhunter PM",
         skills: ["pm"]
+      },
+      {
+        id: "researcher",
+        name: "Jobhunter Researcher",
+        skills: ["researcher"]
       }
     ]
   },

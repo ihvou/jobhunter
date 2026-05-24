@@ -53,6 +53,36 @@ GOALS_TEMPLATE = """# Outcome goals
 - Stakeholder Telegram pings <=1/day under normal operation.
 """
 
+RESEARCH_PLAYBOOK_TEMPLATE = """# Research context
+
+Use this file for deep-research outputs from Claude, ChatGPT, or manual market
+research. The Researcher agent operationalizes these notes into source, skill,
+or tooling tasks; it should not invent strategy from scratch.
+
+## Current source/lead insights
+- Paste recent deep-research findings here.
+
+## Promising job-side angles
+- Founding PM at AI-native startups
+- AI implementation specialist roles
+- Product builder roles using Claude, Codex, or agentic workflows
+
+## Promising lead-side angles
+- B2B AI workflow founders
+- Domain-expert founders without product leadership
+- Recently funded small teams building operational automation
+
+## Validation channels
+- Firecrawl/Exa public search
+- Public company/job pages
+- Funding/news directories
+- Product launch directories
+
+## Refresh notes
+- Last refreshed: <date/source>
+- Next refresh due: <date>
+"""
+
 
 class JobHunterService:
     def __init__(self, bot: JobHunter):
@@ -105,6 +135,21 @@ class JobHunterService:
             "exists": self.bot.config.goals_path.exists(),
             "created_template": created,
             "parsed": parse_goals_markdown(text),
+        }
+
+    def show_research_playbook(self) -> Dict:
+        created = False
+        if not self.bot.config.research_playbook_path.exists():
+            self.bot.config.research_playbook_path.parent.mkdir(parents=True, exist_ok=True)
+            self.bot.config.research_playbook_path.write_text(RESEARCH_PLAYBOOK_TEMPLATE, encoding="utf-8")
+            created = True
+        text = read_text_if_exists(self.bot.config.research_playbook_path)
+        return {
+            "ok": True,
+            "path": str(self.bot.config.research_playbook_path),
+            "text": text,
+            "exists": self.bot.config.research_playbook_path.exists(),
+            "created_template": created,
         }
 
     def kpi_snapshot(self, window_days: int = 7) -> Dict:
@@ -1012,6 +1057,8 @@ def create_handler(app: JobHunterService):
                     payload = app.show_profile()
                 elif method == "GET" and path == "/goals/show":
                     payload = app.show_goals()
+                elif method == "GET" and path == "/research/playbook/show":
+                    payload = app.show_research_playbook()
                 elif method == "GET" and path == "/kpi/snapshot":
                     payload = app.kpi_snapshot(optional_int(first(query, "window_days", "")) or 7)
                 elif method == "GET" and path == "/kpi/history":
