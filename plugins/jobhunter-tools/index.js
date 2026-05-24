@@ -228,7 +228,17 @@ export default definePluginEntry({
       name: "jobhunter_rescore_recent_jobs",
       label: "Jobhunter Rescore Recent Jobs",
       description:
-        "Rescore recent indexed jobs after profile/directive/scoring feedback changes. Intended for scheduled maintenance or explicit user requests. This uses cached job rows and bounded L2 rules; it does not collect new sources.",
+        "Re-evaluate scores for recent indexed jobs against the CURRENT candidate profile, directives, and scoring rules. " +
+        "Use this when the user asks: 'rescore my jobs', 'rescore jobs', 'update job scores', 're-evaluate jobs', " +
+        "'rescore against my new profile', or similar. ALSO use this automatically after the user runs `profile_edit`, " +
+        "`directive_edit`, or `scoring_rule_proposal` apply — so the existing queue reflects the new framing without " +
+        "requiring a separate ask. " +
+        "Mechanism: deterministic L1 scoring DSL re-runs against current rules; bounded L2 LLM relevance re-runs for " +
+        "jobs that cross the L1 threshold (budget-gated). Does NOT collect new sources or fetch external data. " +
+        "Default `limit` is 500 (max 1000). Typical rescore of the last 500 rows completes in 30-90 seconds depending " +
+        "on how many L2 calls fire. " +
+        "After this returns, send ONE concise Telegram summary covering: how many were rescored and that the next " +
+        "`Get more jobs` will reflect the new ordering. Do NOT re-emit a full digest yourself.",
       parameters: schema({
         limit: intSchema(1, 1000),
       }),
