@@ -88,6 +88,42 @@ class ServiceTests(unittest.TestCase):
                 service.query_sql("delete from jobs")
             self.assertEqual(raised.exception.status, 400)
 
+    def test_agent_task_and_report_service_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            service = JobHunterService(bot)
+
+            filed = service.file_task(
+                {
+                    "from_agent": "qa",
+                    "to_agent": "engineer",
+                    "kind": "qa.bug",
+                    "summary": "Parser mismatch",
+                    "payload": {"sample_ids": [1]},
+                    "priority": 10,
+                }
+            )
+            task_id = filed["task_id"]
+            picked = service.pick_task({"agent": "engineer"})
+            self.assertEqual(picked["task"]["id"], task_id)
+            self.assertEqual(picked["task"]["status"], "picked")
+            completed = service.complete_task({"task_id": task_id, "status": "completed", "result": {"pr_url": "x"}})
+            self.assertEqual(completed["task"]["status"], "completed")
+
+            first = service.write_status_report(
+                {"agent": "qa", "summary": "Checked email extraction", "details": {"checked": 3}, "report_date": "2026-05-24"}
+            )
+            second = service.write_status_report(
+                {"agent": "qa", "summary": "Updated report", "details": {"checked": 4}, "report_date": "2026-05-24"}
+            )
+            self.assertEqual(first["report_id"], second["report_id"])
+            reports = service.read_reports(agent="qa", since="2026-05-24")
+            self.assertEqual(reports["count"], 1)
+            self.assertEqual(reports["reports"][0]["summary"], "Updated report")
+
+            listed = service.list_open_tasks({"to_agent": "engineer", "status": "completed"})
+            self.assertEqual(listed["count"], 1)
+
     def test_email_alert_audit_endpoints_return_raw_and_joined_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot, _job_id = self.seeded_bot(tmp)

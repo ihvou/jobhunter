@@ -14,7 +14,10 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 13
+LATEST_SCHEMA_VERSION = 14
+
+AGENT_IDS = {"collector", "qa", "pm", "researcher", "engineer", "user"}
+TASK_FINAL_STATUSES = {"completed", "cancelled", "needs_clarification"}
 
 
 class Database:
@@ -77,6 +80,9 @@ class Database:
             if current < 13:
                 migrate_v13(conn)
                 set_schema_version(conn, 13)
+            if current < 14:
+                migrate_v14(conn)
+                set_schema_version(conn, 14)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -699,6 +705,162 @@ class Database:
                 """,
                 (status, archive_path, target_path, result_message, utc_now_iso(), action_id),
             )
+
+    def file_agent_task(
+        self,
+        from_agent: str,
+        to_agent: str,
+        kind: str,
+        summary: str,
+        payload: Dict = None,
+        priority: int = 50,
+    ) -> int:
+        validate_agent_id(from_agent, "from_agent")
+        validate_agent_id(to_agent, "to_agent")
+        validate_task_kind(kind)
+        payload = payload if isinstance(payload, dict) else {}
+        priority = min(100, max(0, int(priority if priority is not None else 50)))
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                insert into agent_tasks (
+                    from_agent, to_agent, kind, summary, payload_json, status,
+                    priority, created_at
+                ) values (?, ?, ?, ?, ?, 'open', ?, ?)
+                """,
+                (
+                    from_agent,
+                    to_agent,
+                    kind,
+                    str(summary or "").strip()[:300],
+                    json.dumps(payload, sort_keys=True),
+                    priority,
+                    utc_now_iso(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def pick_agent_task(self, agent: str, kinds: List[str] = None, max_age_days: int = None) -> Optional[sqlite3.Row]:
+        validate_agent_id(agent, "agent")
+        kinds = [str(kind) for kind in (kinds or []) if str(kind).strip()]
+        params = [agent]
+        where = ["to_agent = ?", "status = 'open'"]
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds[:20])
+            where.append("kind in (%s)" % placeholders)
+            params.extend(kinds[:20])
+        if max_age_days is not None:
+            cutoff = (datetime.utcnow() - timedelta(days=max(0, int(max_age_days)))).replace(microsecond=0).isoformat() + "Z"
+            where.append("created_at >= ?")
+            params.append(cutoff)
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                select * from agent_tasks
+                where %s
+                order by priority asc, created_at asc, id asc
+                limit 1
+                """ % " and ".join(where),
+                params,
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                "update agent_tasks set status = 'picked', picked_at = ? where id = ? and status = 'open'",
+                (utc_now_iso(), row["id"]),
+            )
+            return conn.execute("select * from agent_tasks where id = ?", (row["id"],)).fetchone()
+
+    def complete_agent_task(self, task_id: int, status: str, result: Dict = None) -> Optional[sqlite3.Row]:
+        if status not in TASK_FINAL_STATUSES:
+            raise ValueError("agent task status must be one of: %s" % ", ".join(sorted(TASK_FINAL_STATUSES)))
+        with self.connection() as conn:
+            row = conn.execute("select * from agent_tasks where id = ?", (task_id,)).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                """
+                update agent_tasks
+                set status = ?, completed_at = ?, result_json = ?
+                where id = ?
+                """,
+                (status, utc_now_iso(), json.dumps(result or {}, sort_keys=True), task_id),
+            )
+            return conn.execute("select * from agent_tasks where id = ?", (task_id,)).fetchone()
+
+    def list_agent_tasks(
+        self,
+        to_agent: str = "",
+        from_agent: str = "",
+        status: str = "open",
+        limit: int = 20,
+    ) -> List[sqlite3.Row]:
+        params = []
+        where = []
+        if to_agent:
+            validate_agent_id(to_agent, "to_agent")
+            where.append("to_agent = ?")
+            params.append(to_agent)
+        if from_agent:
+            validate_agent_id(from_agent, "from_agent")
+            where.append("from_agent = ?")
+            params.append(from_agent)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        sql = "select * from agent_tasks"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by priority asc, created_at asc, id asc limit ?"
+        params.append(min(max(1, int(limit or 20)), 100))
+        with self.connection() as conn:
+            return list(conn.execute(sql, params))
+
+    def write_agent_report(self, agent: str, summary: str, details: Dict = None, report_date: str = "") -> int:
+        validate_agent_id(agent, "agent")
+        report_date = (report_date or utc_now_iso()[:10]).strip()[:10]
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into agent_reports (
+                    agent, report_date, summary, details_json, created_at
+                ) values (?, ?, ?, ?, ?)
+                on conflict(agent, report_date) do update set
+                    summary = excluded.summary,
+                    details_json = excluded.details_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    agent,
+                    report_date,
+                    str(summary or "").strip()[:800],
+                    json.dumps(details or {}, sort_keys=True),
+                    utc_now_iso(),
+                ),
+            )
+            row = conn.execute(
+                "select id from agent_reports where agent = ? and report_date = ?",
+                (agent, report_date),
+            ).fetchone()
+            return int(row["id"])
+
+    def read_agent_reports(self, agent: str = "", since: str = "", limit: int = 20) -> List[sqlite3.Row]:
+        params = []
+        where = []
+        if agent:
+            validate_agent_id(agent, "agent")
+            where.append("agent = ?")
+            params.append(agent)
+        if since:
+            where.append("report_date >= ?")
+            params.append(since[:10])
+        sql = "select * from agent_reports"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by report_date desc, agent asc limit ?"
+        params.append(min(max(1, int(limit or 20)), 100))
+        with self.connection() as conn:
+            return list(conn.execute(sql, params))
 
     def recent_jobs_by_status(self, status: str, limit: int = 10) -> List[sqlite3.Row]:
         with self.connection() as conn:
@@ -1901,8 +2063,60 @@ def migrate_v13(conn) -> None:
     conn.execute("create index if not exists idx_jobs_email_alert_id on jobs(email_alert_id)")
 
 
+def migrate_v14(conn) -> None:
+    conn.executescript(
+        """
+        create table if not exists agent_tasks (
+            id integer primary key autoincrement,
+            from_agent text not null,
+            to_agent text not null,
+            kind text not null,
+            summary text not null,
+            payload_json text not null,
+            status text not null default 'open',
+            priority integer default 50,
+            created_at text not null,
+            picked_at text,
+            completed_at text,
+            result_json text
+        );
+        create index if not exists idx_agent_tasks_to_status_priority
+            on agent_tasks(to_agent, status, priority);
+        create index if not exists idx_agent_tasks_from_created
+            on agent_tasks(from_agent, created_at);
+        create index if not exists idx_agent_tasks_kind_created
+            on agent_tasks(kind, created_at);
+
+        create table if not exists agent_reports (
+            id integer primary key autoincrement,
+            agent text not null,
+            report_date text not null,
+            summary text not null,
+            details_json text,
+            created_at text not null,
+            unique(agent, report_date)
+        );
+        create index if not exists idx_agent_reports_created
+            on agent_reports(created_at desc);
+        """
+    )
+
+
 def set_schema_version(conn, version: int) -> None:
     conn.execute("insert or ignore into schema_version (version, applied_at) values (?, ?)", (version, utc_now_iso()))
+
+
+def validate_agent_id(agent_id: str, field: str) -> None:
+    if str(agent_id or "").strip() not in AGENT_IDS:
+        raise ValueError("%s must be one of: %s" % (field, ", ".join(sorted(AGENT_IDS))))
+
+
+def validate_task_kind(kind: str) -> None:
+    import re
+
+    value = str(kind or "").strip()
+    if not re.match(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$", value):
+        raise ValueError("task kind must look like namespace.name")
 
 
 def row_to_plain_dict(row) -> Dict:

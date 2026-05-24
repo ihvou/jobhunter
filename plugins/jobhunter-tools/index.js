@@ -280,6 +280,112 @@ export default definePluginEntry({
     });
 
     register(api, {
+      name: "jobhunter_file_task",
+      label: "Jobhunter File Task",
+      description:
+        "Create one durable inter-agent task in agent_tasks. Use this for PM/QA/Researcher/Engineer handoffs. " +
+        "Required: to_agent (collector|qa|pm|researcher|engineer|user), kind namespace.name, summary <=300 chars. " +
+        "Optional: from_agent, payload object, priority 0..100 where lower means earlier. This only files work; it never executes code.",
+      parameters: schema(
+        {
+          from_agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
+          to_agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
+          kind: { type: "string" },
+          summary: { type: "string", maxLength: 300 },
+          payload: { type: "object" },
+          priority: intSchema(0, 100),
+        },
+        ["to_agent", "kind", "summary"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/agent/task/file", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_pick_task",
+      label: "Jobhunter Pick Task",
+      description:
+        "Atomically pick the highest-priority open task for an agent. Marks status=picked and sets picked_at. " +
+        "Use one task per autonomous run. Optional kinds[] narrows the queue; optional max_age_days ignores stale work.",
+      parameters: schema(
+        {
+          agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
+          kinds: { type: "array", items: { type: "string" } },
+          max_age_days: intSchema(1, 90),
+        },
+        ["agent"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/agent/task/pick", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_complete_task",
+      label: "Jobhunter Complete Task",
+      description:
+        "Close a picked agent task. Status must be completed, cancelled, or needs_clarification. " +
+        "Result should include the artifact: PR URL, report details, question, or skill proposal.",
+      parameters: schema(
+        {
+          task_id: { type: "integer" },
+          status: { type: "string", enum: ["completed", "cancelled", "needs_clarification"] },
+          result: { type: "object" },
+        },
+        ["task_id", "status"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/agent/task/complete", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_write_status_report",
+      label: "Jobhunter Write Status Report",
+      description:
+        "Upsert one internal daily report for an autonomous agent. One row per agent per UTC date; reruns update the same row. " +
+        "Use this at the end of every cron routine, even if no task was found.",
+      parameters: schema(
+        {
+          agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
+          summary: { type: "string", maxLength: 800 },
+          details: { type: "object" },
+          report_date: { type: "string" },
+        },
+        ["agent", "summary"],
+      ),
+      execute: async (_toolCallId, params) => jsonResult(await post("/agent/report/write", params)),
+    });
+
+    register(api, {
+      name: "jobhunter_read_reports",
+      label: "Jobhunter Read Reports",
+      description: "Read recent internal reports from autonomous agents. PM uses this for the morning stakeholder report.",
+      parameters: schema({
+        agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
+        since: { type: "string" },
+        limit: intSchema(1, 100),
+      }),
+      execute: async (_toolCallId, params = {}) => {
+        const query = new URLSearchParams();
+        if (params.agent) query.set("agent", params.agent);
+        if (params.since) query.set("since", params.since);
+        if (Number.isInteger(params.limit)) query.set("limit", String(params.limit));
+        const suffix = query.toString() ? `?${query.toString()}` : "";
+        return jsonResult(await get(`/agent/reports${suffix}`));
+      },
+    });
+
+    register(api, {
+      name: "jobhunter_list_open_tasks",
+      label: "Jobhunter List Open Tasks",
+      description:
+        "List agent_tasks for diagnostics and PM oversight. Defaults to status=open; pass status=picked/completed/cancelled/needs_clarification for other queues.",
+      parameters: schema({
+        to_agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
+        from_agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
+        status: { type: "string", enum: ["open", "picked", "completed", "cancelled", "needs_clarification"] },
+        limit: intSchema(1, 100),
+      }),
+      execute: async (_toolCallId, params) => jsonResult(await post("/agent/task/list", params)),
+    });
+
+    register(api, {
       name: "jobhunter_propose_actions",
       label: "Jobhunter Propose Actions",
       description:

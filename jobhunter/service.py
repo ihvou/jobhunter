@@ -66,6 +66,78 @@ class JobHunterService:
     def history(self, limit: int = 10) -> Dict:
         return {"actions": [row_to_dict(row) for row in self.bot.database.recent_agent_actions(limit)]}
 
+    def file_task(self, body: Dict) -> Dict:
+        try:
+            task_id = self.bot.database.file_agent_task(
+                str(body.get("from_agent") or "user"),
+                required(body, "to_agent"),
+                required(body, "kind"),
+                required(body, "summary"),
+                body.get("payload") if isinstance(body.get("payload"), dict) else {},
+                optional_int(body.get("priority")) if optional_int(body.get("priority")) is not None else 50,
+            )
+        except ValueError as exc:
+            raise ServiceError(400, str(exc))
+        return {"ok": True, "task_id": task_id}
+
+    def pick_task(self, body: Dict) -> Dict:
+        kinds = body.get("kinds") or []
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        if not isinstance(kinds, list):
+            raise ServiceError(400, "kinds must be an array")
+        try:
+            row = self.bot.database.pick_agent_task(
+                required(body, "agent"),
+                kinds=[str(kind) for kind in kinds if str(kind).strip()],
+                max_age_days=optional_int(body.get("max_age_days")),
+            )
+        except ValueError as exc:
+            raise ServiceError(400, str(exc))
+        return {"ok": True, "task": row_to_dict(row) if row else None}
+
+    def complete_task(self, body: Dict) -> Dict:
+        result = body.get("result") if isinstance(body.get("result"), dict) else {}
+        try:
+            row = self.bot.database.complete_agent_task(required_int(body, "task_id"), required(body, "status"), result)
+        except ValueError as exc:
+            raise ServiceError(400, str(exc))
+        if not row:
+            raise ServiceError(404, "Agent task not found")
+        return {"ok": True, "task": row_to_dict(row)}
+
+    def write_status_report(self, body: Dict) -> Dict:
+        details = body.get("details") if isinstance(body.get("details"), dict) else {}
+        try:
+            report_id = self.bot.database.write_agent_report(
+                required(body, "agent"),
+                required(body, "summary"),
+                details,
+                str(body.get("report_date") or ""),
+            )
+        except ValueError as exc:
+            raise ServiceError(400, str(exc))
+        return {"ok": True, "report_id": report_id}
+
+    def read_reports(self, limit: int = 20, agent: str = "", since: str = "") -> Dict:
+        try:
+            rows = self.bot.database.read_agent_reports(agent=agent, since=since, limit=limit)
+        except ValueError as exc:
+            raise ServiceError(400, str(exc))
+        return {"ok": True, "reports": [row_to_dict(row) for row in rows], "count": len(rows)}
+
+    def list_open_tasks(self, body: Dict) -> Dict:
+        try:
+            rows = self.bot.database.list_agent_tasks(
+                to_agent=str(body.get("to_agent") or ""),
+                from_agent=str(body.get("from_agent") or ""),
+                status=str(body.get("status") or "open"),
+                limit=optional_int(body.get("limit")) or 20,
+            )
+        except ValueError as exc:
+            raise ServiceError(400, str(exc))
+        return {"ok": True, "tasks": [row_to_dict(row) for row in rows], "count": len(rows)}
+
     def collect(self) -> Dict:
         before = self.count_jobs()
         self.bot.collect()
@@ -741,6 +813,12 @@ def create_handler(app: JobHunterService):
                     payload = app.show_profile()
                 elif method == "GET" and path == "/history":
                     payload = app.history(int(first(query, "limit", "10")))
+                elif method == "GET" and path == "/agent/reports":
+                    payload = app.read_reports(
+                        optional_int(first(query, "limit", "")) or 20,
+                        str(first(query, "agent", "") or ""),
+                        str(first(query, "since", "") or ""),
+                    )
                 elif method == "GET" and path == "/email/alerts":
                     payload = app.list_email_alerts(
                         optional_int(first(query, "limit", "")) or 20,
@@ -780,6 +858,16 @@ def create_handler(app: JobHunterService):
                     payload = app.revert_action(required_int(body, "action_id"))
                 elif method == "POST" and path == "/query-sql":
                     payload = app.query_sql(required(body, "sql"), body.get("params") or [], optional_int(body.get("limit")) or 50)
+                elif method == "POST" and path == "/agent/task/file":
+                    payload = app.file_task(body)
+                elif method == "POST" and path == "/agent/task/pick":
+                    payload = app.pick_task(body)
+                elif method == "POST" and path == "/agent/task/complete":
+                    payload = app.complete_task(body)
+                elif method == "POST" and path == "/agent/task/list":
+                    payload = app.list_open_tasks(body)
+                elif method == "POST" and path == "/agent/report/write":
+                    payload = app.write_status_report(body)
                 elif method == "POST" and path == "/email/process":
                     payload = app.process_email(body)
                 elif method == "POST" and path == "/email/save_extracted_jobs":

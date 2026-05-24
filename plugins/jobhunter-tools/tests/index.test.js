@@ -11,6 +11,12 @@ const expectedToolNames = [
   "jobhunter_usage",
   "jobhunter_show_profile",
   "jobhunter_history",
+  "jobhunter_file_task",
+  "jobhunter_pick_task",
+  "jobhunter_complete_task",
+  "jobhunter_write_status_report",
+  "jobhunter_read_reports",
+  "jobhunter_list_open_tasks",
   "jobhunter_propose_actions",
   "jobhunter_apply_action",
   "jobhunter_revert_action",
@@ -304,6 +310,40 @@ test("email alert audit tools call read-only endpoints", async () => {
     "http://jobhunter-service:8765/email/alerts?limit=5&since=2026-05-20T00%3A00%3A00Z&only_unparsed=1",
     "http://jobhunter-service:8765/email/alert/compare?id=7",
   ]);
+});
+
+test("agent task and report tools call coordination endpoints", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+    return jsonResponse({ ok: true, task_id: 1, task: { id: 1 }, reports: [] });
+  };
+  const tools = new Map(registeredTools().map((tool) => [tool.name, tool]));
+
+  await tools.get("jobhunter_file_task").execute("tool-call-id", {
+    from_agent: "qa",
+    to_agent: "engineer",
+    kind: "qa.bug",
+    summary: "Parser mismatch",
+    payload: { sample_ids: [1] },
+    priority: 10,
+  });
+  await tools.get("jobhunter_pick_task").execute("tool-call-id", { agent: "engineer", kinds: ["qa.bug"] });
+  await tools.get("jobhunter_complete_task").execute("tool-call-id", { task_id: 1, status: "completed", result: { pr_url: "https://example.com/pr/1" } });
+  await tools.get("jobhunter_write_status_report").execute("tool-call-id", { agent: "qa", summary: "ok", details: { checked: 1 } });
+  await tools.get("jobhunter_read_reports").execute("tool-call-id", { agent: "qa", limit: 5 });
+  await tools.get("jobhunter_list_open_tasks").execute("tool-call-id", { to_agent: "engineer", limit: 5 });
+
+  assert.deepEqual(calls.map((call) => call.url), [
+    "http://jobhunter-service:8765/agent/task/file",
+    "http://jobhunter-service:8765/agent/task/pick",
+    "http://jobhunter-service:8765/agent/task/complete",
+    "http://jobhunter-service:8765/agent/report/write",
+    "http://jobhunter-service:8765/agent/reports?agent=qa&limit=5",
+    "http://jobhunter-service:8765/agent/task/list",
+  ]);
+  assert.equal(calls[0].body.kind, "qa.bug");
+  assert.equal(calls[2].body.result.pr_url, "https://example.com/pr/1");
 });
 
 test("process unparsed emails supports fetch and save phases", async () => {

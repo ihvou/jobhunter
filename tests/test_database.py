@@ -27,7 +27,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
-    def test_schema_v13_persists_raw_email_and_links_jobs(self):
+    def test_schema_v14_persists_raw_email_agent_tasks_and_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -35,8 +35,10 @@ class DatabaseTests(unittest.TestCase):
                 schema_version = conn.execute("select max(version) as version from schema_version").fetchone()["version"]
                 email_columns = [row["name"] for row in conn.execute("pragma table_info(email_alert_raw)").fetchall()]
                 job_columns = [row["name"] for row in conn.execute("pragma table_info(jobs)").fetchall()]
+                task_columns = [row["name"] for row in conn.execute("pragma table_info(agent_tasks)").fetchall()]
+                report_columns = [row["name"] for row in conn.execute("pragma table_info(agent_reports)").fetchall()]
 
-            self.assertEqual(schema_version, 13)
+            self.assertEqual(schema_version, 14)
             self.assertEqual(
                 email_columns,
                 [
@@ -54,6 +56,27 @@ class DatabaseTests(unittest.TestCase):
                 ],
             )
             self.assertIn("email_alert_id", job_columns)
+            self.assertEqual(
+                task_columns,
+                [
+                    "id",
+                    "from_agent",
+                    "to_agent",
+                    "kind",
+                    "summary",
+                    "payload_json",
+                    "status",
+                    "priority",
+                    "created_at",
+                    "picked_at",
+                    "completed_at",
+                    "result_json",
+                ],
+            )
+            self.assertEqual(
+                report_columns,
+                ["id", "agent", "report_date", "summary", "details_json", "created_at"],
+            )
 
             email_alert_id, inserted = db.save_email_alert_raw(
                 "email-job-alerts",
@@ -97,6 +120,19 @@ class DatabaseTests(unittest.TestCase):
             self.assertIn("AI PM", compare["raw_text"])
             self.assertEqual(compare["jobs"][0]["id"], job_id)
             self.assertEqual(db.unparsed_email_count(), 1)
+
+            task_id = db.file_agent_task("qa", "engineer", "qa.bug", "test", {"sample_ids": [job_id]}, priority=10)
+            picked = db.pick_agent_task("engineer")
+            self.assertEqual(picked["id"], task_id)
+            self.assertEqual(picked["status"], "picked")
+            completed = db.complete_agent_task(task_id, "completed", {"result": "ok"})
+            self.assertEqual(completed["status"], "completed")
+            report_id = db.write_agent_report("qa", "first", {"checked": 1}, report_date="2026-05-24")
+            report_id_again = db.write_agent_report("qa", "updated", {"checked": 2}, report_date="2026-05-24")
+            self.assertEqual(report_id_again, report_id)
+            reports = db.read_agent_reports(agent="qa", since="2026-05-24")
+            self.assertEqual(len(reports), 1)
+            self.assertEqual(reports[0]["summary"], "updated")
 
     def test_total_score_is_generated_from_l1_and_l2(self):
         with tempfile.TemporaryDirectory() as tmp:
