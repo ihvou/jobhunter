@@ -30,6 +30,7 @@ const expectedToolNames = [
   "jobhunter_revert_action",
   "jobhunter_mark_job",
   "jobhunter_cover_note",
+  "jobhunter_find_recruiters",
   "jobhunter_query_sql",
   "jobhunter_process_email",
   "jobhunter_process_unparsed_emails",
@@ -44,6 +45,7 @@ const expectedToolNames = [
   "leadhunter_add_lead_source",
   "leadhunter_mark_lead",
   "leadhunter_draft_pitch",
+  "leadhunter_find_linkedin",
 ];
 
 const originalFetch = globalThis.fetch;
@@ -95,6 +97,9 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     "PERSISTENT TELEGRAM KEYBOARD",
     "My job profile",
     "My ICP profile",
+    "Find recruiters",
+    "find_recruiters:<id_prefix>:<messageId>",
+    "Recruiters at",
   ]) {
     assert.match(digestDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -114,6 +119,9 @@ test("tool descriptions preserve rendering and proposal contracts", () => {
     "two-call messageId workaround",
     "PERSISTENT TELEGRAM KEYBOARD",
     "My ICP profile",
+    "Find LinkedIn",
+    "lead_linkedin:<id_prefix>:<messageId>",
+    "Founder LinkedIn for",
   ]) {
     assert.match(leadDescription, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }

@@ -165,21 +165,23 @@ export default definePluginEntry({
         "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
-        "{text: \"Cover\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}" +
+        "{text: \"Cover\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find recruiters\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}" +
         "]}})`. " +
         "Capture the returned `messageId`. CALL 2: immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
         "message: <same job.card_text>, presentation: {blocks: [" +
         "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
-        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find recruiters\", callback_data: \"find_recruiters:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
         "]}})`. " +
         "<id_prefix> is the first 12 lowercase hex characters of the job's id. " +
         "Use mark_sent=true only for rows actually shown. " +
         "For read-only diagnostics/analysis/source-or-scoring work, call with mark_sent=false and do NOT emit messages. " +
         "Never use bash or shell for Jobhunter digest requests. " +
         "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `applied:<12hex>:<messageId>`, " +
-        "`irrelevant:<12hex>:<messageId>`, `snooze:<12hex>:<messageId>`, or `cover:<12hex>:<messageId>`): " +
+        "`irrelevant:<12hex>:<messageId>`, `snooze:<12hex>:<messageId>`, `cover:<12hex>:<messageId>`, or `find_recruiters:<12hex>:<messageId>`): " +
         "(a) For applied/irrelevant/snooze (triage actions): call `jobhunter_mark_job` with the matching " +
         "status, then emit `message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. " +
         "FINAL STEP — emit `NO_REPLY` as your assistant text (literal, all caps, no quotes, no other characters, " +
@@ -205,9 +207,22 @@ export default definePluginEntry({
         "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
-        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find recruiters\", callback_data: \"find_recruiters:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
         "]}})`. Buttons stay the same so the user can still tap Applied / Irrelevant / Snooze after seeing the cover note. " +
-        "Do NOT send a separate \"**Cover note draft:** ...\" message. Never apply on behalf of the user — drafts are copy-paste only.",
+        "Do NOT send a separate \"**Cover note draft:** ...\" message. Never apply on behalf of the user — drafts are copy-paste only. " +
+        "(c) For find_recruiters (enrich action — APPEND recruiter LinkedIn URLs to the SAME job card, do NOT send a new message): " +
+        "1) call `jobhunter_find_recruiters` with the id_prefix. Response contains `profiles` (list of " +
+        "`{url, name, title_hint, snippet}`), `company`, and `card_text` (canonical job card body). " +
+        "2) emit `message({action: \"edit\", target: <chat_id>, messageId: <messageId from callback_data>, " +
+        "message: <card_text> + \"\\n\\n— Recruiters at \" + <company> + \" —\\n\" + (profiles.length ? profiles.map(p => \"• \" + p.url + (p.name ? \" — \" + p.name : \"\") + (p.title_hint ? \" (\" + p.title_hint + \")\" : \"\")).join(\"\\n\") : \"No public LinkedIn results indexed.\"), presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Cover\", callback_data: \"cover:<id_prefix>:<messageId>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find recruiters\", callback_data: \"find_recruiters:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "]}})`. Buttons stay the same so subsequent triage works. " +
+        "Do NOT send a separate \"**Recruiters:** ...\" message. Never DM, email, or reach out to recruiters automatically — output is copy-paste only.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
@@ -717,6 +732,28 @@ export default definePluginEntry({
     });
 
     register(api, {
+      name: "jobhunter_find_recruiters",
+      label: "Jobhunter Find Recruiters",
+      description:
+        "Find LinkedIn profiles of recruiters / talent acquisition / people ops at the company that owns this job. " +
+        "Use job_id or the 12-character id_prefix from a find_recruiters callback. " +
+        "Returns up to 5 public LinkedIn profile URLs with name and title hints. " +
+        "Backed by Firecrawl public web search (site:linkedin.com/in queries) — DOES NOT log into LinkedIn or read cookies. " +
+        "Results are cached per-company for 30 days; repeat clicks on the same company return instantly. " +
+        "Response shape: `{ok, company, kind:\"recruiter\", profiles: [{url, name, title_hint, snippet}], source: \"cache\"|\"firecrawl\", card_text}`. " +
+        "Profiles may be stale (Google's LinkedIn index lags real employment); user verifies before reaching out. " +
+        "Hit rate ~50-70% for mid-size companies, lower for early-stage startups. Empty `profiles: []` is a valid outcome when nothing was indexed.",
+      parameters: schema({
+        job_id: { type: "string" },
+        id_prefix: { type: "string", pattern: "^[0-9a-f]{12}$" },
+      }),
+      execute: async (_toolCallId, params) => {
+        const job_id = await resolveJobId(params);
+        return jsonResult(await post("/jobs/find_recruiters", { job_id }));
+      },
+    });
+
+    register(api, {
       name: "jobhunter_query_sql",
       label: "Jobhunter Query SQL",
       description: "Run a SELECT-only query against Jobhunter SQLite for investigation.",
@@ -928,20 +965,22 @@ export default definePluginEntry({
         "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"pending:<id_prefix>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"pending:<id_prefix>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"pending:<id_prefix>\"}, " +
-        "{text: \"Pitch\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}" +
+        "{text: \"Pitch\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find LinkedIn\", callback_data: \"pending:<id_prefix>\", style: \"primary\"}]}" +
         "]}})`. " +
         "Capture the returned `messageId`. CALL 2: immediately emit `message({action: \"edit\", target, messageId: <messageId>, " +
         "message: <same lead.card_text>, presentation: {blocks: [" +
         "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +
-        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find LinkedIn\", callback_data: \"lead_linkedin:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
         "]}})`. " +
         "<id_prefix> is the first 12 lowercase hex characters of the lead id. " +
         "Button labels are intentionally symmetric with the job triage buttons. " +
         "Use mark_sent=true only for rows actually shown. " +
         "\n\nCALLBACK HANDLING (when a synthetic user message arrives matching `lead_reached:<12hex>:<messageId>`, " +
-        "`lead_irrelevant:<12hex>:<messageId>`, `lead_snooze:<12hex>:<messageId>`, or `lead_pitch:<12hex>:<messageId>`): " +
+        "`lead_irrelevant:<12hex>:<messageId>`, `lead_snooze:<12hex>:<messageId>`, `lead_pitch:<12hex>:<messageId>`, or `lead_linkedin:<12hex>:<messageId>`): " +
         "(a) For reached/irrelevant/snooze (triage actions): call `leadhunter_mark_lead` with the matching " +
         "status (reached_out / irrelevant / snoozed; default snooze_days=7), then emit " +
         "`message(action=\"delete\", target=<chat_id>, messageId=<messageId>)`. " +
@@ -961,9 +1000,23 @@ export default definePluginEntry({
         "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +
-        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find LinkedIn\", callback_data: \"lead_linkedin:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
         "]}})`. Buttons stay the same so the user can still tap Reached out / Snooze / Irrelevant after seeing the pitch. " +
-        "Do NOT send a separate \"**Pitch draft:** ...\" message. Never send outreach automatically — drafts are copy-paste only.",
+        "Do NOT send a separate \"**Pitch draft:** ...\" message. Never send outreach automatically — drafts are copy-paste only. " +
+        "(c) For lead_linkedin (enrich action — APPEND founder LinkedIn URLs to the SAME lead card, do NOT send a new message): " +
+        "1) call `leadhunter_find_linkedin` with the id_prefix. Response contains `profiles` (list of " +
+        "`{url, name, title_hint, snippet}`), `company`, and the lead card text is in the response under `card_text` ONLY when " +
+        "regenerated; if absent, reuse the original card text from your turn context. " +
+        "2) emit `message({action: \"edit\", target: <chat_id>, messageId: <messageId from callback_data>, " +
+        "message: <card_text> + \"\\n\\n— Founder LinkedIn for \" + <company> + \" —\\n\" + (profiles.length ? profiles.map(p => \"• \" + p.url + (p.name ? \" — \" + p.name : \"\") + (p.title_hint ? \" (\" + p.title_hint + \")\" : \"\")).join(\"\\n\") : \"No public LinkedIn results indexed.\"), presentation: {blocks: [" +
+        "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
+        "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +
+        "{text: \"Pitch\", callback_data: \"lead_pitch:<id_prefix>:<messageId>\", style: \"primary\"}]}, " +
+        "{type: \"buttons\", buttons: [{text: \"Find LinkedIn\", callback_data: \"lead_linkedin:<id_prefix>:<messageId>\", style: \"primary\"}]}" +
+        "]}})`. Buttons stay the same so subsequent triage works. " +
+        "Do NOT send a separate \"**LinkedIn:** ...\" message. Never DM, email, or InMail founders automatically — output is copy-paste only.",
       parameters: schema({
         limit: intSchema(1, 25),
         mark_sent: { type: "boolean" },
@@ -1125,6 +1178,29 @@ export default definePluginEntry({
       execute: async (_toolCallId, params) => {
         const lead_id = await resolveLeadId(params);
         return jsonResult(await post("/leads/pitch", { lead_id, ask: params.ask || "" }));
+      },
+    });
+
+    register(api, {
+      name: "leadhunter_find_linkedin",
+      label: "Leadhunter Find LinkedIn",
+      description:
+        "Find LinkedIn profiles of the founder / CEO / co-founder of the lead's company. " +
+        "Use lead_id or the 12-character id_prefix from a lead_linkedin callback. " +
+        "Returns up to 5 public LinkedIn profile URLs with name and title hints. " +
+        "Backed by Firecrawl public web search (site:linkedin.com/in queries) — DOES NOT log into LinkedIn or read cookies. " +
+        "Results are cached per-company for 30 days. " +
+        "Response shape: `{ok, company, kind:\"founder\", profiles: [{url, name, title_hint, snippet}], source: \"cache\"|\"firecrawl\"}`. " +
+        "Use the returned founder URL to enrich the lead pitch with concrete name/title context. " +
+        "Profiles may be stale; copy-paste only, never automatic outreach. " +
+        "Hit rate ~60-80% for fundraised companies (Crunchbase/TC press), lower for stealth/pre-launch. Empty `profiles: []` is a valid outcome.",
+      parameters: schema({
+        lead_id: { type: "string" },
+        id_prefix: { type: "string", pattern: "^[0-9a-f]{12}$" },
+      }),
+      execute: async (_toolCallId, params) => {
+        const lead_id = await resolveLeadId(params);
+        return jsonResult(await post("/leads/find_linkedin", { lead_id }));
       },
     });
   },

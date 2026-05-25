@@ -27,7 +27,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
-    def test_schema_v14_persists_raw_email_agent_tasks_and_reports(self):
+    def test_schema_v15_persists_raw_email_agent_tasks_reports_and_linkedin_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -37,8 +37,13 @@ class DatabaseTests(unittest.TestCase):
                 job_columns = [row["name"] for row in conn.execute("pragma table_info(jobs)").fetchall()]
                 task_columns = [row["name"] for row in conn.execute("pragma table_info(agent_tasks)").fetchall()]
                 report_columns = [row["name"] for row in conn.execute("pragma table_info(agent_reports)").fetchall()]
+                linkedin_columns = [row["name"] for row in conn.execute("pragma table_info(company_linkedin_cache)").fetchall()]
 
-            self.assertEqual(schema_version, 14)
+            self.assertEqual(schema_version, 15)
+            self.assertEqual(
+                linkedin_columns,
+                ["company_normalized", "kind", "source_company_label", "profiles_json", "fetched_at"],
+            )
             self.assertEqual(
                 email_columns,
                 [

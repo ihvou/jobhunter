@@ -15,6 +15,7 @@ from .agent_actions import ActionResult, AgentActionContext, apply_agent_action,
 from .app import JobHunter
 from .config import load_app_config, load_sources
 from .database import tomorrow_iso
+from .firecrawl import FirecrawlError, firecrawl_available, firecrawl_search
 from .logging_setup import configure_logging, log_context, safe_log_text
 from .models import Job, Lead, SourceConfig, utc_now_iso
 from .scoring import load_scoring_rules, score_job
@@ -452,6 +453,72 @@ class JobHunterService:
             "job_id": job_id,
             "draft": draft,
             "card_text": format_job_card(job_digest_row(job)),
+        }
+
+    def find_job_recruiters(self, job_id: str) -> Dict:
+        job = self.ensure_job(job_id)
+        result = self._find_linkedin_profiles(job["company"], "recruiter")
+        result["job_id"] = job_id
+        result["card_text"] = format_job_card(job_digest_row(job))
+        return result
+
+    def find_lead_linkedin(self, lead_id: str) -> Dict:
+        lead = self.bot.database.get_lead(lead_id)
+        if not lead:
+            raise ServiceError(404, "Lead %s not found" % lead_id)
+        company = lead["company"] if "company" in lead.keys() else ""
+        result = self._find_linkedin_profiles(company, "founder")
+        result["lead_id"] = lead_id
+        return result
+
+    def _find_linkedin_profiles(self, company: str, kind: str) -> Dict:
+        if kind not in ("recruiter", "founder"):
+            raise ServiceError(400, "kind must be 'recruiter' or 'founder'")
+        company_label = (company or "").strip()
+        if not company_label:
+            return {"ok": True, "company": "", "kind": kind, "profiles": [], "source": "no_company"}
+        company_normalized = _normalize_company_for_cache(company_label)
+        cached = self.bot.database.get_linkedin_cache(company_normalized, kind)
+        if cached:
+            fetched_at = cached["fetched_at"]
+            try:
+                age_days = (datetime.utcnow() - datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ")).days
+            except Exception:
+                age_days = 999
+            if age_days < 30:
+                profiles = json.loads(cached["profiles_json"] or "[]")
+                return {
+                    "ok": True,
+                    "company": company_label,
+                    "kind": kind,
+                    "profiles": profiles,
+                    "source": "cache",
+                    "cache_age_days": age_days,
+                }
+        if not firecrawl_available(self.bot.config.firecrawl_api_key):
+            raise ServiceError(503, "Firecrawl is not configured (FIRECRAWL_API_KEY missing)")
+        if kind == "recruiter":
+            role_clause = '(recruiter OR "talent acquisition" OR "people operations" OR "head of people" OR sourcer)'
+        else:
+            role_clause = '(founder OR CEO OR "co-founder" OR "chief executive" OR "founding")'
+        query = 'site:linkedin.com/in "%s" %s' % (company_label, role_clause)
+        try:
+            search = firecrawl_search(query, api_key=self.bot.config.firecrawl_api_key, limit=8)
+        except FirecrawlError as exc:
+            raise ServiceError(502, "Firecrawl search failed: %s" % exc)
+        profiles = _parse_linkedin_search_results(search.get("results") or [])
+        self.bot.database.upsert_linkedin_cache(
+            company_normalized,
+            kind,
+            json.dumps(profiles, ensure_ascii=False),
+            source_company_label=company_label,
+        )
+        return {
+            "ok": True,
+            "company": company_label,
+            "kind": kind,
+            "profiles": profiles,
+            "source": "firecrawl",
         }
 
     def propose_actions(self, actions: List[Dict], user_intent: str = "", session_id: str = "") -> Dict:
@@ -1106,6 +1173,10 @@ def create_handler(app: JobHunterService):
                     payload = app.snooze(required(body, "job_id"))
                 elif method == "POST" and path == "/cover-note":
                     payload = app.cover_note(required(body, "job_id"), bool(body.get("override_budget", False)))
+                elif method == "POST" and path == "/jobs/find_recruiters":
+                    payload = app.find_job_recruiters(required(body, "job_id"))
+                elif method == "POST" and path == "/leads/find_linkedin":
+                    payload = app.find_lead_linkedin(required(body, "lead_id"))
                 elif method == "POST" and path == "/jobs/resolve_prefix":
                     payload = app.resolve_job_prefix(required(body, "id_prefix"))
                 elif method == "POST" and path == "/leads/resolve_prefix":
@@ -1321,6 +1392,63 @@ def job_digest_row(row) -> Dict:
         "fired_rules": data.get("fired_rules", []),
     }
     out["card_text"] = format_job_card(out)
+    return out
+
+
+def _normalize_company_for_cache(company: str) -> str:
+    """Stable cache key — lowercase, strip suffixes like Inc/LLC/Ltd, collapse whitespace."""
+    text = (company or "").strip().lower()
+    text = re.sub(r"[‘’“”\"',]", "", text)
+    text = re.sub(
+        r"[\s,]+(inc|llc|ltd|gmbh|sa|s\.a\.|s\.r\.l|s\.r\.o|pty|co|company|corp|corporation|holdings|labs|ai|io)\.?$",
+        "",
+        text,
+    )
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _parse_linkedin_search_results(results: List) -> List[Dict]:
+    """Filter firecrawl search results to LinkedIn /in/ profile URLs and extract name + title hint.
+
+    Returns up to 5 profiles with shape `{url, name, title_hint, snippet}`. Drops non-LinkedIn
+    URLs, /company/ pages, and obvious-noise titles.
+    """
+    out = []
+    seen = set()
+    for entry in results or []:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "").strip()
+        if not url:
+            continue
+        m = re.match(r"^https?://([a-z\-]+\.)?linkedin\.com/in/([A-Za-z0-9\-_%]+)/?", url)
+        if not m:
+            continue
+        slug = m.group(2).lower()
+        if slug in seen:
+            continue
+        seen.add(slug)
+        title = str(entry.get("title") or "").strip()
+        snippet = str(entry.get("description") or entry.get("snippet") or "").strip()
+        # Title pattern is usually "Name - Title - Company | LinkedIn"
+        name = ""
+        title_hint = ""
+        if title:
+            cleaned = re.sub(r"\s*\|\s*LinkedIn\s*$", "", title, flags=re.IGNORECASE).strip()
+            parts = [p.strip() for p in re.split(r"\s+[–—\-]\s+", cleaned) if p.strip()]
+            if parts:
+                name = parts[0]
+                if len(parts) > 1:
+                    title_hint = " — ".join(parts[1:])
+        out.append({
+            "url": "https://www.linkedin.com/in/%s" % slug,
+            "name": name[:120],
+            "title_hint": title_hint[:160],
+            "snippet": snippet[:280],
+        })
+        if len(out) >= 5:
+            break
     return out
 
 

@@ -32,6 +32,7 @@
       "jobhunter_revert_action",
       "jobhunter_mark_job",
       "jobhunter_cover_note",
+      "jobhunter_find_recruiters",
       "jobhunter_query_sql",
       "jobhunter_process_email",
       "jobhunter_process_unparsed_emails",
@@ -44,8 +45,8 @@
       "leadhunter_rescore_leads",
       "leadhunter_save_leads",
       "leadhunter_add_lead_source",
-      "leadhunter_mark_lead",
-      "leadhunter_draft_pitch"
+      "leadhunter_mark_lead",      "leadhunter_draft_pitch",
+      "leadhunter_find_linkedin"
     ]
   },
   "configSchema": {

@@ -14,7 +14,7 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 14
+LATEST_SCHEMA_VERSION = 15
 
 AGENT_IDS = {"collector", "qa", "pm", "researcher", "engineer", "user"}
 TASK_FINAL_STATUSES = {"completed", "cancelled", "needs_clarification"}
@@ -83,6 +83,9 @@ class Database:
             if current < 14:
                 migrate_v14(conn)
                 set_schema_version(conn, 14)
+            if current < 15:
+                migrate_v15(conn)
+                set_schema_version(conn, 15)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -861,6 +864,42 @@ class Database:
         params.append(min(max(1, int(limit or 20)), 100))
         with self.connection() as conn:
             return list(conn.execute(sql, params))
+
+    def get_linkedin_cache(self, company_normalized: str, kind: str) -> Optional[sqlite3.Row]:
+        """Return cached LinkedIn profile lookup row, or None if missing."""
+        if not company_normalized or kind not in ("recruiter", "founder"):
+            return None
+        with self.connection() as conn:
+            row = conn.execute(
+                "select * from company_linkedin_cache where company_normalized = ? and kind = ?",
+                (company_normalized, kind),
+            ).fetchone()
+            return row
+
+    def upsert_linkedin_cache(
+        self,
+        company_normalized: str,
+        kind: str,
+        profiles_json: str,
+        source_company_label: str = "",
+    ) -> None:
+        """Insert or replace a cache row. `profiles_json` is the JSON-serialized list of profile dicts."""
+        if not company_normalized or kind not in ("recruiter", "founder"):
+            return
+        now = utc_now_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                insert into company_linkedin_cache (
+                    company_normalized, kind, source_company_label, profiles_json, fetched_at
+                ) values (?, ?, ?, ?, ?)
+                on conflict(company_normalized, kind) do update set
+                    source_company_label = excluded.source_company_label,
+                    profiles_json = excluded.profiles_json,
+                    fetched_at = excluded.fetched_at
+                """,
+                (company_normalized, kind, source_company_label or "", profiles_json or "[]", now),
+            )
 
     def recent_jobs_by_status(self, status: str, limit: int = 10) -> List[sqlite3.Row]:
         with self.connection() as conn:
@@ -2098,6 +2137,23 @@ def migrate_v14(conn) -> None:
         );
         create index if not exists idx_agent_reports_created
             on agent_reports(created_at desc);
+        """
+    )
+
+
+def migrate_v15(conn) -> None:
+    conn.executescript(
+        """
+        create table if not exists company_linkedin_cache (
+            company_normalized text not null,
+            kind text not null,
+            source_company_label text,
+            profiles_json text not null default '[]',
+            fetched_at text not null,
+            primary key (company_normalized, kind)
+        );
+        create index if not exists idx_company_linkedin_cache_fetched
+            on company_linkedin_cache(fetched_at desc);
         """
     )
 

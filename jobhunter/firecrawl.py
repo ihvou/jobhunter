@@ -75,6 +75,63 @@ def firecrawl_scrape_markdown(
     }
 
 
+def firecrawl_search(
+    query: str,
+    api_key: str = "",
+    base_url: str = "",
+    limit: int = 5,
+    timeout_seconds: int = 30,
+) -> Dict:
+    """Call Firecrawl's /v2/search endpoint. Returns the raw payload's `data` list of result dicts.
+
+    Each result has at least `url` and may include `title` and `description`. Caller is
+    responsible for parsing/filtering. Returns an empty list on success-but-empty.
+    """
+    api_key = (api_key or os.getenv("FIRECRAWL_API_KEY", "")).strip()
+    if not api_key:
+        raise FirecrawlError("FIRECRAWL_API_KEY is not configured")
+    query = str(query or "").strip()
+    if not query:
+        raise FirecrawlError("Firecrawl search query is empty")
+    endpoint = firecrawl_endpoint(base_url or os.getenv("FIRECRAWL_BASE_URL", DEFAULT_FIRECRAWL_BASE_URL), "/v2/search")
+    body = {
+        "query": query,
+        "limit": max(1, min(int(limit or 5), 25)),
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer %s" % api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds or 30))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = read_error_detail(exc)
+        raise FirecrawlError("Firecrawl HTTP %s: %s" % (exc.code, detail))
+    except urllib.error.URLError as exc:
+        raise FirecrawlError("Firecrawl URL error: %s" % exc.reason)
+    except json.JSONDecodeError as exc:
+        raise FirecrawlError("Firecrawl returned invalid JSON: %s" % exc)
+    if payload.get("success") is False:
+        raise FirecrawlError(str(payload.get("error") or payload.get("message") or "Firecrawl search failed"))
+    data = payload.get("data")
+    if isinstance(data, dict):
+        # /v2/search may nest results under data.web for grouped results
+        web = data.get("web") if isinstance(data.get("web"), list) else None
+        if isinstance(web, list):
+            return {"results": web}
+        return {"results": []}
+    if isinstance(data, list):
+        return {"results": data}
+    return {"results": []}
+
+
 def firecrawl_endpoint(base_url: str, path: str) -> str:
     parsed = urlparse((base_url or DEFAULT_FIRECRAWL_BASE_URL).strip())
     if parsed.scheme != "https":

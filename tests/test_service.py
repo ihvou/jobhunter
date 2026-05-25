@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from jobhunter.app import JobHunter
-from jobhunter.models import Job, ScoreResult, SourceConfig
+from jobhunter.models import Job, Lead, ScoreResult, SourceConfig
 from jobhunter.service import JobHunterService, ServiceError
 from test_app import config_for
 
@@ -328,6 +328,124 @@ class ServiceTests(unittest.TestCase):
                 service.rescore_leads({})
             self.assertEqual(raised.exception.status, 400)
             self.assertIn("ICP is empty", raised.exception.message)
+
+    def test_find_job_recruiters_caches_and_parses_linkedin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, job_id = self.seeded_bot(tmp)
+            bot.config.firecrawl_api_key = "test-key"
+            service = JobHunterService(bot)
+            fake_results = {
+                "results": [
+                    {
+                        "url": "https://www.linkedin.com/in/jane-smith/",
+                        "title": "Jane Smith - Senior Technical Recruiter - ExampleCo | LinkedIn",
+                        "description": "Jane has been at ExampleCo for 2 years recruiting product hires.",
+                    },
+                    {
+                        "url": "https://uk.linkedin.com/in/bob-jones",
+                        "title": "Bob Jones — Head of People at ExampleCo",
+                        "description": "Building the people function at ExampleCo.",
+                    },
+                    {
+                        "url": "https://www.linkedin.com/company/exampleco",
+                        "title": "ExampleCo | LinkedIn",
+                        "description": "Company page",
+                    },
+                    {
+                        "url": "https://www.linkedin.com/in/jane-smith/",
+                        "title": "Jane Smith duplicate",
+                        "description": "dup",
+                    },
+                ]
+            }
+            with mock.patch("jobhunter.service.firecrawl_search", return_value=fake_results) as patched:
+                first = service.find_job_recruiters(job_id)
+                self.assertEqual(patched.call_count, 1)
+                # second call within TTL must use cache, not firecrawl
+                second = service.find_job_recruiters(job_id)
+                self.assertEqual(patched.call_count, 1)
+
+            self.assertEqual(first["source"], "firecrawl")
+            self.assertEqual(second["source"], "cache")
+            self.assertEqual(first["company"], "ExampleCo")
+            self.assertEqual(first["kind"], "recruiter")
+            # filtered: no /company/ pages, no duplicates, normalized to canonical www.linkedin.com host
+            self.assertEqual(len(first["profiles"]), 2)
+            self.assertEqual(first["profiles"][0]["url"], "https://www.linkedin.com/in/jane-smith")
+            self.assertEqual(first["profiles"][0]["name"], "Jane Smith")
+            self.assertIn("Recruiter", first["profiles"][0]["title_hint"])
+            self.assertEqual(first["profiles"][1]["url"], "https://www.linkedin.com/in/bob-jones")
+            self.assertEqual(first["profiles"][1]["name"], "Bob Jones")
+            self.assertIn("Head of People", first["profiles"][1]["title_hint"])
+
+    def test_find_lead_linkedin_uses_founder_role_pattern(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.firecrawl_api_key = "test-key"
+            lead_id, _ = bot.database.upsert_lead(
+                Lead(
+                    person_name="Alice",
+                    company="Acme Insurance Inc",
+                    role="Founder",
+                    url="https://example.com/co",
+                    source_name="Src",
+                )
+            )
+            service = JobHunterService(bot)
+            captured = {}
+
+            def fake_search(query, **_kwargs):
+                captured["query"] = query
+                return {
+                    "results": [
+                        {
+                            "url": "https://www.linkedin.com/in/alice-founder/",
+                            "title": "Alice Founder — Founder & CEO at Acme Insurance",
+                            "description": "Building AI-native insurance workflows.",
+                        }
+                    ]
+                }
+
+            with mock.patch("jobhunter.service.firecrawl_search", side_effect=fake_search):
+                result = service.find_lead_linkedin(lead_id)
+
+            self.assertEqual(result["kind"], "founder")
+            self.assertEqual(result["source"], "firecrawl")
+            self.assertEqual(len(result["profiles"]), 1)
+            self.assertIn("founder", captured["query"].lower())
+            self.assertIn("Acme Insurance Inc", captured["query"])
+            self.assertIn("site:linkedin.com/in", captured["query"])
+
+    def test_find_recruiters_returns_empty_when_no_company(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.firecrawl_api_key = "test-key"
+            job_no_co_id, _ = bot.database.upsert_job(
+                Job(
+                    source_id="s",
+                    source_name="Source",
+                    external_id="2",
+                    url="https://example.com/job-no-company",
+                    title="Mystery role",
+                    company="",
+                    description="Some role with no company.",
+                )
+            )
+            service = JobHunterService(bot)
+            with mock.patch("jobhunter.service.firecrawl_search") as patched:
+                result = service.find_job_recruiters(job_no_co_id)
+                self.assertEqual(patched.call_count, 0)
+            self.assertEqual(result["profiles"], [])
+            self.assertEqual(result["source"], "no_company")
+
+    def test_find_recruiters_requires_firecrawl_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, job_id = self.seeded_bot(tmp)
+            bot.config.firecrawl_api_key = ""
+            service = JobHunterService(bot)
+            with self.assertRaises(ServiceError) as raised:
+                service.find_job_recruiters(job_id)
+            self.assertEqual(raised.exception.status, 503)
 
     def test_show_profile_and_icp_return_local_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:
