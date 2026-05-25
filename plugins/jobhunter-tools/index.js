@@ -215,7 +215,7 @@ export default definePluginEntry({
         "1) call `jobhunter_find_recruiters` with the id_prefix. Response contains `profiles` (list of " +
         "`{url, name, title_hint, snippet}`), `company`, and `card_text` (canonical job card body). " +
         "2) emit `message({action: \"edit\", target: <chat_id>, messageId: <messageId from callback_data>, " +
-        "message: <card_text> + \"\\n\\n— Recruiters at \" + <company> + \" —\\n\" + (profiles.length ? profiles.map(p => \"• \" + p.url + (p.name ? \" — \" + p.name : \"\") + (p.title_hint ? \" (\" + p.title_hint + \")\" : \"\")).join(\"\\n\") : \"No public LinkedIn results indexed.\"), presentation: {blocks: [" +
+        "message: <card_text> + \"\\n\\n— Recruiters at \" + <company> + \" —\\n\" + (profiles.length ? profiles.map((p, i) => (i+1) + \". \" + p.url + ([p.name, p.title_hint].filter(Boolean).length ? \"\\n   \" + [p.name, p.title_hint].filter(Boolean).join(\" — \") : \"\") + (p.snippet ? \"\\n   \\\"\" + p.snippet + \"\\\"\" : \"\")).join(\"\\n\\n\") : \"No public LinkedIn results indexed.\"), presentation: {blocks: [" +
         "{type: \"buttons\", buttons: [{text: \"Applied\", callback_data: \"applied:<id_prefix>:<messageId>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"snooze:<id_prefix>:<messageId>\"}, " +
@@ -1007,9 +1007,10 @@ export default definePluginEntry({
         "(c) For lead_linkedin (enrich action — APPEND founder LinkedIn URLs to the SAME lead card, do NOT send a new message): " +
         "1) call `leadhunter_find_linkedin` with the id_prefix. Response contains `profiles` (list of " +
         "`{url, name, title_hint, snippet}`), `company`, and the lead card text is in the response under `card_text` ONLY when " +
-        "regenerated; if absent, reuse the original card text from your turn context. " +
+        "regenerated; if absent, reuse the original card text from your turn context. Note: when the lead has a person_name, " +
+        "results are pre-reranked so profiles matching that name appear first — but still copy the FULL list so the user can disambiguate. " +
         "2) emit `message({action: \"edit\", target: <chat_id>, messageId: <messageId from callback_data>, " +
-        "message: <card_text> + \"\\n\\n— Founder LinkedIn for \" + <company> + \" —\\n\" + (profiles.length ? profiles.map(p => \"• \" + p.url + (p.name ? \" — \" + p.name : \"\") + (p.title_hint ? \" (\" + p.title_hint + \")\" : \"\")).join(\"\\n\") : \"No public LinkedIn results indexed.\"), presentation: {blocks: [" +
+        "message: <card_text> + \"\\n\\n— Founder LinkedIn for \" + <company> + \" —\\n\" + (profiles.length ? profiles.map((p, i) => (i+1) + \". \" + p.url + ([p.name, p.title_hint].filter(Boolean).length ? \"\\n   \" + [p.name, p.title_hint].filter(Boolean).join(\" — \") : \"\") + (p.snippet ? \"\\n   \\\"\" + p.snippet + \"\\\"\" : \"\")).join(\"\\n\\n\") : \"No public LinkedIn results indexed.\"), presentation: {blocks: [" +
         "{type: \"buttons\", buttons: [{text: \"Reached out\", callback_data: \"lead_reached:<id_prefix>:<messageId>\", style: \"success\"}, " +
         "{text: \"Irrelevant\", callback_data: \"lead_irrelevant:<id_prefix>:<messageId>\", style: \"danger\"}]}, " +
         "{type: \"buttons\", buttons: [{text: \"Snooze\", callback_data: \"lead_snooze:<id_prefix>:<messageId>\"}, " +

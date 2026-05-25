@@ -457,7 +457,11 @@ class JobHunterService:
 
     def find_job_recruiters(self, job_id: str) -> Dict:
         job = self.ensure_job(job_id)
-        result = self._find_linkedin_profiles(job["company"], "recruiter")
+        result = self._find_linkedin_profiles(
+            job["company"],
+            "recruiter",
+            company_url=job["url"] if "url" in job.keys() else "",
+        )
         result["job_id"] = job_id
         result["card_text"] = format_job_card(job_digest_row(job))
         return result
@@ -467,11 +471,27 @@ class JobHunterService:
         if not lead:
             raise ServiceError(404, "Lead %s not found" % lead_id)
         company = lead["company"] if "company" in lead.keys() else ""
-        result = self._find_linkedin_profiles(company, "founder")
+        person_name = lead["person_name"] if "person_name" in lead.keys() else ""
+        # Note: lead.url is typically the discovery URL (Antler announcement, TechCrunch
+        # article, Product Hunt page, YC Launches post) — NOT the lead company's own
+        # website. Passing it as company_url would extract an unrelated domain and skew
+        # Google toward results mentioning the source, not the target company. Skip it.
+        result = self._find_linkedin_profiles(
+            company,
+            "founder",
+            company_url="",
+            prefer_name_substring=person_name,
+        )
         result["lead_id"] = lead_id
         return result
 
-    def _find_linkedin_profiles(self, company: str, kind: str) -> Dict:
+    def _find_linkedin_profiles(
+        self,
+        company: str,
+        kind: str,
+        company_url: str = "",
+        prefer_name_substring: str = "",
+    ) -> Dict:
         if kind not in ("recruiter", "founder"):
             raise ServiceError(400, "kind must be 'recruiter' or 'founder'")
         company_label = (company or "").strip()
@@ -487,6 +507,8 @@ class JobHunterService:
                 age_days = 999
             if age_days < 30:
                 profiles = json.loads(cached["profiles_json"] or "[]")
+                if prefer_name_substring:
+                    profiles = _reorder_by_name_match(profiles, prefer_name_substring)
                 return {
                     "ok": True,
                     "company": company_label,
@@ -501,12 +523,19 @@ class JobHunterService:
             role_clause = '(recruiter OR "talent acquisition" OR "people operations" OR "head of people" OR sourcer)'
         else:
             role_clause = '(founder OR CEO OR "co-founder" OR "chief executive" OR "founding")'
-        query = 'site:linkedin.com/in "%s" %s' % (company_label, role_clause)
+        domain_hint = _company_domain_hint(company_url)
+        if domain_hint:
+            query = 'site:linkedin.com/in ("%s" OR "%s") %s' % (company_label, domain_hint, role_clause)
+        else:
+            query = 'site:linkedin.com/in "%s" %s' % (company_label, role_clause)
         try:
-            search = firecrawl_search(query, api_key=self.bot.config.firecrawl_api_key, limit=8)
+            search = firecrawl_search(query, api_key=self.bot.config.firecrawl_api_key, limit=10)
         except FirecrawlError as exc:
             raise ServiceError(502, "Firecrawl search failed: %s" % exc)
-        profiles = _parse_linkedin_search_results(search.get("results") or [])
+        profiles = _parse_linkedin_search_results(search.get("results") or [], domain_hint=domain_hint)
+        if prefer_name_substring:
+            profiles = _reorder_by_name_match(profiles, prefer_name_substring)
+        # Cache the un-reordered top-5 so callers without person_name see consistent rankings.
         self.bot.database.upsert_linkedin_cache(
             company_normalized,
             kind,
@@ -1408,14 +1437,73 @@ def _normalize_company_for_cache(company: str) -> str:
     return text.strip()
 
 
-def _parse_linkedin_search_results(results: List) -> List[Dict]:
+def _company_domain_hint(url: str) -> str:
+    """Return the company-owned domain (e.g. 'substrate.run') if `url` is not a known
+    ATS or job-aggregator host, else ''. Used to add an OR-clause to the LinkedIn search
+    to disambiguate companies with collision-prone names.
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    netloc = (parsed.netloc or "").lower().strip()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    if not netloc or "." not in netloc:
+        return ""
+    for suffix in _ATS_AGGREGATOR_HOSTS:
+        if netloc == suffix or netloc.endswith("." + suffix):
+            return ""
+    return netloc
+
+
+_ATS_AGGREGATOR_HOSTS = {
+    # ATS providers
+    "ashbyhq.com", "greenhouse.io", "lever.co", "workable.com", "recruitee.com",
+    "personio.de", "personio.com", "smartrecruiters.com", "bamboohr.com",
+    # Job aggregators / boards
+    "linkedin.com", "wellfound.com", "angel.co", "angellist.com", "indeed.com",
+    "glassdoor.com", "monster.com", "ziprecruiter.com",
+    "ycombinator.com", "lobste.rs", "news.ycombinator.com", "hnhiring.com",
+    "weworkremotely.com", "remoteok.com", "remoteok.io", "remotive.com",
+    "himalayas.app", "arbeitnow.com", "djinni.co", "dou.ua",
+    "vibehackers.io", "goodvibecode.com", "realworkfromanywhere.com",
+    "producthunt.com", "betalist.com", "crunchbase.com", "github.com",
+    # Founder/lead discovery sources (their domain is NOT the lead company's domain)
+    "antler.co", "techcrunch.com", "techstars.com", "pear.vc",
+    "tinyseed.com", "forumvc.com", "eu-startups.com", "sifted.eu",
+    "joinef.com", "f.inc", "aigrant.com", "southparkcommons.com",
+    "speedrun.a16z.com", "a16z.com", "sequoiacap.com",
+    "brokertechventures.com", "fintechinnovationlab.com", "gener8tor.com",
+    "nar-reach.com",
+}
+
+
+def _reorder_by_name_match(profiles: List[Dict], substring: str) -> List[Dict]:
+    """Move profiles whose name or URL slug contains `substring` (case-insensitive) to the front.
+    Stable sort: preserves original order within each group.
+    """
+    substr = (substring or "").strip().lower()
+    if not substr or not profiles:
+        return profiles
+    return sorted(
+        profiles,
+        key=lambda p: 0 if (substr in (p.get("name") or "").lower() or substr in (p.get("url") or "").lower()) else 1,
+    )
+
+
+def _parse_linkedin_search_results(results: List, domain_hint: str = "") -> List[Dict]:
     """Filter firecrawl search results to LinkedIn /in/ profile URLs and extract name + title hint.
 
     Returns up to 5 profiles with shape `{url, name, title_hint, snippet}`. Drops non-LinkedIn
-    URLs, /company/ pages, and obvious-noise titles.
+    URLs, /company/ pages, and obvious-noise titles. When `domain_hint` is provided, prefers
+    results whose snippet mentions that domain (helps disambiguate name collisions).
     """
-    out = []
+    candidates = []
     seen = set()
+    domain_lc = (domain_hint or "").strip().lower()
     for entry in results or []:
         if not isinstance(entry, dict):
             continue
@@ -1441,14 +1529,23 @@ def _parse_linkedin_search_results(results: List) -> List[Dict]:
                 name = parts[0]
                 if len(parts) > 1:
                     title_hint = " — ".join(parts[1:])
-        out.append({
+        profile = {
             "url": "https://www.linkedin.com/in/%s" % slug,
             "name": name[:120],
             "title_hint": title_hint[:160],
             "snippet": snippet[:280],
-        })
-        if len(out) >= 5:
-            break
+        }
+        # Domain-hint preference: 0 = snippet mentions domain (high confidence), 1 = otherwise
+        if domain_lc and (domain_lc in snippet.lower() or domain_lc in title.lower()):
+            profile["_rank"] = 0
+        else:
+            profile["_rank"] = 1
+        candidates.append(profile)
+    candidates.sort(key=lambda p: p["_rank"])
+    out = []
+    for p in candidates[:5]:
+        p.pop("_rank", None)
+        out.append(p)
     return out
 
 

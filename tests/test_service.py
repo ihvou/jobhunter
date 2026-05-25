@@ -447,6 +447,118 @@ class ServiceTests(unittest.TestCase):
                 service.find_job_recruiters(job_id)
             self.assertEqual(raised.exception.status, 503)
 
+    def test_find_linkedin_reranks_by_lead_person_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.firecrawl_api_key = "test-key"
+            lead_id, _ = bot.database.upsert_lead(
+                Lead(
+                    person_name="Kinza",
+                    company="Chief Rebel",
+                    role="Founder",
+                    url="https://chiefrebel.com",
+                    source_name="Src",
+                )
+            )
+            service = JobHunterService(bot)
+            fake_results = {
+                "results": [
+                    {
+                        "url": "https://www.linkedin.com/in/axel-lindberg/",
+                        "title": "Axel Lindberg — Chief Rebel | LinkedIn",
+                        "description": "Stockholm gaming studio",
+                    },
+                    {
+                        "url": "https://www.linkedin.com/in/kinza-azmat/",
+                        "title": "Kinza Azmat — Chief Rebel | LinkedIn",
+                        "description": "Building Chief Rebel for small businesses.",
+                    },
+                    {
+                        "url": "https://www.linkedin.com/in/bretton-hamilton/",
+                        "title": "Bretton Hamilton — Chief Rebel | LinkedIn",
+                        "description": "Gaming studio",
+                    },
+                ]
+            }
+            with mock.patch("jobhunter.service.firecrawl_search", return_value=fake_results):
+                result = service.find_lead_linkedin(lead_id)
+            # Kinza should be first (name matches the lead's person_name)
+            self.assertEqual(result["profiles"][0]["name"], "Kinza Azmat")
+            self.assertIn("kinza-azmat", result["profiles"][0]["url"])
+
+    def test_find_recruiters_includes_domain_hint_in_query_for_company_owned_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.firecrawl_api_key = "test-key"
+            # Job pointing at a company-owned domain (not an ATS aggregator).
+            job_co_id, _ = bot.database.upsert_job(
+                Job(
+                    source_id="s",
+                    source_name="Source",
+                    external_id="co",
+                    url="https://substrate.run/careers/founding-engineer",
+                    title="Founding engineer",
+                    company="Substrate",
+                    description="Build LLM tooling",
+                )
+            )
+            # Job pointing at an ATS aggregator host (should NOT contribute a domain hint).
+            job_ats_id, _ = bot.database.upsert_job(
+                Job(
+                    source_id="s",
+                    source_name="Source",
+                    external_id="ats",
+                    url="https://jobs.ashbyhq.com/substrate/abc-123",
+                    title="Founding PM",
+                    company="Substrate",
+                    description="Build LLM tooling",
+                )
+            )
+            service = JobHunterService(bot)
+            captured = []
+
+            def fake_search(query, **_kwargs):
+                captured.append(query)
+                return {"results": []}
+
+            with mock.patch("jobhunter.service.firecrawl_search", side_effect=fake_search):
+                service.find_job_recruiters(job_co_id)
+                # Use a different company so we hit a real firecrawl call instead of cache:
+                bot.database.upsert_job(
+                    Job(
+                        source_id="s",
+                        source_name="Source",
+                        external_id="ats2",
+                        url="https://jobs.ashbyhq.com/different/abc-456",
+                        title="x",
+                        company="DifferentCo",
+                        description="d",
+                    )
+                )
+                row = bot.database.recent_jobs(5)
+                ats_only_id = [r["id"] for r in row if r["company"] == "DifferentCo"][0]
+                service.find_job_recruiters(ats_only_id)
+
+            self.assertEqual(len(captured), 2)
+            # Company-owned URL → domain present in query
+            self.assertIn("substrate.run", captured[0])
+            self.assertIn('"Substrate" OR "substrate.run"', captured[0])
+            # ATS-only URL → no domain hint added
+            self.assertNotIn("ashbyhq", captured[1])
+            self.assertIn('"DifferentCo"', captured[1])
+
+    def test_parse_linkedin_results_prefers_snippets_mentioning_domain(self):
+        from jobhunter.service import _parse_linkedin_search_results
+        results = [
+            {"url": "https://www.linkedin.com/in/a/", "title": "A — Recruiter", "description": "Unrelated context"},
+            {"url": "https://www.linkedin.com/in/b/", "title": "B — Recruiter", "description": "Worked at substrate.run for 3 years"},
+            {"url": "https://www.linkedin.com/in/c/", "title": "C — Recruiter", "description": "Another unrelated bio"},
+        ]
+        out = _parse_linkedin_search_results(results, domain_hint="substrate.run")
+        # B should be first (snippet mentions the domain)
+        self.assertEqual(out[0]["name"], "B")
+        self.assertIn("substrate.run", out[0]["snippet"])
+
     def test_show_profile_and_icp_return_local_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot, _job_id = self.seeded_bot(tmp)
