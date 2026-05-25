@@ -620,7 +620,16 @@ cron_upsert_agent_job() {
     cron_exec add --name "$name" --cron "$schedule" --agent "$agent" --session isolated --light-context --timeout-seconds "$timeout_seconds" --message "$message" --no-deliver --json
     return
   fi
-  "${COMPOSE[@]}" exec -T openclaw-gateway node /app/dist/index.js cron rm "$name" >/dev/null 2>&1 || true
+  # `cron rm` takes an id, not a name. Resolve all existing entries by name
+  # and remove each so re-installs don't accumulate duplicates.
+  "${COMPOSE[@]}" exec -T openclaw-gateway sh -c '
+    set -eu
+    node /app/dist/index.js cron list 2>/dev/null \
+      | awk -v target="$1" '"'"'NR>1 && $2==target {print $1}'"'"' \
+      | while read -r id; do
+          [ -n "$id" ] && node /app/dist/index.js cron rm "$id" >/dev/null 2>&1 || true
+        done
+  ' sh "$name" >/dev/null 2>&1 || true
   if [ "$deliver" = "telegram" ]; then
     "${COMPOSE[@]}" exec -T openclaw-gateway sh -c '
       set -eu
@@ -655,30 +664,37 @@ install_cron_jobs() {
     "900" \
     "none" \
     "Collector routine: call jobhunter_collect_all_sources, process unparsed emails if needed, call jobhunter_get_more_jobs with mark_sent=false to verify counts, complete at most one collector task, then write jobhunter_write_status_report. Do not render job cards unless a human asked."
+  # Cron expressions are interpreted in UTC by the gateway. The schedules below
+  # are calibrated for WITA (UTC+8) overnight: subtract 8h from the desired local
+  # time to get the UTC cron expression.
+  #   researcher-nightly  03:00 WITA = 19:00 UTC
+  #   engineer-nightly    04:00 WITA = 20:00 UTC
+  #   qa-nightly          05:30 WITA = 21:30 UTC
+  #   pm-stakeholder      06:30 WITA = 22:30 UTC
   cron_upsert_agent_job \
     "researcher-nightly" \
-    "0 3 * * *" \
+    "0 19 * * *" \
     "researcher" \
     "1800" \
     "none" \
     "Researcher routine: read research context/profile/ICP/tasks, validate one angle with bounded public web/firecrawl/exa search, file exactly one concrete task or complete a picked task, write jobhunter_write_status_report, and stay silent on Telegram."
   cron_upsert_agent_job \
     "qa-nightly" \
-    "30 5 * * *" \
+    "30 21 * * *" \
     "qa" \
     "900" \
     "none" \
     "QA routine: run jobhunter_audit_email_extraction, inspect suspicious recent rows with SELECT-only SQL, file qa.bug tasks with sample ids for real bugs, complete one qa.investigate task if present, and write jobhunter_write_status_report."
   cron_upsert_agent_job \
     "engineer-nightly" \
-    "0 4 * * *" \
+    "0 20 * * *" \
     "engineer" \
     "3600" \
     "none" \
     "Engineer routine: work only in /workspace, pick one engineer task, create an engineer/<task-id>-<slug> branch for any change, run tests, push the branch, open a PR with evidence, complete the task with pr_url, and never push or merge main. If gh auth is unavailable, mark PR-needing tasks needs_clarification."
   cron_upsert_agent_job \
     "pm-stakeholder" \
-    "30 6 * * *" \
+    "30 22 * * *" \
     "pm" \
     "1200" \
     "telegram" \
