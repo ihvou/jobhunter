@@ -367,9 +367,9 @@ else
   printf '\nsandbox = "workspace-write"\n' >> "$config"
 fi
 if grep -q '^approval_policy = ' "$config"; then
-  sed -i 's/^approval_policy = .*/approval_policy = "on-request"/' "$config"
+  sed -i 's/^approval_policy = .*/approval_policy = "never"/' "$config"
 else
-  printf 'approval_policy = "on-request"\n' >> "$config"
+  printf 'approval_policy = "never"\n' >> "$config"
 fi
 echo "engineer workspace ready: $(git -C "$workspace" rev-parse --show-toplevel 2>/dev/null || echo "$workspace")"
 SH
@@ -691,7 +691,7 @@ install_cron_jobs() {
     "engineer" \
     "3600" \
     "none" \
-    "Engineer routine: work only in /workspace, pick one engineer task, create an engineer/<task-id>-<slug> branch for any change, run tests, push the branch, open a PR with evidence, complete the task with pr_url, and never push or merge main. If gh auth is unavailable, mark PR-needing tasks needs_clarification."
+    "Engineer routine. STEP 0: Run \`cd /workspace && pwd && git log --oneline -1\`. pwd MUST print /workspace; git log MUST show a recent jobhunter commit (e.g. 'Phase 7 pre-merge polish' or newer). If not, the workspace is misconfigured - complete the task with status=needs_clarification explaining the cwd mismatch and STOP. STEP 1: pick the highest-priority open task via jobhunter_pick_task(agent='engineer'). STEP 2: read the task's payload_json carefully - it contains 'problem', 'proposed_solution', 'files_to_touch', 'acceptance', 'do_not_do'. STEP 3: \`git fetch origin && git checkout -B engineer/<task-id>-<slug> origin/main\`. STEP 4: edit files per the solution. STEP 5: run \`PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m unittest discover -s tests\` and iterate until passing. STEP 6: \`git add -A && git commit -m '<task-id>: <summary>' && git push -u origin engineer/<task-id>-<slug>\`. STEP 7: \`gh pr create --title '...' --body '...'\` referencing the task acceptance criteria; capture the printed PR URL. STEP 8: jobhunter_complete_task(task_id, status='completed', result={'pr_url': '<url>', 'tests_passing': true}). Never push or merge main. If gh auth fails OR any step blocks, complete the task with status='needs_clarification' and a clear note about what blocked you. Do not exit silently after planning - either complete all 8 steps or explicitly mark needs_clarification."
   cron_upsert_agent_job \
     "pm-stakeholder" \
     "30 22 * * *" \
