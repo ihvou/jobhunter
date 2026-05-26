@@ -132,6 +132,14 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(picked["status"], "picked")
             completed = db.complete_agent_task(task_id, "completed", {"result": "ok"})
             self.assertEqual(completed["status"], "completed")
+
+            # Regression: priority must be descending. Filing a low-priority task first
+            # and a high-priority task second should yield the high-priority task on pick.
+            db.file_agent_task("qa", "engineer", "qa.bug", "low-prio", {}, priority=20)
+            high_id = db.file_agent_task("user", "engineer", "engineer.add_source_type", "high-prio", {}, priority=60)
+            picked_high = db.pick_agent_task("engineer")
+            self.assertEqual(picked_high["id"], high_id, "engineer must pick the highest-priority open task")
+            self.assertEqual(picked_high["priority"], 60)
             report_id = db.write_agent_report("qa", "first", {"checked": 1}, report_date="2026-05-24")
             report_id_again = db.write_agent_report("qa", "updated", {"checked": 2}, report_date="2026-05-24")
             self.assertEqual(report_id_again, report_id)

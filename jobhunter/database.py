@@ -761,7 +761,7 @@ class Database:
                 """
                 select * from agent_tasks
                 where %s
-                order by priority asc, created_at asc, id asc
+                order by priority desc, created_at asc, id asc
                 limit 1
                 """ % " and ".join(where),
                 params,
