@@ -55,6 +55,56 @@
       },
       models: {
         "openai-codex/gpt-5.5": {},
+        "codex-cli/gpt-5.5": {},
+      },
+      // OpenClaw 2026.5.7 resolves CLI backend config from
+      // agents.defaults.cliBackends, not agents.list[].cliBackends. Regular
+      // agents stay on openai-codex app-server; only Engineer selects the
+      // codex-cli model below, so this backend is effectively Engineer-scoped.
+      // The OpenAI plugin owns codex-cli bundleMcp/native-tool registration;
+      // this override changes only command/env/args so Engineer still receives
+      // Jobhunter plugin tools via OpenClaw's generated Codex MCP overlay.
+      cliBackends: {
+        "codex-cli": {
+          command: "/home/node/.openclaw/npm/node_modules/@openai/codex/bin/codex.js",
+          env: {
+            CODEX_HOME: "/home/node/.openclaw/agents/engineer/agent/codex-home",
+            HOME: "/home/node/.openclaw/agents/engineer/agent",
+          },
+          args: [
+            "exec",
+            "--json",
+            "--color",
+            "never",
+            "--sandbox",
+            "workspace-write",
+            "--cd",
+            "/workspace",
+            "-c",
+            "approval_policy=\"never\"",
+            "-c",
+            "service_tier=\"fast\"",
+            "--skip-git-repo-check",
+          ],
+          resumeArgs: [
+            "exec",
+            "resume",
+            "{sessionId}",
+            "-c",
+            "sandbox_mode=\"workspace-write\"",
+            "-c",
+            "approval_policy=\"never\"",
+            "-c",
+            "service_tier=\"fast\"",
+            "--skip-git-repo-check",
+          ],
+          output: "jsonl",
+          resumeOutput: "text",
+          input: "arg",
+          modelArg: "--model",
+          sessionIdFields: ["thread_id"],
+          sessionMode: "existing",
+        },
       },
       skills: ["jobhunter"],
       sandbox: {
@@ -96,6 +146,9 @@
         id: "engineer",
         name: "Jobhunter Engineer",
         skills: ["engineer"],
+        agentRuntime: { id: "codex-cli" },
+        model: { primary: "codex-cli/gpt-5.5" },
+        agentDir: "/home/node/.openclaw/agents/engineer/agent",
         workspace: "/workspace",
         tools: {
           profile: "coding",

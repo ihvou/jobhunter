@@ -1578,7 +1578,7 @@ jobhunter_write_status_report.
 - Mount a separate writable workspace at `/workspace` in the gateway container. NOT `/opt/jobhunter` (which stays read-only).
 - `/workspace` is a fresh `git clone` of the repo, owned by `node` user.
 - At gateway startup or via `./bin/openclaw ensure-engineer-workspace` (NEW launcher subcommand): if `/workspace/.git` missing, clone from origin; if present, `git fetch && git reset --hard origin/main`.
-- Engineer's codex-home has `--sandbox workspace-write` (not the default `read-only`). Apply via per-agent codex-home `config.toml` override.
+- Engineer selects `codex-cli/gpt-5.5` while the other agents remain on `openai-codex/gpt-5.5` app-server with read-only sandbox. OpenClaw 2026.5.7 resolves CLI backend config from `agents.defaults.cliBackends`, not `agents.list[].cliBackends`, so the shared `codex-cli` backend is intentionally wired to Engineer's `/workspace` and Engineer `CODEX_HOME`; only Engineer selects it. The OpenAI plugin owns `codex-cli` `bundleMcp`/native-tool registration, so the user config overrides command/env/args only and preserves the generated Codex MCP overlay for Jobhunter plugin tools.
 
 **Auth:**
 
