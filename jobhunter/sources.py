@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urljoin, urlparse
 
-from .firecrawl import FirecrawlError, firecrawl_available, firecrawl_scrape_markdown
+from .firecrawl import (
+    FirecrawlError,
+    firecrawl_available,
+    firecrawl_scrape_markdown,
+    firecrawl_scrape_raw_html,
+)
 from .logging_setup import log_context
 from .models import Job, SourceConfig, utc_now_iso
 
@@ -31,7 +36,7 @@ ROBOTS_TXT_RESPECT = os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", "ignore").strip()
 EMAIL_SAMPLE_MAX_BYTES = int(os.getenv("JOBHUNTER_EMAIL_SAMPLE_MAX_BYTES", str(256 * 1024)))
 EMAIL_SAMPLE_KEEP_PER_SENDER = int(os.getenv("JOBHUNTER_EMAIL_SAMPLE_KEEP_PER_SENDER", "20"))
 HOST_LAST_FETCH: Dict[str, float] = {}
-VALID_SOURCE_TYPES = {"rss", "json_api", "ats", "community", "imap"}
+VALID_SOURCE_TYPES = {"rss", "rss_proxy", "json_api", "ats", "community", "imap"}
 LEGACY_SOURCE_TYPE_ALIASES = {
     "email_alert": "imap",
     "remotive": "json_api",
@@ -213,13 +218,42 @@ def collect_from_source(source: SourceConfig) -> List[Job]:
         return collect_ats(source)
     if source_type == "community":
         return collect_link_page(source)
+    if source_type == "rss_proxy":
+        return collect_rss_proxy(source)
     if source_type in ("imap", "email_alert"):
         return collect_imap_alerts(source)
     raise SourceError("Unsupported source type: %s" % source.type)
 
 
 def collect_rss(source: SourceConfig) -> List[Job]:
+    """Direct RSS fetch via stdlib urllib. Use `rss_proxy` instead when the
+    upstream is Cloudflare/anti-bot gated (e.g. DOU returns 403 to urllib but
+    200 to Firecrawl's stealth proxies).
+    """
     text = fetch_source_text(source)
+    return _parse_rss_xml(text, source)
+
+
+def collect_rss_proxy(source: SourceConfig) -> List[Job]:
+    """RSS via Firecrawl's raw HTML fetch, then standard RSS XML parse.
+
+    Used for RSS feeds behind Cloudflare/anti-bot that block direct urllib
+    requests with HTTP 403. The Firecrawl `rawHtml` format returns the
+    upstream XML untransformed (vs `markdown` which would render link text
+    into the title field — see DOU regression where every job was titled
+    'Відгукнутись на вакансію' / 'Apply for vacancy').
+    """
+    if not firecrawl_available():
+        raise SourceError("rss_proxy source requires FIRECRAWL_API_KEY")
+    try:
+        raw = firecrawl_scrape_raw_html(source.url)
+    except FirecrawlError as exc:
+        raise SourceError("Firecrawl raw fetch failed for %s: %s" % (source.id, exc))
+    return _parse_rss_xml(raw, source)
+
+
+def _parse_rss_xml(text: str, source: SourceConfig) -> List[Job]:
+    """Shared RSS 2.0 / Atom 1.0 parser used by both collect_rss and collect_rss_proxy."""
     root = ET.fromstring(text)
     items = root.findall(".//item")
     if not items:

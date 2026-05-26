@@ -3,7 +3,7 @@ from unittest import mock
 
 from jobhunter.models import SourceConfig
 from jobhunter import sources as source_module
-from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, enrich_job_from_url, fetch_source_text, infer_company, strip_html, validate_safe_url
+from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, collect_rss_proxy, enrich_job_from_url, fetch_source_text, infer_company, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -32,6 +32,61 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].company, "ExampleCo")
         self.assertEqual(jobs[0].remote_policy, "remote")
+
+    def test_collect_rss_proxy_uses_firecrawl_raw_html_and_extracts_real_titles(self):
+        """Regression for DOU broken-titles: when fetched via Firecrawl markdown the
+        link text is the apply-button label, not the title. rss_proxy must fetch
+        raw XML so the RSS <title> element is preserved.
+        """
+        dou_rss_xml = """<?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>DOU Product Manager Jobs</title>
+            <link>https://jobs.dou.ua/vacancies/</link>
+            <item>
+              <title>Senior Product Manager</title>
+              <link>https://jobs.dou.ua/companies/oriented-as/vacancies/359298/</link>
+              <description><![CDATA[Oriented Soft. Take ownership of our core products. Remote.]]></description>
+              <pubDate>Sun, 25 May 2026 12:00:00 +0000</pubDate>
+              <guid>https://jobs.dou.ua/companies/oriented-as/vacancies/359298/</guid>
+            </item>
+            <item>
+              <title>Lead Product Manager (FORMA)</title>
+              <link>https://jobs.dou.ua/companies/universe/vacancies/359244/</link>
+              <description><![CDATA[Universe. Lead PM for forma product.]]></description>
+              <pubDate>Sat, 24 May 2026 12:00:00 +0000</pubDate>
+              <guid>https://jobs.dou.ua/companies/universe/vacancies/359244/</guid>
+            </item>
+          </channel>
+        </rss>"""
+        source = SourceConfig(id="dou", name="DOU", type="rss_proxy", url="https://jobs.dou.ua/vacancies/feeds/?category=Product+Manager")
+        with mock.patch("jobhunter.sources.firecrawl_available", return_value=True), \
+             mock.patch("jobhunter.sources.firecrawl_scrape_raw_html", return_value=dou_rss_xml) as fetch:
+            jobs = collect_rss_proxy(source)
+        fetch.assert_called_once_with(source.url)
+        self.assertEqual(len(jobs), 2)
+        # Critical: titles are the real RSS <title>, not "Apply for vacancy"
+        self.assertEqual(jobs[0].title, "Senior Product Manager")
+        self.assertEqual(jobs[0].url, "https://jobs.dou.ua/companies/oriented-as/vacancies/359298/")
+        self.assertEqual(jobs[1].title, "Lead Product Manager (FORMA)")
+        # remote_policy inferred from description
+        self.assertEqual(jobs[0].remote_policy, "remote")
+
+    def test_collect_rss_proxy_requires_firecrawl_api_key(self):
+        source = SourceConfig(id="dou", name="DOU", type="rss_proxy", url="https://jobs.dou.ua/vacancies/feeds/?category=Product+Manager")
+        with mock.patch("jobhunter.sources.firecrawl_available", return_value=False):
+            with self.assertRaises(SourceError) as cm:
+                collect_rss_proxy(source)
+        self.assertIn("FIRECRAWL_API_KEY", str(cm.exception))
+
+    def test_collect_rss_proxy_wraps_firecrawl_errors(self):
+        from jobhunter.firecrawl import FirecrawlError
+        source = SourceConfig(id="dou", name="DOU", type="rss_proxy", url="https://jobs.dou.ua/vacancies/feeds/?category=Product+Manager")
+        with mock.patch("jobhunter.sources.firecrawl_available", return_value=True), \
+             mock.patch("jobhunter.sources.firecrawl_scrape_raw_html", side_effect=FirecrawlError("HTTP 403")):
+            with self.assertRaises(SourceError) as cm:
+                collect_rss_proxy(source)
+        self.assertIn("Firecrawl raw fetch failed", str(cm.exception))
 
     def test_rejects_file_urls(self):
         with self.assertRaises(SourceError):

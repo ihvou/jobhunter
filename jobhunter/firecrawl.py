@@ -75,6 +75,63 @@ def firecrawl_scrape_markdown(
     }
 
 
+def firecrawl_scrape_raw_html(
+    url: str,
+    api_key: str = "",
+    base_url: str = "",
+    timeout_seconds: int = 30,
+    max_age_ms: int = 86400000,
+    max_chars: int = 500000,
+) -> str:
+    """Fetch a URL via Firecrawl and return the raw HTML/XML body.
+
+    Use this for RSS feeds, sitemaps, or any source where Firecrawl's
+    markdown conversion would lose structure (e.g. RSS `<title>` getting
+    rendered as link text). The returned string is whatever bytes the
+    upstream server sent — the caller is responsible for parsing (e.g.
+    `xml.etree.ElementTree.fromstring` for RSS XML).
+    """
+    api_key = (api_key or os.getenv("FIRECRAWL_API_KEY", "")).strip()
+    if not api_key:
+        raise FirecrawlError("FIRECRAWL_API_KEY is not configured")
+    endpoint = firecrawl_endpoint(base_url or os.getenv("FIRECRAWL_BASE_URL", DEFAULT_FIRECRAWL_BASE_URL), "/v2/scrape")
+    body = {
+        "url": url,
+        "formats": ["rawHtml"],
+        "onlyMainContent": False,
+        "timeout": max(1, int(timeout_seconds or 30)) * 1000,
+        "maxAge": max(0, int(max_age_ms or 0)),
+        "proxy": "auto",
+        "storeInCache": True,
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer %s" % api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds or 30))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise FirecrawlError("Firecrawl HTTP %s: %s" % (exc.code, read_error_detail(exc)))
+    except urllib.error.URLError as exc:
+        raise FirecrawlError("Firecrawl URL error: %s" % exc.reason)
+    except json.JSONDecodeError as exc:
+        raise FirecrawlError("Firecrawl returned invalid JSON: %s" % exc)
+    if payload.get("success") is False:
+        raise FirecrawlError(str(payload.get("error") or payload.get("message") or "Firecrawl raw scrape failed"))
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    raw = data.get("rawHtml") or data.get("html") or data.get("content") or ""
+    if not isinstance(raw, str) or not raw.strip():
+        raise FirecrawlError("Firecrawl raw scrape returned no content")
+    return raw[: max(1000, int(max_chars or 500000))]
+
+
 def firecrawl_search(
     query: str,
     api_key: str = "",
