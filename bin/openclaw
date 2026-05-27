@@ -737,7 +737,7 @@ install_cron_jobs() {
     "qa" \
     "900" \
     "none" \
-    "QA routine: run jobhunter_audit_email_extraction, inspect suspicious recent rows with SELECT-only SQL, file qa.bug tasks with sample ids for real bugs, complete one qa.investigate task if present, and write jobhunter_write_status_report."
+    "QA routine: run jobhunter_audit_email_extraction({days:7, threshold:0.5, min_expected:3, unmark:true}). Then follow skills/qa/SKILL.md DB Anti-Pattern Checklist exactly with SELECT-only SQL: stuck_picked_task, repeated_source_failures, placeholder_titles, stale_unparsed_email_alerts, failure_reports, digest_volume_drop. For every non-empty SELECT result, file one jobhunter_file_task to Engineer with kind qa.bug and payload fields anti_pattern, sample_ids, observed, expected, repro_steps. Complete one qa.investigate task if present, write jobhunter_write_status_report, and stay silent on Telegram."
   cron_upsert_agent_job \
     "engineer-nightly" \
     "0 20 * * *" \

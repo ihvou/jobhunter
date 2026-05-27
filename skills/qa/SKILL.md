@@ -8,15 +8,140 @@ pipeline segments. File tasks; do not fix anything yourself.
 ## Daily Routine
 
 1. Run `jobhunter_audit_email_extraction({days:7, threshold:0.5, min_expected:3, unmark:true})`.
-2. Use `jobhunter_query_sql` to inspect suspicious short descriptions,
-   high-scoring jobs with missing details, and sources that have produced no
-   useful rows in the last 24 hours.
-3. If a source or parser looks broken, file `jobhunter_file_task` to Engineer:
-   kind `qa.bug`, from_agent `qa`, payload with repro steps, expected, actual,
-   and sample ids.
+2. Run the DB-observable anti-pattern checklist below with
+   `jobhunter_query_sql`. These are SELECT-only templates; use small limits and
+   never mutate data.
+3. If an anti-pattern returns evidence, file `jobhunter_file_task` to Engineer:
+   kind `qa.bug`, from_agent `qa`, payload with `anti_pattern`, `sample_ids`,
+   `observed`, `expected`, and `repro_steps`.
 4. Pick one `qa.investigate` task if present and complete it with structured
    findings.
 5. Write `jobhunter_write_status_report`.
+
+## DB Anti-Pattern Checklist
+
+For each query that returns rows, file one focused `qa.bug` task. Do not batch
+unrelated anti-patterns into one task.
+
+1. Stuck agent task picked more than 24 hours ago:
+
+```sql
+select id, from_agent, to_agent, kind, summary, picked_at
+from agent_tasks
+where status = 'picked'
+  and completed_at is null
+  and picked_at < datetime('now', '-24 hours')
+order by picked_at asc
+limit 20;
+```
+
+2. Source has repeated failures in the last 24 hours:
+
+```sql
+with failed_runs as (
+  select source_id, id, started_at, error,
+         row_number() over (partition by source_id order by started_at desc) as rn
+  from source_runs
+  where started_at >= datetime('now', '-24 hours')
+    and error is not null
+)
+select source_id, count(*) as failed_count,
+       min(started_at) as first_failed_at,
+       max(started_at) as last_failed_at,
+       group_concat(id) as sample_run_ids,
+       substr(group_concat(error, ' | '), 1, 500) as sample_errors
+from failed_runs
+where rn <= 5
+group by source_id
+having failed_count >= 2
+order by failed_count desc, last_failed_at desc
+limit 20;
+```
+
+3. Placeholder or action-button text was parsed as a job title:
+
+```sql
+select id, source_id, title, company, url, first_seen_at
+from jobs
+where first_seen_at >= datetime('now', '-7 days')
+  and (
+    lower(title) like '%apply for%'
+    or lower(title) like '%apply now%'
+    or lower(title) like '%submit%'
+    or lower(title) like '%application%'
+    or title like '%Відгукнутись%'
+  )
+order by first_seen_at desc
+limit 30;
+```
+
+4. Raw email alerts have been unparsed for more than 48 hours:
+
+```sql
+select id, source_id, sender, subject, received_at, parsed_jobs_count
+from email_alert_raw
+where parsed_at is null
+  and received_at < datetime('now', '-48 hours')
+order by received_at asc
+limit 30;
+```
+
+5. Agent reports mention operational failures:
+
+```sql
+select id, agent, report_date, summary, created_at
+from agent_reports
+where created_at >= datetime('now', '-3 days')
+  and (
+    lower(summary) like '%error%'
+    or lower(summary) like '%failed%'
+    or lower(summary) like '%skipped%'
+    or lower(summary) like '%stuck%'
+  )
+order by created_at desc
+limit 20;
+```
+
+6. Recent digest candidate volume dropped sharply versus trailing baseline:
+
+```sql
+with counts as (
+  select
+    sum(case when first_seen_at >= datetime('now', '-24 hours') then 1 else 0 end) as last_24h,
+    sum(case when first_seen_at >= datetime('now', '-8 days')
+              and first_seen_at < datetime('now', '-24 hours') then 1 else 0 end) / 7.0 as trailing_avg
+  from jobs
+  where status in ('new', 'snoozed')
+)
+select last_24h, round(trailing_avg, 2) as trailing_avg
+from counts
+where trailing_avg >= 5
+  and last_24h < trailing_avg * 0.3;
+```
+
+## Filing Format
+
+Use this shape for every DB-observable issue:
+
+```json
+{
+  "from_agent": "qa",
+  "to_agent": "engineer",
+  "kind": "qa.bug",
+  "summary": "Short anti-pattern name and affected object",
+  "payload": {
+    "anti_pattern": "stuck_picked_task",
+    "sample_ids": [123],
+    "observed": "Task 123 has status=picked since 2026-05-25T01:00:00Z.",
+    "expected": "Picked tasks complete or move to needs_clarification within 24h.",
+    "repro_steps": [
+      "Run the stuck picked task SQL from skills/qa/SKILL.md.",
+      "Inspect the returned task id."
+    ]
+  },
+  "priority": 25
+}
+```
 
 ## Rules
 
