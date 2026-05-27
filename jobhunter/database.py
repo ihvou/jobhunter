@@ -14,7 +14,7 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 15
+LATEST_SCHEMA_VERSION = 16
 
 AGENT_IDS = {"collector", "qa", "pm", "researcher", "engineer", "user"}
 TASK_FINAL_STATUSES = {"completed", "cancelled", "needs_clarification"}
@@ -86,6 +86,9 @@ class Database:
             if current < 15:
                 migrate_v15(conn)
                 set_schema_version(conn, 15)
+            if current < 16:
+                migrate_v16(conn)
+                set_schema_version(conn, 16)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -155,6 +158,37 @@ class Database:
     def update_source_imap_uid(self, source_id: str, uid: int) -> None:
         with self.connection() as conn:
             conn.execute("update sources set imap_last_uid = max(coalesce(imap_last_uid, 0), ?) where id = ?", (uid, source_id))
+
+    def imap_processed_uids(self, source_id: str) -> set:
+        """Return the set of UIDs we've already processed for this IMAP source."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "select uid from imap_processed_uids where source_id = ?",
+                (source_id,),
+            ).fetchall()
+            return {int(row["uid"]) for row in rows}
+
+    def record_imap_processed_uids(self, source_id: str, uids) -> int:
+        """Mark these UIDs as processed for the source. Idempotent (insert or ignore).
+        Returns the number of new rows actually inserted."""
+        unique = sorted({int(u) for u in (uids or []) if u})
+        if not unique:
+            return 0
+        now = utc_now_iso()
+        inserted = 0
+        with self.connection() as conn:
+            for start in range(0, len(unique), 500):
+                batch = unique[start : start + 500]
+                placeholders = ",".join("(?,?,?)" for _ in batch)
+                params = []
+                for uid in batch:
+                    params.extend([source_id, uid, now])
+                cursor = conn.execute(
+                    "insert or ignore into imap_processed_uids (source_id, uid, processed_at) values " + placeholders,
+                    params,
+                )
+                inserted += cursor.rowcount or 0
+        return inserted
 
     def start_source_run(self, source_id: str) -> int:
         with self.connection() as conn:
@@ -2156,6 +2190,51 @@ def migrate_v15(conn) -> None:
             on company_linkedin_cache(fetched_at desc);
         """
     )
+
+
+def migrate_v16(conn) -> None:
+    """Per-UID tracking for IMAP sources, replacing the single imap_last_uid
+    high-water-mark. The high-water-mark scheme assumed UIDs arrive in
+    received-date order — which is FALSE for Gmail label folders when a
+    filter bulk-applies a label to historical conversations (those messages
+    get UIDs assigned at labeling time, not message-receipt time). With the
+    HWM scheme we either skipped historical emails (advanced past them) or
+    drained them in ascending UID order — meaning recent alerts could be
+    blocked behind years of 2022-era archive emails. The per-UID tracker
+    lets the collector pick which UIDs to process per run, e.g. newest first.
+
+    Backfill: for every existing imap source, mark UIDs 1..imap_last_uid
+    as processed. Subsequent collector runs will treat UIDs > imap_last_uid
+    as unprocessed (existing behavior) and can choose order.
+    """
+    conn.executescript(
+        """
+        create table if not exists imap_processed_uids (
+            source_id text not null,
+            uid integer not null,
+            processed_at text not null,
+            primary key (source_id, uid)
+        );
+        create index if not exists idx_imap_processed_uids_source
+            on imap_processed_uids(source_id, uid desc);
+        """
+    )
+    now = utc_now_iso()
+    for row in conn.execute("select id, imap_last_uid from sources where type='imap'").fetchall():
+        last_uid = int(row["imap_last_uid"] or 0)
+        if last_uid > 0:
+            # Backfill in chunks to avoid one giant insert.
+            chunk = 1000
+            for start in range(1, last_uid + 1, chunk):
+                end = min(start + chunk - 1, last_uid)
+                values = ",".join("(?,?,?)" for _ in range(start, end + 1))
+                params = []
+                for uid in range(start, end + 1):
+                    params.extend([row["id"], uid, now])
+                conn.execute(
+                    "insert or ignore into imap_processed_uids (source_id, uid, processed_at) values " + values,
+                    params,
+                )
 
 
 def set_schema_version(conn, version: int) -> None:

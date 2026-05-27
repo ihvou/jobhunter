@@ -102,6 +102,8 @@ class JobHunter:
             source.imap_last_uid = self.database.source_imap_last_uid(source.id)
             if source.type == "imap":
                 source.raw_email_writer = self.database.save_email_alert_raw
+                source.processed_uids_loader = self.database.imap_processed_uids
+                source.processed_uids_recorder = self.database.record_imap_processed_uids
         self.database.upsert_sources(sources)
         ruleset = load_scoring_rules(self.config.scoring_path)
         total_fetched = 0
@@ -174,6 +176,8 @@ class JobHunter:
         if source.type != "imap":
             raise SourceError("Source is not an email/imap source: %s" % source.id)
         source.raw_email_writer = self.database.save_email_alert_raw
+        source.processed_uids_loader = self.database.imap_processed_uids
+        source.processed_uids_recorder = self.database.record_imap_processed_uids
         message = EmailMessage()
         message["From"] = sender or "unknown@example.invalid"
         message["Subject"] = subject or "Job alert"

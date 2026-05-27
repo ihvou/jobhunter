@@ -27,7 +27,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
-    def test_schema_v15_persists_raw_email_agent_tasks_reports_and_linkedin_cache(self):
+    def test_schema_v16_persists_raw_email_agent_tasks_reports_linkedin_cache_and_imap_uids(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -38,8 +38,13 @@ class DatabaseTests(unittest.TestCase):
                 task_columns = [row["name"] for row in conn.execute("pragma table_info(agent_tasks)").fetchall()]
                 report_columns = [row["name"] for row in conn.execute("pragma table_info(agent_reports)").fetchall()]
                 linkedin_columns = [row["name"] for row in conn.execute("pragma table_info(company_linkedin_cache)").fetchall()]
+                imap_uid_columns = [row["name"] for row in conn.execute("pragma table_info(imap_processed_uids)").fetchall()]
 
-            self.assertEqual(schema_version, 15)
+            self.assertEqual(schema_version, 16)
+            self.assertEqual(
+                imap_uid_columns,
+                ["source_id", "uid", "processed_at"],
+            )
             self.assertEqual(
                 linkedin_columns,
                 ["company_normalized", "kind", "source_company_label", "profiles_json", "fetched_at"],
@@ -146,6 +151,53 @@ class DatabaseTests(unittest.TestCase):
             reports = db.read_agent_reports(agent="qa", since="2026-05-24")
             self.assertEqual(len(reports), 1)
             self.assertEqual(reports[0]["summary"], "updated")
+
+    def test_imap_processed_uids_record_and_load_dedupe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+
+            # Empty for unknown source
+            self.assertEqual(db.imap_processed_uids("source-x"), set())
+
+            inserted = db.record_imap_processed_uids("source-x", [10, 20, 30, 20])  # 20 dup
+            self.assertEqual(inserted, 3)
+            self.assertEqual(db.imap_processed_uids("source-x"), {10, 20, 30})
+
+            # Insert overlapping batch — only new ones added
+            inserted = db.record_imap_processed_uids("source-x", [30, 40, 50])
+            self.assertEqual(inserted, 2)  # 40 + 50 new
+            self.assertEqual(db.imap_processed_uids("source-x"), {10, 20, 30, 40, 50})
+
+            # Other sources are isolated
+            db.record_imap_processed_uids("source-y", [10])
+            self.assertEqual(db.imap_processed_uids("source-y"), {10})
+
+    def test_v16_migration_backfills_existing_imap_last_uid(self):
+        """A source with imap_last_uid=5 must have UIDs 1..5 marked processed
+        after migration so the new collector logic doesn't reprocess them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            db.upsert_sources(
+                [
+                    SourceConfig(
+                        id="email-test",
+                        name="email-test",
+                        type="imap",
+                        url="imap://test",
+                        imap_last_uid=5,
+                    )
+                ]
+            )
+            # The upsert above bumps the row; ensure imap_last_uid is set
+            with db.connection() as conn:
+                conn.execute("update sources set imap_last_uid = 5 where id = 'email-test'")
+            # Re-run migrate_v16 explicitly (simulating an upgrade path)
+            from jobhunter.database import migrate_v16
+            with db.connection() as conn:
+                migrate_v16(conn)
+            self.assertEqual(db.imap_processed_uids("email-test"), {1, 2, 3, 4, 5})
 
     def test_total_score_is_generated_from_l1_and_l2(self):
         with tempfile.TemporaryDirectory() as tmp:

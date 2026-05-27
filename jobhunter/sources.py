@@ -675,6 +675,20 @@ def looks_like_spa_shell(html: str) -> bool:
 
 
 def collect_imap_alerts(source: SourceConfig) -> List[Job]:
+    """Fetch IMAP messages, prioritizing newest UIDs (highest first).
+
+    Why newest-first: Gmail label folders assign UIDs at *labeling time*, not
+    *receipt time*. When a user bulk-applies a label to historical
+    conversations (e.g. via "Also apply filter to N matching conversations"),
+    those messages get fresh UIDs interleaved with current arrivals. The old
+    high-water-mark scheme would drain UIDs in ascending order, so recent
+    alerts could sit behind years of archive emails. We now skip per UID via
+    the `imap_processed_uids` tracker (schema v16) and pick the newest
+    unprocessed UIDs each run.
+
+    Cap of 50 UIDs/run is preserved to bound wall time (each FETCH is a
+    network round-trip; 50 ≈ 25s).
+    """
     host = os.getenv("EMAIL_IMAP_HOST", "")
     username = os.getenv("EMAIL_IMAP_USERNAME", "")
     password = os.getenv("EMAIL_IMAP_PASSWORD", "")
@@ -682,32 +696,86 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
     if not host or not username or not password:
         raise SourceError("IMAP source configured but EMAIL_IMAP_HOST/USERNAME/PASSWORD are missing")
 
+    processed_uids_loader = getattr(source, "processed_uids_loader", None)
+    processed_uids_recorder = getattr(source, "processed_uids_recorder", None)
+    already_processed = set()
+    if processed_uids_loader:
+        try:
+            already_processed = set(int(u) for u in processed_uids_loader(source.id))
+        except Exception as exc:
+            log_context(LOGGER, logging.WARNING, "imap_processed_uids_load_failed", source_id=source.id, error=str(exc))
+            already_processed = set()
+    # Legacy HWM compat: any UID at or below source.imap_last_uid is treated as
+    # already processed even if not present in the per-UID tracker. This keeps
+    # the old per-source-query test path working (it never used the tracker).
+    legacy_hwm = int(source.imap_last_uid or 0)
+    if legacy_hwm > 0:
+        already_processed.update(range(1, legacy_hwm + 1))
+
     mailbox = imaplib.IMAP4_SSL(host)
     try:
         mailbox.login(username, password)
         mailbox.select(folder, readonly=True)
-        search_args = ["UID", "SEARCH", None, "UID", "%s:*" % (int(source.imap_last_uid or 0) + 1)]
+        # Preserve per-source FROM/SUBJECT/etc filtering via source.query.
         if source.query:
+            search_args = ["SEARCH", None, "UID", "%s:*" % (legacy_hwm + 1)]
             search_args.extend(parse_imap_query(source.query))
-        status, ids = mailbox.uid(*search_args[1:])
-        if status != "OK":
+            status, ids = mailbox.uid(*search_args)
+        else:
+            status, ids = mailbox.uid("SEARCH", None, "ALL")
+        if status != "OK" or not ids or not ids[0]:
+            return []
+        all_uids = set()
+        for token in ids[0].split():
+            try:
+                all_uids.add(int(token))
+            except ValueError:
+                continue
+        unprocessed = sorted(all_uids - already_processed, reverse=True)
+        target_uids = unprocessed[:50]
+        if not target_uids:
+            source.last_seen_uid = source.imap_last_uid or 0
             return []
         jobs = []
         max_uid = source.imap_last_uid or 0
-        for message_id in ids[0].split()[:50]:
-            try:
-                uid_int = int(message_id)
-                max_uid = max(max_uid, uid_int)
-            except ValueError:
-                pass
-            status, data = mailbox.uid("FETCH", message_id, "(RFC822)")
+        processed_now = []
+        for uid_int in target_uids:
+            max_uid = max(max_uid, uid_int)
+            status, data = mailbox.uid("FETCH", str(uid_int), "(RFC822)")
             if status != "OK" or not data:
                 continue
-            message = email.message_from_bytes(data[0][1])
-            persist_email_sample(source, message, str(message_id.decode("utf-8", errors="ignore")))
-            raw_id, raw_inserted = persist_raw_email(source, message, str(message_id.decode("utf-8", errors="ignore")))
+            try:
+                raw_bytes = data[0][1] if (data and isinstance(data[0], tuple) and len(data[0]) > 1) else b""
+            except Exception:
+                raw_bytes = b""
+            if not raw_bytes:
+                # Still record as processed so we don't refetch on every run.
+                processed_now.append(uid_int)
+                continue
+            message = email.message_from_bytes(raw_bytes)
+            persist_email_sample(source, message, str(uid_int))
+            raw_id, raw_inserted = persist_raw_email(source, message, str(uid_int))
             if raw_id:
-                log_context(LOGGER, logging.DEBUG, "email_alert_raw_saved", source_id=source.id, email_alert_id=raw_id, inserted=raw_inserted)
+                log_context(LOGGER, logging.DEBUG, "email_alert_raw_saved", source_id=source.id, email_alert_id=raw_id, inserted=raw_inserted, uid=uid_int)
+            processed_now.append(uid_int)
+        if processed_now and processed_uids_recorder:
+            try:
+                processed_uids_recorder(source.id, processed_now)
+            except Exception as exc:
+                log_context(LOGGER, logging.WARNING, "imap_processed_uids_record_failed", source_id=source.id, error=str(exc))
+        log_context(
+            LOGGER,
+            logging.INFO,
+            "imap_collection_summary",
+            source_id=source.id,
+            folder=folder,
+            total_in_folder=len(all_uids),
+            already_processed=len(already_processed),
+            unprocessed_total=len(unprocessed),
+            processed_this_run=len(processed_now),
+            newest_uid_processed=max(processed_now) if processed_now else None,
+            oldest_uid_processed=min(processed_now) if processed_now else None,
+        )
         source.last_seen_uid = max_uid
         return jobs
     finally:
