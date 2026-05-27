@@ -54,8 +54,11 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn('"codex-cli/gpt-5.5": {}', result.stdout)
         self.assertIn('cliBackends', result.stdout)
         self.assertIn('CODEX_HOME: "/home/node/.openclaw/agents/engineer/agent/codex-home"', result.stdout)
-        self.assertIn('"--sandbox",', result.stdout)
-        self.assertIn('"workspace-write",', result.stdout)
+        # Engineer uses --dangerously-bypass-approvals-and-sandbox instead of --sandbox
+        # workspace-write because Codex's bwrap-based sandbox can't create namespaces
+        # inside our cap_drop:ALL container. The Docker container IS the sandbox.
+        self.assertIn('"--dangerously-bypass-approvals-and-sandbox",', result.stdout)
+        self.assertNotIn('"--sandbox",', result.stdout)
         self.assertIn('"--cd",', result.stdout)
         self.assertIn('"/workspace",', result.stdout)
         self.assertIn('alsoAllow: ["web_search", "web_fetch", "jobhunter-tools", "firecrawl", "exa"]', result.stdout)
@@ -84,7 +87,10 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("firecrawl", result.stdout)
         self.assertIn("exa", result.stdout)
         self.assertIn("codex-cli", result.stdout)
-        self.assertIn("workspace-write", result.stdout)
+        # Engineer no longer uses --sandbox workspace-write at the CLI flag level
+        # (bwrap fails inside our cap_drop:ALL container) — Docker container is
+        # the sandbox. Use --dangerously-bypass-approvals-and-sandbox instead.
+        self.assertIn("dangerously-bypass-approvals-and-sandbox", result.stdout)
         self.assertIn("/workspace", result.stdout)
         self.assertIn("/home/node/.openclaw/agents/engineer/agent/codex-home", result.stdout)
         self.assertIn("jobs-collection", result.stdout)

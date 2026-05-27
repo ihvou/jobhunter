@@ -361,20 +361,25 @@ codex_home=/home/node/.openclaw/agents/engineer/agent/codex-home
 mkdir -p "$codex_home"
 config="$codex_home/config.toml"
 touch "$config"
-if grep -q '^sandbox = ' "$config"; then
-  sed -i 's/^sandbox = .*/sandbox = "workspace-write"/' "$config"
-else
-  printf '\nsandbox = "workspace-write"\n' >> "$config"
-fi
-if grep -q '^sandbox_mode = ' "$config"; then
-  sed -i 's/^sandbox_mode = .*/sandbox_mode = "workspace-write"/' "$config"
-else
-  printf 'sandbox_mode = "workspace-write"\n' >> "$config"
-fi
-if grep -q '^approval_policy = ' "$config"; then
-  sed -i 's/^approval_policy = .*/approval_policy = "never"/' "$config"
-else
-  printf 'approval_policy = "never"\n' >> "$config"
+# Rewrite engineer codex-home config.toml cleanly each time. Avoids the
+# duplicate-key trap where regex variants (with vs without spaces around =)
+# both match and append duplicates that Codex refuses to load.
+cat > "$config" <<TOML
+sandbox = "workspace-write"
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+model_reasoning_effort = "high"
+TOML
+
+# Bridge auth from the host-mounted Codex auth to engineer's codex-home.
+# Codex CLI refreshes access tokens by writing to auth.json. Engineer's
+# CODEX_HOME isolation means we copy the host-side fresh auth.json each
+# setup; persistent refresh writes happen inside engineer's copy until
+# the host's token rotates. If engineer auth gets stale (refresh-token-used
+# race) the user runs ensure-engineer-workspace again to re-bridge.
+if [ -f /home/node/.codex/auth.json ]; then
+  cp /home/node/.codex/auth.json "$codex_home/auth.json"
+  chmod 600 "$codex_home/auth.json"
 fi
 echo "engineer workspace ready: $(git -C "$workspace" rev-parse --show-toplevel 2>/dev/null || echo "$workspace")"
 SH
@@ -520,8 +525,7 @@ patch_jobhunter_openclaw_config() {
             "--json",
             "--color",
             "never",
-            "--sandbox",
-            "workspace-write",
+            "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             "/workspace",
             "-c",
@@ -534,8 +538,7 @@ patch_jobhunter_openclaw_config() {
             "exec",
             "resume",
             "{sessionId}",
-            "-c",
-            "sandbox_mode=\"workspace-write\"",
+            "--dangerously-bypass-approvals-and-sandbox",
             "-c",
             "approval_policy=\"never\"",
             "-c",
@@ -810,8 +813,7 @@ print_config() {
             "--json",
             "--color",
             "never",
-            "--sandbox",
-            "workspace-write",
+            "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             "/workspace",
             "-c",
@@ -824,8 +826,7 @@ print_config() {
             "exec",
             "resume",
             "{sessionId}",
-            "-c",
-            "sandbox_mode=\"workspace-write\"",
+            "--dangerously-bypass-approvals-and-sandbox",
             "-c",
             "approval_policy=\"never\"",
             "-c",
