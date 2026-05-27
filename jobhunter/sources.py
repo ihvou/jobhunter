@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 import urllib.robotparser
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.utils import parseaddr, parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -711,16 +711,33 @@ def collect_imap_alerts(source: SourceConfig) -> List[Job]:
     legacy_hwm = int(source.imap_last_uid or 0)
     if legacy_hwm > 0:
         already_processed.update(range(1, legacy_hwm + 1))
+    # Date cutoff: ignore emails older than JOBHUNTER_EMAIL_MAX_AGE_DAYS (default 30).
+    # Implemented as an IMAP SEARCH `SINCE` filter so old emails are excluded
+    # server-side — bulk-labeled historical archives (e.g. 2022 Djinni alerts
+    # that get a label applied in 2026) stay out of our scope without being
+    # individually fetched-and-discarded. 0 = no cutoff (process everything).
+    try:
+        max_age_days = int(os.getenv("JOBHUNTER_EMAIL_MAX_AGE_DAYS", "30"))
+    except ValueError:
+        max_age_days = 30
+    since_date = None
+    if max_age_days > 0:
+        since_date = (datetime.utcnow() - timedelta(days=max_age_days)).strftime("%d-%b-%Y")
 
     mailbox = imaplib.IMAP4_SSL(host)
     try:
         mailbox.login(username, password)
         mailbox.select(folder, readonly=True)
-        # Preserve per-source FROM/SUBJECT/etc filtering via source.query.
+        # Build IMAP SEARCH preserving source.query, optional SINCE cutoff, and
+        # legacy UID range when source.query is set.
         if source.query:
             search_args = ["SEARCH", None, "UID", "%s:*" % (legacy_hwm + 1)]
+            if since_date:
+                search_args.extend(["SINCE", since_date])
             search_args.extend(parse_imap_query(source.query))
             status, ids = mailbox.uid(*search_args)
+        elif since_date:
+            status, ids = mailbox.uid("SEARCH", None, "SINCE", since_date)
         else:
             status, ids = mailbox.uid("SEARCH", None, "ALL")
         if status != "OK" or not ids or not ids[0]:

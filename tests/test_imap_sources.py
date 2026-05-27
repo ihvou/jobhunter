@@ -129,7 +129,11 @@ class ImapSourceTests(unittest.TestCase):
                 self.assertIn("Apply: https://djinni.co/jobs/1", raw_rows[0]["raw_text"])
                 self.assertEqual(djinni.last_seen_uid, 1)
                 self.assertEqual(wellfound.last_seen_uid, 2)
-                self.assertIn((None, "UID", "1:*", "FROM", '"no-reply@djinni.co"'), mailbox.searches)
+                # SEARCH includes UID range, the FROM filter, and (by default) a SINCE
+                # cutoff inserted between them. Verify the essential clauses are present
+                # rather than pinning the exact tuple — the SINCE date varies daily.
+                matching = [s for s in mailbox.searches if s[1:4] == ("UID", "1:*", "SINCE") and "FROM" in s and '"no-reply@djinni.co"' in s]
+                self.assertEqual(len(matching), 1)
 
                 samples = sorted(sample_dir.glob("*/*.html"))
                 self.assertEqual(len(samples), 2)
@@ -137,6 +141,65 @@ class ImapSourceTests(unittest.TestCase):
 
                 djinni.imap_last_uid = djinni.last_seen_uid
                 self.assertEqual(collect_imap_alerts(djinni), [])
+
+
+    def test_date_cutoff_applies_since_filter_to_search(self):
+        """When JOBHUNTER_EMAIL_MAX_AGE_DAYS is set, the IMAP search must
+        include a SINCE clause so old archived emails (e.g. 2022 alerts
+        bulk-labeled in 2026) are filtered out server-side."""
+        mailbox = FakeIMAP({})
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "EMAIL_IMAP_HOST": "imap.example.com",
+                "EMAIL_IMAP_USERNAME": "user",
+                "EMAIL_IMAP_PASSWORD": "password",
+                "EMAIL_IMAP_FOLDER": "job-alerts",
+                "JOBHUNTER_EMAIL_SAMPLES_DIR": str(Path(tmp) / "samples"),
+                "JOBHUNTER_EMAIL_MAX_AGE_DAYS": "30",
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch(
+                "imaplib.IMAP4_SSL", return_value=mailbox
+            ):
+                src = SourceConfig(id="src", name="Src", type="imap", url="imap://job-alerts")
+                src.raw_email_writer = lambda *args, **kwargs: (1, True)
+                src.processed_uids_loader = lambda source_id: set()
+                src.processed_uids_recorder = lambda source_id, uids: None
+                collect_imap_alerts(src)
+
+        # No source.query path: should issue exactly one SEARCH with SINCE.
+        self.assertEqual(len(mailbox.searches), 1)
+        args = mailbox.searches[0]
+        self.assertIn("SINCE", args)
+        since_idx = args.index("SINCE")
+        # Date format DD-Mon-YYYY (IMAP SEARCH SINCE convention)
+        import re
+        self.assertRegex(args[since_idx + 1], r"^\d{2}-[A-Z][a-z]{2}-\d{4}$")
+
+    def test_date_cutoff_disabled_when_zero(self):
+        mailbox = FakeIMAP({})
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "EMAIL_IMAP_HOST": "imap.example.com",
+                "EMAIL_IMAP_USERNAME": "user",
+                "EMAIL_IMAP_PASSWORD": "password",
+                "EMAIL_IMAP_FOLDER": "job-alerts",
+                "JOBHUNTER_EMAIL_SAMPLES_DIR": str(Path(tmp) / "samples"),
+                "JOBHUNTER_EMAIL_MAX_AGE_DAYS": "0",
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch(
+                "imaplib.IMAP4_SSL", return_value=mailbox
+            ):
+                src = SourceConfig(id="src", name="Src", type="imap", url="imap://job-alerts")
+                src.raw_email_writer = lambda *args, **kwargs: (1, True)
+                src.processed_uids_loader = lambda source_id: set()
+                src.processed_uids_recorder = lambda source_id, uids: None
+                collect_imap_alerts(src)
+
+        self.assertEqual(len(mailbox.searches), 1)
+        args = mailbox.searches[0]
+        self.assertNotIn("SINCE", args)
+        # Plain SEARCH ALL when no cutoff and no source.query
+        self.assertIn("ALL", args)
 
 
 if __name__ == "__main__":
