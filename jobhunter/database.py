@@ -1516,17 +1516,21 @@ class Database:
 
     def unparsed_email_alerts(self, limit: int = 20) -> List[Dict]:
         limit = min(max(1, int(limit or 20)), 20)
+        cutoff = _email_age_cutoff_iso()
+        params = [limit] if cutoff is None else [cutoff, limit]
+        sql = """
+            select *
+            from email_alert_raw
+            where parsed_at is null
+        """
+        if cutoff is not None:
+            sql += " and received_at >= ? "
+        sql += " order by received_at asc, id asc limit ?"
         with self.connection() as conn:
             rows = list(
                 conn.execute(
-                    """
-                    select *
-                    from email_alert_raw
-                    where parsed_at is null
-                    order by received_at asc, id asc
-                    limit ?
-                    """,
-                    (limit,),
+                    sql,
+                    tuple([cutoff, limit]) if cutoff is not None else (limit,),
                 )
             )
         alerts = []
@@ -1578,8 +1582,15 @@ class Database:
             conn.execute("update jobs set %s where id = ?" % ", ".join(assignments), tuple(params))
 
     def unparsed_email_count(self) -> int:
+        cutoff = _email_age_cutoff_iso()
         with self.connection() as conn:
-            row = conn.execute("select count(*) as c from email_alert_raw where parsed_at is null").fetchone()
+            if cutoff is None:
+                row = conn.execute("select count(*) as c from email_alert_raw where parsed_at is null").fetchone()
+            else:
+                row = conn.execute(
+                    "select count(*) as c from email_alert_raw where parsed_at is null and received_at >= ?",
+                    (cutoff,),
+                ).fetchone()
             return int(row["c"] or 0)
 
     def email_alerts_for_audit(self, days: int = 7) -> List[Dict]:
@@ -1632,6 +1643,23 @@ class Database:
         with self.connection() as conn:
             cursor = conn.execute(sql, ids)
             return int(cursor.rowcount or 0)
+
+
+def _email_age_cutoff_iso() -> Optional[str]:
+    """Return ISO timestamp cutoff for email_alert_raw queries, or None if
+    JOBHUNTER_EMAIL_MAX_AGE_DAYS=0 disables it. Same env var as the IMAP
+    SINCE filter, applied here at the parsing-query level so old raw emails
+    already in the DB (ingested before the SINCE filter shipped) don't get
+    pulled into Codex extraction.
+    """
+    try:
+        days = int(os.getenv("JOBHUNTER_EMAIL_MAX_AGE_DAYS", "30"))
+    except ValueError:
+        days = 30
+    if days <= 0:
+        return None
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    return cutoff.replace(microsecond=0).isoformat() + "Z"
 
 
 def migrate_v1(conn) -> None:
