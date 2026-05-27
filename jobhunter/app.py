@@ -1,12 +1,13 @@
 import atexit
 import json
 import logging
+import os
 import signal
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List
@@ -152,9 +153,32 @@ class JobHunter:
         ruleset = ruleset or load_scoring_rules(self.config.scoring_path)
         inserted_count = 0
         l2_candidates = []
+        # Age cutoff: skip jobs whose posted_at is older than
+        # JOBHUNTER_JOB_MAX_AGE_DAYS (default 30). Applies to ALL source types
+        # (RSS, ATS, JSON_API, IMAP-extracted). Companies that keep ATS listings
+        # live for months — Ashby, Greenhouse — frequently surface 6-12 month
+        # old roles; archive RSS feeds like Lobsters "Who's Hiring? Q42023"
+        # surface 2-3 year old threads. User sees those as noise.
+        # posted_at IS NULL → keep (don't know when posted; first_seen_at is the
+        # signal, which is "now").
+        # Set to 0 to disable.
+        try:
+            max_age_days = int(os.getenv("JOBHUNTER_JOB_MAX_AGE_DAYS", "30"))
+        except ValueError:
+            max_age_days = 30
+        cutoff_iso = None
+        if max_age_days > 0:
+            cutoff_iso = (datetime.utcnow() - timedelta(days=max_age_days)).replace(microsecond=0).isoformat() + "Z"
+        aged_out = 0
         for job in jobs:
             if self.shutdown_requested:
                 raise SourceError("interrupted")
+            if cutoff_iso and job.posted_at and isinstance(job.posted_at, str):
+                # posted_at is an ISO 8601 string with timezone offset; compare
+                # as strings is safe for the YYYY-MM-DD prefix.
+                if job.posted_at[:19] < cutoff_iso[:19]:
+                    aged_out += 1
+                    continue
             job_id, inserted = self.database.upsert_job(job)
             if inserted:
                 inserted_count += 1
@@ -166,7 +190,9 @@ class JobHunter:
                     l2_candidates.append(row)
         if l2_candidates:
             self.run_l2_relevance(l2_candidates)
-        return {"fetched": len(jobs), "inserted": inserted_count, "l2_candidates": len(l2_candidates)}
+        if aged_out:
+            log_context(LOGGER, logging.INFO, "jobs_aged_out", source_id=source.id, aged_out=aged_out, cutoff=cutoff_iso)
+        return {"fetched": len(jobs), "inserted": inserted_count, "l2_candidates": len(l2_candidates), "aged_out": aged_out}
 
     def process_email_alert(self, source_id: str, sender: str, subject: str, body: str, message_id: str = "", date: str = "") -> Dict:
         sources = {source.id: source for source in load_sources(self.config.sources_path)}

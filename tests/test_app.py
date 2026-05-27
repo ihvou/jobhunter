@@ -1,5 +1,7 @@
+import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -143,6 +145,67 @@ class AppTests(unittest.TestCase):
             self.assertEqual(len(alerts), 1)
             self.assertIn("Senior Product Manager", alerts[0]["raw_html"])
             self.assertEqual(bot.database.recent_jobs(5), [])
+
+
+    def test_ingest_jobs_skips_aged_out_jobs(self):
+        """Jobs whose posted_at is older than JOBHUNTER_JOB_MAX_AGE_DAYS get
+        silently dropped at ingestion. Recent + NULL posted_at jobs land."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            bot = JobHunter(config)
+            bot.initialize()
+            from jobhunter.models import Job, SourceConfig
+            source = SourceConfig(id="rss", name="RSS", type="rss", url="https://example.com/rss")
+            jobs = [
+                # Old: posted ~2 years ago — should be skipped
+                Job(
+                    source_id="rss", source_name="RSS", external_id="old",
+                    url="https://example.com/jobs/old", title="Stale Product Manager",
+                    company="OldCo", description="archive thread",
+                    posted_at="2024-01-01T00:00:00+00:00",
+                ),
+                # Recent: posted 1 day ago — should land
+                Job(
+                    source_id="rss", source_name="RSS", external_id="new",
+                    url="https://example.com/jobs/new", title="Fresh Product Manager",
+                    company="NewCo", description="just posted",
+                    posted_at=(datetime.utcnow() - timedelta(days=1)).isoformat() + "+00:00",
+                ),
+                # Null posted_at: should land (we don't know the age)
+                Job(
+                    source_id="rss", source_name="RSS", external_id="null",
+                    url="https://example.com/jobs/null", title="Null-Date Product Manager",
+                    company="UnknownCo", description="no posted_at",
+                    posted_at=None,
+                ),
+            ]
+            with mock.patch.dict(os.environ, {"JOBHUNTER_JOB_MAX_AGE_DAYS": "30"}, clear=False):
+                result = bot.ingest_jobs(source, jobs)
+            self.assertEqual(result["aged_out"], 1)
+            self.assertEqual(result["inserted"], 2)
+            ids = {row["external_id"] for row in bot.database.recent_jobs(10)}
+            self.assertEqual(ids, {"new", "null"})
+
+    def test_ingest_jobs_disabled_when_max_age_is_zero(self):
+        """Setting JOBHUNTER_JOB_MAX_AGE_DAYS=0 disables the cutoff entirely."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            bot = JobHunter(config)
+            bot.initialize()
+            from jobhunter.models import Job, SourceConfig
+            source = SourceConfig(id="rss", name="RSS", type="rss", url="https://example.com/rss")
+            jobs = [
+                Job(
+                    source_id="rss", source_name="RSS", external_id="old",
+                    url="https://example.com/jobs/old", title="Stale Product Manager",
+                    company="OldCo", description="archive",
+                    posted_at="2024-01-01T00:00:00+00:00",
+                ),
+            ]
+            with mock.patch.dict(os.environ, {"JOBHUNTER_JOB_MAX_AGE_DAYS": "0"}, clear=False):
+                result = bot.ingest_jobs(source, jobs)
+            self.assertEqual(result["aged_out"], 0)
+            self.assertEqual(result["inserted"], 1)
 
 
 if __name__ == "__main__":
