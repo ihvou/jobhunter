@@ -186,6 +186,45 @@ class AppTests(unittest.TestCase):
             ids = {row["external_id"] for row in bot.database.recent_jobs(10)}
             self.assertEqual(ids, {"new", "null"})
 
+    def test_ingest_jobs_drops_email_source_null_posted_at(self):
+        """Email digest sources aggregate jobs of varying ages. A recent email
+        can contain a 5-month-old job (Djinni keeps it in alerts until filled).
+        We drop NULL posted_at from email sources to avoid showing stale jobs.
+        Non-email sources keep NULL = visible.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            bot = JobHunter(config)
+            bot.initialize()
+            from jobhunter.models import Job, SourceConfig
+            jobs = [
+                Job(
+                    source_id="email-job-alerts", source_name="Email",
+                    external_id="email-null", url="https://djinni.co/jobs/794725-ai/",
+                    title="AI/ML Product Engineer", company="Inception-1",
+                    description="extracted from email, Codex couldn't find a date",
+                    posted_at=None,
+                ),
+                Job(
+                    source_id="rss", source_name="RSS",
+                    external_id="rss-null", url="https://example.com/jobs/rss-null",
+                    title="Fresh PM from RSS", company="RssCo",
+                    description="listing page shows recent content",
+                    posted_at=None,
+                ),
+            ]
+            email_source = SourceConfig(id="email-job-alerts", name="Email", type="imap", url="imap://job-alerts")
+            rss_source = SourceConfig(id="rss", name="RSS", type="rss", url="https://example.com/rss")
+            with mock.patch.dict(os.environ, {"JOBHUNTER_JOB_MAX_AGE_DAYS": "30"}, clear=False):
+                email_result = bot.ingest_jobs(email_source, [jobs[0]])
+                rss_result = bot.ingest_jobs(rss_source, [jobs[1]])
+            # Email-source NULL: dropped
+            self.assertEqual(email_result["aged_out"], 1)
+            self.assertEqual(email_result["inserted"], 0)
+            # RSS-source NULL: kept
+            self.assertEqual(rss_result["aged_out"], 0)
+            self.assertEqual(rss_result["inserted"], 1)
+
     def test_ingest_jobs_disabled_when_max_age_is_zero(self):
         """Setting JOBHUNTER_JOB_MAX_AGE_DAYS=0 disables the cutoff entirely."""
         with tempfile.TemporaryDirectory() as tmp:

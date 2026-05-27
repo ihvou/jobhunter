@@ -179,6 +179,22 @@ class JobHunter:
                 if job.posted_at[:19] < cutoff_iso[:19]:
                     aged_out += 1
                     continue
+            # Special case: email digest sources (LinkedIn weekly, Djinni daily)
+            # bundle many jobs of varying ages into one email. The email's
+            # received_at is recent (because IMAP SINCE filters at <30d) but
+            # individual jobs inside may be months old. Codex's extractor
+            # leaves posted_at NULL when no explicit date appears in the body.
+            # We can't tell recent-from-stale, so drop NULL posted_at from
+            # email sources. Non-email sources (RSS, HTML, ATS, JSON API)
+            # keep NULL = visible because their listing pages typically show
+            # current content.
+            if (
+                cutoff_iso
+                and not job.posted_at
+                and source.type in ("imap", "email_alert")
+            ):
+                aged_out += 1
+                continue
             job_id, inserted = self.database.upsert_job(job)
             if inserted:
                 inserted_count += 1
