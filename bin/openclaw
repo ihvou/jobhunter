@@ -371,13 +371,15 @@ approval_policy = "never"
 model_reasoning_effort = "high"
 TOML
 
-# Bridge auth from the host-mounted Codex auth to engineer's codex-home.
-# Codex CLI refreshes access tokens by writing to auth.json. Engineer's
-# CODEX_HOME isolation means we copy the host-side fresh auth.json each
-# setup; persistent refresh writes happen inside engineer's copy until
-# the host's token rotates. If engineer auth gets stale (refresh-token-used
-# race) the user runs ensure-engineer-workspace again to re-bridge.
-if [ -f /home/node/.codex/auth.json ]; then
+# Bootstrap engineer Codex auth ONLY if it has none yet. Codex CLI uses
+# single-use rotating refresh tokens and rotates them in place inside
+# engineer's codex-home. Overwriting an existing (possibly freshly-rotated)
+# auth.json with a stale copy from elsewhere breaks it with
+# "refresh token already used". So we copy the host auth.json once, as a
+# bootstrap seed, and never clobber an existing engineer auth.json. If
+# engineer auth is genuinely dead, do a fresh `codex login` against
+# CODEX_HOME=engineer/agent/codex-home (see tasks.md #157), not a re-copy.
+if [ ! -f "$codex_home/auth.json" ] && [ -f /home/node/.codex/auth.json ]; then
   cp /home/node/.codex/auth.json "$codex_home/auth.json"
   chmod 600 "$codex_home/auth.json"
 fi
