@@ -1586,6 +1586,9 @@ jobhunter_write_status_report.
 - If empty, Engineer agent runs but skips PR creation and marks PR-needing tasks `needs_clarification`.
 - `./bin/openclaw ensure-engineer-workspace` passes `GITHUB_PAT` only to the one setup `docker exec` process that runs `gh auth login --with-token`. The token is not added to the long-running `openclaw-gateway` Compose environment. OpenClaw 2026.5.7 does not expose a clean per-agent env mount for this, so the practical boundary is: only the Engineer agent gets a writable workspace and shell/gh tools; the other agents keep non-coding tool policies.
 - `gh auth login --with-token` runs at workspace setup using the PAT.
+- Engineer's Codex CLI auth is separate from the main OpenClaw app-server auth. It lives in `/home/node/.openclaw/agents/engineer/agent/codex-home` and rotates refresh tokens privately.
+- `./bin/openclaw engineer-codex-status` checks that private login. `./bin/openclaw engineer-codex-login [--reset]` runs Codex CLI `login --device-auth` inside `openclaw-gateway` with Engineer's `CODEX_HOME`; `--reset` backs up a dead `auth.json` first. No localhost OAuth port is needed, no host/main auth is overwritten, and `--with-api-key` is not used.
+- `./bin/openclaw ensure-engineer-workspace` may bootstrap missing Engineer auth from mounted Codex credentials, but it must never clobber an existing Engineer `auth.json`; rotating refresh tokens are single-use.
 
 **Engineer skill** (`skills/engineer/SKILL.md`):
 

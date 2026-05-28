@@ -58,6 +58,8 @@ cp .env.example .env
 
 OpenClaw owns the Telegram connection. After onboarding, send `Get more jobs` or `/jobs` to the Telegram bot. For leads, send `/leads` or a request such as `find me 5 founders who raised Series A this week building AI products`.
 
+If you use the Engineer agent for autonomous PRs, it has its own private Codex CLI login inside `openclaw-gateway`. Check it with `./bin/openclaw engineer-codex-status`. If it is expired or reports a reused refresh token, run `./bin/openclaw engineer-codex-login --reset` and complete the device login. This does not touch the main OpenClaw app-server auth and does not use OpenAI API-key billing.
+
 ### Required environment variables
 
 | Variable | Required | Notes |
@@ -196,7 +198,8 @@ The IMAP collector tracks per-source UID high-water marks, so old messages are n
 | Cover note denied | Use `Usage` to see budget; approve the one-time override only if intended |
 | Agent proposal never appears | `./bin/openclaw logs gateway`, then verify trajectories contain `jobhunter_*` tool calls |
 | `Daily agent quota reached` | Default 20/day; raise `JOBHUNTER_RATE_LIMIT_AGENT_PER_DAY` in `.env` |
-| Codex login expired | Run `./bin/openclaw onboard` and follow OpenClaw/Codex auth prompts if needed |
+| Main OpenClaw Codex login expired | Run `./bin/openclaw onboard` and follow OpenClaw/Codex auth prompts if needed |
+| Engineer Codex login expired or says refresh token already used | Run `./bin/openclaw engineer-codex-status`; if it fails, run `./bin/openclaw engineer-codex-login --reset` and complete the device login |
 | `/revert` says "no reversible archive" | Some action kinds (data_answer, human_followup, bulk_update_jobs, rescore_jobs) don't archive a file; not reversible by `/revert` today |
 
 ## Safety Notes
