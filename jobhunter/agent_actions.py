@@ -515,9 +515,33 @@ def next_task_id(path: Path) -> int:
 
 
 def is_select_only(sql: str) -> bool:
+    import re
+
     lowered = sql.strip().lower()
-    blocked = ("insert", "update", "delete", "drop", "alter", "pragma", "attach", "detach", "replace", "vacuum")
-    return lowered.startswith("select ") and not any(("%s " % word) in lowered for word in blocked)
+    if not lowered:
+        return False
+    body = lowered[:-1].strip() if lowered.endswith(";") else lowered
+    if ";" in body:
+        return False
+    if not (body.startswith("select ") or body.startswith("with ")):
+        return False
+    if body.startswith("with ") and not re.search(r"\bselect\b", body):
+        return False
+    blocked = (
+        "insert",
+        "update",
+        "delete",
+        "drop",
+        "alter",
+        "pragma",
+        "attach",
+        "detach",
+        "replace",
+        "vacuum",
+        "create",
+        "reindex",
+    )
+    return re.search(r"\b(%s)\b" % "|".join(blocked), body) is None
 
 
 def default_summary(kind: str, payload: Dict) -> str:
