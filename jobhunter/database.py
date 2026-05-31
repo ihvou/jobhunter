@@ -217,6 +217,68 @@ class Database:
             )
             conn.execute("update sources set last_run_at = ? where id = ?", (utc_now_iso(), source_id))
 
+    def source_failure_backoff(
+        self,
+        source_id: str,
+        failure_threshold: int = 3,
+        window_hours: int = 168,
+        max_delay_hours: int = 24,
+    ) -> Dict:
+        """Return whether a source should be temporarily skipped after repeat failures.
+
+        Backoff is based on consecutive failed runs inside the recent window. A
+        later successful run clears the streak; skipped sources do not create new
+        errored source_runs, so the failure table stops growing while the source
+        is cooling down.
+        """
+        failure_threshold = max(1, int(failure_threshold or 1))
+        window_hours = max(1, int(window_hours or 1))
+        max_delay_hours = max(1, int(max_delay_hours or 1))
+        with self.connection() as conn:
+            rows = list(
+                conn.execute(
+                    """
+                    select started_at, finished_at, error
+                    from source_runs
+                    where source_id = ?
+                      and datetime(started_at) >= datetime('now', ?)
+                    order by datetime(coalesce(finished_at, started_at)) desc, id desc
+                    limit 50
+                    """,
+                    (source_id, "-%s hours" % window_hours),
+                )
+            )
+        failure_count = 0
+        latest_at = ""
+        latest_error = ""
+        for row in rows:
+            error = str(row["error"] or "").strip()
+            if not error:
+                break
+            failure_count += 1
+            if failure_count == 1:
+                latest_at = row["finished_at"] or row["started_at"] or ""
+                latest_error = error
+        result = {
+            "active": False,
+            "failure_count": failure_count,
+            "failure_threshold": failure_threshold,
+            "latest_error": latest_error,
+            "retry_after": "",
+        }
+        if failure_count < failure_threshold or not latest_at:
+            return result
+        delay_hours = min(max_delay_hours, 2 ** min(8, max(0, failure_count - failure_threshold)))
+        try:
+            latest_dt = parse_utc_iso(latest_at)
+        except ValueError:
+            return result
+        retry_after = latest_dt + timedelta(hours=delay_hours)
+        result["retry_after"] = retry_after.replace(microsecond=0).isoformat() + "Z"
+        result["delay_hours"] = delay_hours
+        result["active"] = datetime.utcnow() < retry_after
+        return result
+
     def upsert_job(self, job: Job) -> Tuple[str, bool]:
         job_id = stable_job_id(job)
         now = utc_now_iso()
@@ -2390,6 +2452,10 @@ def dedupe_date(posted_at: Optional[str], fallback: Optional[str]) -> Optional[d
         except ValueError:
             continue
     return None
+
+
+def parse_utc_iso(value: str) -> datetime:
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
 
 
 def tomorrow_iso() -> str:

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from jobhunter.database import Database
@@ -151,6 +152,43 @@ class DatabaseTests(unittest.TestCase):
             reports = db.read_agent_reports(agent="qa", since="2026-05-24")
             self.assertEqual(len(reports), 1)
             self.assertEqual(reports[0]["summary"], "updated")
+
+    def test_source_failure_backoff_uses_consecutive_recent_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            now = datetime.utcnow().replace(microsecond=0)
+            with db.connection() as conn:
+                for index in range(3):
+                    started = (now - timedelta(minutes=3 - index)).isoformat() + "Z"
+                    conn.execute(
+                        """
+                        insert into source_runs (source_id, started_at, finished_at, error)
+                        values ('remoteok', ?, ?, ?)
+                        """,
+                        (started, started, "timeout"),
+                    )
+
+            backoff = db.source_failure_backoff("remoteok", failure_threshold=3)
+
+            self.assertTrue(backoff["active"])
+            self.assertEqual(backoff["failure_count"], 3)
+            self.assertEqual(backoff["latest_error"], "timeout")
+            self.assertTrue(backoff["retry_after"])
+
+            with db.connection() as conn:
+                success_at = now.isoformat() + "Z"
+                conn.execute(
+                    """
+                    insert into source_runs (source_id, started_at, finished_at, error)
+                    values ('remoteok', ?, ?, null)
+                    """,
+                    (success_at, success_at),
+                )
+
+            cleared = db.source_failure_backoff("remoteok", failure_threshold=3)
+            self.assertFalse(cleared["active"])
+            self.assertEqual(cleared["failure_count"], 0)
 
     def test_imap_processed_uids_record_and_load_dedupe(self):
         with tempfile.TemporaryDirectory() as tmp:

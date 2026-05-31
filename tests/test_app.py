@@ -89,6 +89,29 @@ class AppTests(unittest.TestCase):
             self.assertTrue(freshness["queue_is_stale"])
             self.assertIsNone(freshness["queue_last_collected"])
 
+    def test_collect_skips_source_under_failure_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = config_for(tmp)
+            config.sources_path.write_text(
+                '[{"id":"remoteok","name":"RemoteOK","type":"rss","url":"https://example.com/rss"}]',
+                encoding="utf-8",
+            )
+            bot = JobHunter(config)
+            bot.initialize()
+            for _ in range(3):
+                run_id = bot.database.start_source_run("remoteok")
+                bot.database.finish_source_run(run_id, "remoteok", 0, 0, "timeout")
+
+            with mock.patch("jobhunter.app.collect_from_source") as collect_from_source:
+                bot.collect()
+
+            collect_from_source.assert_not_called()
+            with bot.database.connection() as conn:
+                failed_runs = conn.execute(
+                    "select count(*) as c from source_runs where source_id = 'remoteok' and error is not null"
+                ).fetchone()["c"]
+            self.assertEqual(failed_runs, 3)
+
     def test_email_alert_product_ai_rows_can_enter_l2_below_default_threshold(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = JobHunter(config_for(tmp))
