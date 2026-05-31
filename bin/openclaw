@@ -24,6 +24,8 @@ Commands:
   reset-sessions  Clear cached Telegram direct sessions for fresh tool prompts
   set-thinking [<level>]  Set Codex model_reasoning_effort across all agents (default: high)
   ensure-engineer-workspace  Prepare /workspace clone and Engineer Codex sandbox
+  engineer-codex-status  Check Engineer's private Codex CLI login status
+  engineer-codex-login [--reset]  Fresh device login for Engineer's private Codex CLI auth
   watchdog [--auto]  Detect Telegram sessions wedged in "processing" state and (with --auto) reset them
   cron-install  Register the OpenClaw cron jobs
   cron-list     List OpenClaw cron jobs
@@ -33,6 +35,10 @@ Commands:
   help      Show this help
 EOF
 }
+
+ENGINEER_HOME="/home/node/.openclaw/agents/engineer/agent"
+ENGINEER_CODEX_HOME="$ENGINEER_HOME/codex-home"
+CODEX_BIN="/home/node/.openclaw/npm/node_modules/@openai/codex/bin/codex.js"
 
 run_cmd() {
   if [ "$DRY_RUN" = "1" ]; then
@@ -397,6 +403,103 @@ maybe_ensure_engineer_workspace() {
   else
     printf "Engineer workspace not initialized automatically because GITHUB_PAT is unset in the shell and .env. Run './bin/openclaw ensure-engineer-workspace' when ready.\n"
   fi
+}
+
+engineer_codex_prepare_home() {
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker exec openclaw-gateway sh -c %q\n' \
+      "mkdir -p \"$ENGINEER_CODEX_HOME\" \"$ENGINEER_HOME\" && touch \"$ENGINEER_CODEX_HOME/config.toml\""
+    return 0
+  fi
+  docker exec openclaw-gateway sh -c 'set -eu
+engineer_home="$1"
+codex_home="$2"
+mkdir -p "$engineer_home" "$codex_home"
+config="$codex_home/config.toml"
+touch "$config"
+if ! grep -q "^model_reasoning_effort = " "$config"; then
+  printf "%s\n" "model_reasoning_effort = \"high\"" >> "$config"
+fi
+' sh "$ENGINEER_HOME" "$ENGINEER_CODEX_HOME"
+}
+
+engineer_codex_backup_auth() {
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker exec openclaw-gateway sh -c %q\n' \
+      "if [ -f \"$ENGINEER_CODEX_HOME/auth.json\" ]; then mv \"$ENGINEER_CODEX_HOME/auth.json\" \"$ENGINEER_CODEX_HOME/auth.json.dead.\$(date -u +%Y%m%d%H%M%S)\"; fi"
+    return 0
+  fi
+  docker exec openclaw-gateway sh -c 'set -eu
+codex_home="$1"
+if [ -f "$codex_home/auth.json" ]; then
+  backup="$codex_home/auth.json.dead.$(date -u +%Y%m%d%H%M%S)"
+  mv "$codex_home/auth.json" "$backup"
+  chmod 600 "$backup" 2>/dev/null || true
+  echo "engineer Codex auth backed up: $backup"
+else
+  echo "engineer Codex auth reset: no auth.json present"
+fi
+' sh "$ENGINEER_CODEX_HOME"
+}
+
+engineer_codex_exec() {
+  local docker_args=(exec -i)
+  if [ -t 0 ] && [ -t 1 ]; then
+    docker_args=(exec -it)
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '+ docker'
+    printf ' %q' "${docker_args[@]}" -e "HOME=$ENGINEER_HOME" -e "CODEX_HOME=$ENGINEER_CODEX_HOME" openclaw-gateway "$CODEX_BIN" "$@"
+    printf '\n'
+    return 0
+  fi
+  docker "${docker_args[@]}" \
+    -e "HOME=$ENGINEER_HOME" \
+    -e "CODEX_HOME=$ENGINEER_CODEX_HOME" \
+    openclaw-gateway "$CODEX_BIN" "$@"
+}
+
+engineer_codex_status() {
+  engineer_codex_prepare_home
+  if [ "$DRY_RUN" = "1" ]; then
+    engineer_codex_exec login status
+    return 0
+  fi
+  if engineer_codex_exec login status; then
+    printf "engineer Codex auth: ok (%s)\n" "$ENGINEER_CODEX_HOME/auth.json"
+  else
+    printf "engineer Codex auth: failed. Run './bin/openclaw engineer-codex-login --reset' to create a fresh device login for Engineer.\n" >&2
+    return 1
+  fi
+}
+
+engineer_codex_login() {
+  local reset=0
+  if [ "$#" -gt 1 ]; then
+    printf "usage: ./bin/openclaw engineer-codex-login [--reset]\n" >&2
+    return 2
+  fi
+  case "${1:-}" in
+    --reset)
+      reset=1
+      ;;
+    "" )
+      ;;
+    * )
+      printf "usage: ./bin/openclaw engineer-codex-login [--reset]\n" >&2
+      return 2
+      ;;
+  esac
+  engineer_codex_prepare_home
+  if [ "$reset" = "1" ]; then
+    engineer_codex_backup_auth
+  fi
+  printf "Starting Engineer Codex device login.\n"
+  printf "This writes only to %s inside openclaw-gateway.\n" "$ENGINEER_CODEX_HOME"
+  printf "It does not touch main OpenClaw app-server auth or host ~/.codex.\n"
+  engineer_codex_exec login --device-auth
+  printf "Engineer Codex login finished. Checking status...\n"
+  engineer_codex_status
 }
 
 watchdog() {
@@ -1064,6 +1167,13 @@ case "${1:-help}" in
     ;;
   ensure-engineer-workspace)
     ensure_engineer_workspace
+    ;;
+  engineer-codex-status)
+    engineer_codex_status
+    ;;
+  engineer-codex-login)
+    shift
+    engineer_codex_login "$@"
     ;;
   watchdog)
     shift

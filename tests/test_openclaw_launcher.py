@@ -32,6 +32,8 @@ class OpenClawLauncherTests(unittest.TestCase):
             "migrate-codex",
             "config",
             "ensure-engineer-workspace",
+            "engineer-codex-status",
+            "engineer-codex-login",
         ):
             self.assertIn(command, result.stdout)
 
@@ -147,6 +149,17 @@ class OpenClawLauncherTests(unittest.TestCase):
     def test_engineer_workspace_dry_run_is_available(self):
         out = self.run_openclaw_dry_run("ensure-engineer-workspace")
         self.assertIn("ensure-engineer-workspace-script", out)
+
+    def test_engineer_codex_auth_dry_run_uses_private_codex_home(self):
+        status_out = self.run_openclaw_dry_run("engineer-codex-status")
+        self.assertIn("CODEX_HOME=/home/node/.openclaw/agents/engineer/agent/codex-home", status_out)
+        self.assertIn("login status", status_out)
+
+        login_out = self.run_openclaw_dry_run("engineer-codex-login", "--reset")
+        self.assertIn("auth.json.dead.", login_out)
+        self.assertIn("login --device-auth", login_out)
+        self.assertIn("It does not touch main OpenClaw app-server auth or host ~/.codex.", login_out)
+        self.assertNotIn("--with-api-key", login_out)
 
 
 if __name__ == "__main__":
