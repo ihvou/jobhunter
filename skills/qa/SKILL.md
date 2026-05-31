@@ -86,17 +86,45 @@ order by received_at asc
 limit 30;
 ```
 
-5. Agent reports mention operational failures:
+5. Agent reports mention unresolved operational failures. This check is a
+   backstop for repeated, unclassified agent failures; do not use it for
+   expected transient source failures (covered by `repeated_source_failures`) or
+   failures that already have a recent QA task/remediation path.
 
 ```sql
+with candidate_reports as (
+  select id, agent, report_date, summary, details_json, created_at
+  from agent_reports
+  where created_at >= datetime('now', '-3 days')
+    and (
+      lower(summary) like '%error%'
+      or lower(summary) like '%failed%'
+      or lower(summary) like '%skipped%'
+      or lower(summary) like '%stuck%'
+      or lower(coalesce(details_json, '')) like '%error%'
+      or lower(coalesce(details_json, '')) like '%failed%'
+      or lower(coalesce(details_json, '')) like '%exception%'
+    )
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%expected transient%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%classified transient%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%resolved%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%remediated%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%closed%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%needs_clarification%'
+)
 select id, agent, report_date, summary, created_at
-from agent_reports
-where created_at >= datetime('now', '-3 days')
-  and (
-    lower(summary) like '%error%'
-    or lower(summary) like '%failed%'
-    or lower(summary) like '%skipped%'
-    or lower(summary) like '%stuck%'
+from candidate_reports
+where not exists (
+    select 1
+    from agent_tasks
+    where kind = 'qa.bug'
+      and created_at >= datetime('now', '-7 days')
+      and (
+        lower(summary) like '%failure-report%'
+        or lower(summary) like '%failure report%'
+        or lower(payload_json) like '%"anti_pattern": "failure_reports"%'
+        or lower(payload_json) like '%"anti_pattern":"failure_reports"%'
+      )
   )
 order by created_at desc
 limit 20;

@@ -21,6 +21,12 @@ class QASkillTests(unittest.TestCase):
             "parsed_at is null",
             "from agent_reports",
             "lower(summary) like '%stuck%'",
+            "from candidate_reports",
+            "from agent_tasks",
+            "kind = 'qa.bug'",
+            '%"anti_pattern": "failure_reports"%',
+            "not like '%expected transient%'",
+            "not like '%needs_clarification%'",
             "trailing_avg >= 5",
             "last_24h < trailing_avg * 0.3",
         ]

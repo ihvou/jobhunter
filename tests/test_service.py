@@ -443,8 +443,9 @@ class ServiceTests(unittest.TestCase):
             bot, job_id = self.seeded_bot(tmp)
             bot.config.firecrawl_api_key = ""
             service = JobHunterService(bot)
-            with self.assertRaises(ServiceError) as raised:
-                service.find_job_recruiters(job_id)
+            with mock.patch.dict("os.environ", {"FIRECRAWL_API_KEY": ""}, clear=False):
+                with self.assertRaises(ServiceError) as raised:
+                    service.find_job_recruiters(job_id)
             self.assertEqual(raised.exception.status, 503)
 
     def test_find_linkedin_reranks_by_lead_person_name(self):
