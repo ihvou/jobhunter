@@ -1861,8 +1861,33 @@ def first_sentence(text: str) -> str:
 
 
 def is_select_only(sql: str) -> bool:
+    import re
+
     stripped = (sql or "").strip().lower()
-    return stripped.startswith("select") and ";" not in stripped
+    if not stripped:
+        return False
+    body = stripped[:-1].strip() if stripped.endswith(";") else stripped
+    if ";" in body:
+        return False
+    if not (body.startswith("select ") or body.startswith("with ")):
+        return False
+    if body.startswith("with ") and not re.search(r"\bselect\b", body):
+        return False
+    blocked = (
+        "insert",
+        "update",
+        "delete",
+        "drop",
+        "alter",
+        "pragma",
+        "attach",
+        "detach",
+        "replace",
+        "vacuum",
+        "create",
+        "reindex",
+    )
+    return re.search(r"\b(%s)\b" % "|".join(blocked), body) is None
 
 
 def required(body: Dict, key: str) -> str:

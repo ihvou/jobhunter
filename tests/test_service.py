@@ -84,8 +84,19 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(result["count"], 1)
             self.assertEqual(result["rows"][0]["title"], "AI Product Manager")
 
+            cte_result = service.query_sql(
+                "with candidate_jobs as (select title from jobs) select title from candidate_jobs",
+                limit=5,
+            )
+            self.assertEqual(cte_result["count"], 1)
+            self.assertEqual(cte_result["rows"][0]["title"], "AI Product Manager")
+
             with self.assertRaises(ServiceError) as raised:
                 service.query_sql("delete from jobs")
+            self.assertEqual(raised.exception.status, 400)
+
+            with self.assertRaises(ServiceError) as raised:
+                service.query_sql("select title from jobs; delete from jobs")
             self.assertEqual(raised.exception.status, 400)
 
     def test_agent_task_and_report_service_flow(self):
