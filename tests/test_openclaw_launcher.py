@@ -130,6 +130,8 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("placeholder_titles", readable_out)
         self.assertIn("stale_unparsed_email_alerts", readable_out)
         self.assertIn("failure_reports", readable_out)
+        self.assertIn("suppression/linking guards", readable_out)
+        self.assertIn("do not file a duplicate", readable_out)
         self.assertIn("digest_volume_drop", readable_out)
         self.assertIn("--name engineer-nightly", out)
         self.assertIn("--agent engineer", out)

@@ -11,8 +11,9 @@ pipeline segments. File tasks; do not fix anything yourself.
 2. Run the DB-observable anti-pattern checklist below with
    `jobhunter_query_sql`. These are SELECT-only templates; use small limits and
    never mutate data.
-3. If an anti-pattern returns evidence, file `jobhunter_file_task` to Engineer:
-   kind `qa.bug`, from_agent `qa`, payload with `anti_pattern`, `sample_ids`,
+3. If an anti-pattern returns evidence after applying that check's documented
+   suppression/linking rules, file `jobhunter_file_task` to Engineer: kind
+   `qa.bug`, from_agent `qa`, payload with `anti_pattern`, `sample_ids`,
    `observed`, `expected`, and `repro_steps`.
 4. Pick one `qa.investigate` task if present and complete it with structured
    findings.
@@ -20,8 +21,10 @@ pipeline segments. File tasks; do not fix anything yourself.
 
 ## DB Anti-Pattern Checklist
 
-For each query that returns rows, file one focused `qa.bug` task. Do not batch
-unrelated anti-patterns into one task.
+For each query that returns rows after its `not exists`/suppression guard has
+run, file one focused `qa.bug` task. Do not batch unrelated anti-patterns into
+one task, and do not file duplicates when the query intentionally returns no
+rows because there is already an active remediation task.
 
 1. Stuck agent task picked more than 24 hours ago:
 
@@ -89,7 +92,10 @@ limit 30;
 5. Agent reports mention unresolved operational failures. This check is a
    backstop for repeated, unclassified agent failures; do not use it for
    expected transient source failures (covered by `repeated_source_failures`) or
-   failures that already have a recent QA task/remediation path.
+   failures that already have a recent QA task/remediation path. If the query
+   returns no rows because an open/picked/recently completed `failure_reports`
+   task exists, treat the reports as linked to that task and do not file another
+   duplicate.
 
 ```sql
 with candidate_reports as (
@@ -118,7 +124,10 @@ where not exists (
     select 1
     from agent_tasks
     where kind = 'qa.bug'
-      and created_at >= datetime('now', '-7 days')
+      and (
+        status in ('open', 'picked')
+        or completed_at >= datetime('now', '-7 days')
+      )
       and (
         lower(summary) like '%failure-report%'
         or lower(summary) like '%failure report%'
