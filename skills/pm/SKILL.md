@@ -30,14 +30,30 @@ Run once per day from the `pm-stakeholder` cron.
      drift (e.g. a directory over-indexing on technical YC teams).
    Always record the flagged percentage and the per-source breakdown in the
    status report, even when no edit is warranted.
-5. Apply only reversible audited changes when evidence is concrete:
+5. Sourcing-fit audit (run every cycle; complements step 4 and is *not* masked
+   by a rescore). Step 4 only inspects leads scored `>= 70`, so once low-fit
+   leads are correctly scored down they vanish from it — this step measures the
+   low end instead. Use `jobhunter_query_sql` to pull leads with
+   `first_seen_at >= datetime('now','-14 days')` and compute the median
+   `confidence`, the share scoring `< 50`, and a per-source breakdown (count and
+   average confidence). This reads sourcing quality, not scoring drift:
+   - If more than ~half of recent leads score `< 50`, or any single source
+     averages `< 50` across >=3 recent leads, that source family is feeding
+     off-ICP candidates.
+   - Lower `jobhunter_set_source_priority` for the weakest source family (cite
+     the lead count and average confidence as evidence), and
+   - escalate the off-ICP sourcing pattern under "Concerns escalated" in the
+     stakeholder report so the research playbook can be retargeted.
+   Always record median confidence, the `< 50` share, and the worst source in
+   the status report, even when no change is warranted.
+6. Apply only reversible audited changes when evidence is concrete:
    `jobhunter_apply_directive_edit`, `jobhunter_apply_icp_edit`,
    `jobhunter_set_source_priority`, `jobhunter_set_source_status`.
-6. File tasks for other agents with `jobhunter_file_task`.
-7. Use `jobhunter_propose_actions` for user-gated scoring, source-addition,
+7. File tasks for other agents with `jobhunter_file_task`.
+8. Use `jobhunter_propose_actions` for user-gated scoring, source-addition,
    profile rewrite, or bulk archive changes.
-8. Write `jobhunter_write_status_report`.
-9. Send exactly one Telegram stakeholder report, then stop.
+9. Write `jobhunter_write_status_report`.
+10. Send exactly one Telegram stakeholder report, then stop.
 
 ## Direct Action Rules
 
@@ -61,6 +77,7 @@ KPIs vs target:
 - Leads reached this week: N/target — status
 - Irrelevant rate jobs: X% — status
 - ICP-fit drift: X% of recent high-confidence leads flagged (top source: NAME) — status
+- Lead sourcing fit: median new-lead confidence N (X% below 50, worst source: NAME) — status
 - Active sources: N — status
 
 Actions taken overnight:
