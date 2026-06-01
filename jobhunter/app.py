@@ -111,6 +111,8 @@ class JobHunter:
         total_inserted = 0
         log_context(LOGGER, logging.INFO, "collection_started", sources=len(sources))
         for source in sources:
+            if self.source_backoff_active(source):
+                continue
             fetched, inserted = self.collect_source(source, ruleset)
             total_fetched += fetched
             total_inserted += inserted
@@ -148,6 +150,24 @@ class JobHunter:
                 error = "interrupted"
             self.database.finish_source_run(run_id, source.id, fetched_count, inserted_count, error)
         return fetched_count, inserted_count
+
+    def source_backoff_active(self, source: SourceConfig) -> bool:
+        threshold = env_int("JOBHUNTER_SOURCE_FAILURE_BACKOFF_THRESHOLD", 3)
+        window_hours = env_int("JOBHUNTER_SOURCE_FAILURE_BACKOFF_WINDOW_HOURS", 168)
+        max_delay_hours = env_int("JOBHUNTER_SOURCE_FAILURE_BACKOFF_MAX_HOURS", 24)
+        backoff = self.database.source_failure_backoff(source.id, threshold, window_hours, max_delay_hours)
+        if not backoff.get("active"):
+            return False
+        log_context(
+            LOGGER,
+            logging.WARNING,
+            "source_backoff_skip",
+            source_id=source.id,
+            failures=backoff.get("failure_count"),
+            retry_after=backoff.get("retry_after"),
+            latest_error=safe_log_text(backoff.get("latest_error") or "", 500),
+        )
+        return True
 
     def ingest_jobs(self, source: SourceConfig, jobs: List[Job], ruleset=None) -> Dict:
         ruleset = ruleset or load_scoring_rules(self.config.scoring_path)
@@ -568,6 +588,13 @@ def format_usage(usage) -> str:
         "Cover notes today: %(cover_notes_today)s\n"
         "Agent actions today: %(agent_actions_today)s"
     ) % usage
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def slugify(value: str) -> str:
