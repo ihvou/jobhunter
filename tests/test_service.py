@@ -208,6 +208,83 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(compared["jobs"][0]["email_alert_id"], email_alert_id)
             self.assertGreater(len(compared["jobs"][0]["description"]), 100)
 
+    def test_save_extracted_email_jobs_skips_ui_noise_and_profile_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.sources_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "email-job-alerts",
+                            "name": "Email Alerts",
+                            "type": "imap",
+                            "url": "imap://job-alerts",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            service = JobHunterService(bot)
+            processed = service.process_email(
+                {
+                    "source_id": "email-job-alerts",
+                    "sender": "alerts@example.com",
+                    "subject": "Noisy job digest",
+                    "message_id": "<service-email-noise>",
+                    "date": "Wed, 20 May 2026 10:00:00 +0000",
+                    "body": '<html><body><a href="https://example.com/jobs/pm">Principal PM</a></body></html>',
+                }
+            )
+            enrichment_html = """
+<script type="application/ld+json">
+{"@type":"JobPosting","title":"Principal PM","description":"Own agentic workflow product strategy, discovery, roadmap, experiments, and delivery with cross-functional teams.","hiringOrganization":{"name":"RealCo"}}
+</script>
+"""
+            with mock.patch("jobhunter.service.validate_safe_url"), mock.patch("jobhunter.sources.fetch_text", return_value=enrichment_html):
+                saved = service.save_extracted_email_jobs(
+                    {
+                        "email_alert_id": processed["email_alert_id"],
+                        "jobs": [
+                            {
+                                "title": "Learn More",
+                                "company": "AIOS",
+                                "url": "https://links.wellfound.com/s/c/tracking",
+                            },
+                            {
+                                "title": "Ready to interview",
+                                "company": "Unknown company",
+                                "url": "https://links.wellfound.com/s/c/profile",
+                            },
+                            {
+                                "title": "Message from Sophia, Sunvery",
+                                "company": "Unknown company",
+                                "url": "https://mandrillapp.com/track/click/2517794/djinni.co?p=encoded",
+                            },
+                            {
+                                "title": "Product Manager | LinkedIn",
+                                "company": "ExampleCo",
+                                "url": "https://www.linkedin.com/in/someone",
+                            },
+                            {
+                                "title": "Principal PM role at RealCo is available",
+                                "company": "RealCo LinkedIn",
+                                "url": "https://example.com/jobs/pm",
+                                "snippet": "Build workflow agents.",
+                            },
+                        ],
+                    }
+                )
+            self.assertEqual(saved["saved"], 1)
+            self.assertEqual(len(saved["skipped"]), 4)
+            reasons = " ".join(item["reason"] for item in saved["skipped"])
+            self.assertIn("UI/noise title", reasons)
+            self.assertIn("UI/profile/navigation URL", reasons)
+            compared = service.email_alert_compare(processed["email_alert_id"])["email_alert"]
+            self.assertEqual(compared["parsed_jobs_count"], 1)
+            self.assertEqual(len(compared["jobs"]), 1)
+            self.assertEqual(compared["jobs"][0]["title"], "Principal PM")
+            self.assertEqual(compared["jobs"][0]["company"], "RealCo")
+
     def test_rescore_leads_updates_confidence_and_why_match(self):
         from jobhunter.models import Lead
 
