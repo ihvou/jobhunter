@@ -414,9 +414,11 @@ test("process unparsed emails supports fetch and save phases", async () => {
   });
   assert.equal(second.details.saved, 1);
   assert.equal(second.details.enriched, 1);
+  assert.equal(second.details.remaining_unparsed_count, 0);
   assert.equal(calls[1].url, "http://jobhunter-service:8765/email/save_extracted_jobs");
   assert.deepEqual(calls[1].body, {
     email_alert_id: 9,
     jobs: [{ title: "AI PM", company: "ExampleCo", url: "https://example.com/job", snippet: "Build AI tools." }],
   });
+  assert.equal(calls.length, 2);
 });

@@ -149,7 +149,7 @@ export default definePluginEntry({
         " " +
         "STALENESS RULE: response includes queue_freshness_hours, queue_last_collected, queue_is_stale. " +
         "If queue_is_stale is true OR queue_freshness_hours >= 6, you MUST first call jobhunter_collect_all_sources, " +
-        "then inspect its unparsed_email_count. If unparsed_email_count > 0, call jobhunter_process_unparsed_emails. " +
+        "then inspect its unparsed_email_count/stale_unparsed_email_count. If unparsed_email_count > 0, call jobhunter_process_unparsed_emails. " +
         "If jobhunter_process_unparsed_emails returns needs_extraction=true, extract strict JSON jobs from the returned raw_html/raw_text " +
         "and call jobhunter_process_unparsed_emails AGAIN with the extractions payload. Repeat until processed, then call this tool AGAIN. Do not show a stale digest. Tell the user briefly: " +
         "\"Collecting fresh jobs, back in ~1 min.\" " +
@@ -219,7 +219,7 @@ export default definePluginEntry({
       name: "jobhunter_collect_all_sources",
       label: "Jobhunter Collect All Sources",
       description:
-        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly. Response includes unparsed_email_count: the count of persisted email_alert_raw rows awaiting Codex extraction. If unparsed_email_count > 0, you MUST call jobhunter_process_unparsed_emails before rendering the next digest.",
+        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly. Response includes unparsed_email_count: the count of persisted email_alert_raw rows awaiting Codex extraction, plus stale_unparsed_email_count for retrying alerts older than the parser SLA. If unparsed_email_count > 0, you MUST call jobhunter_process_unparsed_emails before rendering the next digest.",
       parameters: schema({}),
       execute: async () => jsonResult(await collectWithSoftTimeout()),
     });
@@ -779,7 +779,7 @@ export default definePluginEntry({
         "Message from <X>, New jobs:, Edit job alert, mailto links, tracking pixels, profile links, and search-result pages. Skip any row missing title, company, or url. " +
         "Deduplicate within each email by exact url. Strip template artifacts from fields: title suffixes ` role at <X> is available`, ` role`, ` | LinkedIn`, ` - LinkedIn`; " +
         "company suffixes ` is available LinkedIn`, ` LinkedIn`, ` is available`. SECOND CALL posts each extraction to /email/save_extracted_jobs; the server validates URLs, " +
-        "saves jobs with email_alert_id, enriches descriptions from the URL, scores L1, may run capped L2, and marks the raw email parsed. If the second call returns " +
+        "saves jobs with email_alert_id, enriches descriptions from the URL, scores L1, may run capped L2, and marks the raw email parsed. The server tracks parser_status/parser_attempts so stale rows are either retried or surfaced as skipped_stale/failed instead of remaining silently queued. If the second call returns " +
         "remaining_unparsed_count > 0, call this tool again with only {limit} and continue until the queue is empty or the requested limit is processed.",
       parameters: schema({
         limit: intSchema(1, 20),
@@ -816,6 +816,8 @@ export default definePluginEntry({
           let saved = 0;
           let enriched = 0;
           let enrich_failed = 0;
+          let remainingUnparsed = 0;
+          let staleUnparsed = 0;
           for (const item of params.extractions) {
             const result = await post("/email/save_extracted_jobs", {
               email_alert_id: item.email_alert_id,
@@ -825,15 +827,17 @@ export default definePluginEntry({
             saved += Number(result.saved || 0);
             enriched += Number(result.enriched || 0);
             enrich_failed += Number(result.enrich_failed || 0);
+            remainingUnparsed = Number(result.remaining_unparsed_count || 0);
+            staleUnparsed = Number(result.stale_unparsed_email_count || 0);
           }
-          const remaining = await get("/email/unparsed?limit=1");
           return jsonResult({
             ok: true,
             processed: results.length,
             saved,
             enriched,
             enrich_failed,
-            remaining_unparsed_count: Number(remaining.count || 0),
+            remaining_unparsed_count: remainingUnparsed,
+            stale_unparsed_email_count: staleUnparsed,
             results,
           });
         }
@@ -845,6 +849,8 @@ export default definePluginEntry({
           processed: 0,
           emails: pending.emails || [],
           count: pending.count || 0,
+          remaining_unparsed_count: Number(pending.remaining_unparsed_count || pending.count || 0),
+          stale_unparsed_email_count: Number(pending.stale_unparsed_email_count || 0),
         });
       },
     });

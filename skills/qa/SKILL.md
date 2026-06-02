@@ -81,9 +81,11 @@ limit 30;
 4. Raw email alerts have been unparsed for more than 48 hours:
 
 ```sql
-select id, source_id, sender, subject, received_at, parsed_jobs_count
+select id, source_id, sender, subject, received_at, parsed_jobs_count,
+       parser_status, parser_attempts, parser_last_attempt_at, parser_error
 from email_alert_raw
 where parsed_at is null
+  and coalesce(parser_status, 'pending') in ('pending', 'retrying')
   and received_at < datetime('now', '-48 hours')
 order by received_at asc
 limit 30;

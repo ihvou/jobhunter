@@ -401,6 +401,7 @@ class JobHunterService:
             "jobs_after": after,
             "inserted_estimate": max(0, after - before),
             "unparsed_email_count": self.bot.database.unparsed_email_count(),
+            "stale_unparsed_email_count": self.bot.database.stale_unparsed_email_count(),
         }
 
     def rescore_recent_jobs(self, limit: int = 500) -> Dict:
@@ -421,6 +422,7 @@ class JobHunterService:
             "digest_id": digest_id,
             "marked_sent": bool(digest_id),
             "unparsed_email_count": self.bot.database.unparsed_email_count(),
+            "stale_unparsed_email_count": self.bot.database.stale_unparsed_email_count(),
         }
         payload.update(self.bot.collection_freshness())
         return payload
@@ -665,7 +667,13 @@ class JobHunterService:
 
     def unparsed_emails(self, limit: int = 20) -> Dict:
         emails = self.bot.database.unparsed_email_alerts(limit)
-        return {"ok": True, "emails": emails, "count": len(emails)}
+        return {
+            "ok": True,
+            "emails": emails,
+            "count": len(emails),
+            "remaining_unparsed_count": self.bot.database.unparsed_email_count(),
+            "stale_unparsed_email_count": self.bot.database.stale_unparsed_email_count(),
+        }
 
     def save_extracted_email_jobs(self, body: Dict) -> Dict:
         email_alert_id = required_int(body, "email_alert_id")
@@ -721,6 +729,8 @@ class JobHunterService:
             "skipped": skipped,
             "jobs": saved,
             "l2_candidates": len(l2_candidates),
+            "remaining_unparsed_count": self.bot.database.unparsed_email_count(),
+            "stale_unparsed_email_count": self.bot.database.stale_unparsed_email_count(),
         }
 
     def enrich_job_description(self, job_id: str, fail_soft: bool = False) -> Dict:

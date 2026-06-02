@@ -28,7 +28,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
-    def test_schema_v16_persists_raw_email_agent_tasks_reports_linkedin_cache_and_imap_uids(self):
+    def test_schema_v17_persists_raw_email_agent_tasks_reports_linkedin_cache_and_imap_uids(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -41,7 +41,7 @@ class DatabaseTests(unittest.TestCase):
                 linkedin_columns = [row["name"] for row in conn.execute("pragma table_info(company_linkedin_cache)").fetchall()]
                 imap_uid_columns = [row["name"] for row in conn.execute("pragma table_info(imap_processed_uids)").fetchall()]
 
-            self.assertEqual(schema_version, 16)
+                self.assertEqual(schema_version, 17)
             self.assertEqual(
                 imap_uid_columns,
                 ["source_id", "uid", "processed_at"],
@@ -64,6 +64,10 @@ class DatabaseTests(unittest.TestCase):
                     "parsed_at",
                     "parsed_jobs_count",
                     "parser_version",
+                    "parser_status",
+                    "parser_attempts",
+                    "parser_last_attempt_at",
+                    "parser_error",
                 ],
             )
             self.assertIn("email_alert_id", job_columns)
@@ -89,12 +93,14 @@ class DatabaseTests(unittest.TestCase):
                 ["id", "agent", "report_date", "summary", "details_json", "created_at"],
             )
 
+            received_at = (datetime.utcnow() - timedelta(hours=1)).replace(microsecond=0).isoformat() + "Z"
+            received_at_updated = (datetime.utcnow() - timedelta(minutes=30)).replace(microsecond=0).isoformat() + "Z"
             email_alert_id, inserted = db.save_email_alert_raw(
                 "email-job-alerts",
                 "<raw-1>",
                 "alerts@example.com",
                 "Product jobs",
-                "2026-05-20T09:00:00Z",
+                received_at,
                 "<html><body><a href='https://example.com/job'>AI PM</a></body></html>",
                 "AI PM https://example.com/job",
             )
@@ -104,7 +110,7 @@ class DatabaseTests(unittest.TestCase):
                 "<raw-1>",
                 "alerts@example.com",
                 "Product jobs updated",
-                "2026-05-20T10:00:00Z",
+                received_at_updated,
                 "<html>duplicate</html>",
                 "duplicate",
             )
@@ -126,6 +132,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(len(alerts), 1)
             self.assertEqual(alerts[0]["id"], email_alert_id)
             self.assertEqual(alerts[0]["subject"], "Product jobs updated")
+            self.assertEqual(alerts[0]["parser_status"], "pending")
             compare = db.email_alert_compare(email_alert_id)
             self.assertIn("<html><body>", compare["raw_html"])
             self.assertIn("AI PM", compare["raw_text"])
@@ -236,6 +243,34 @@ class DatabaseTests(unittest.TestCase):
             with db.connection() as conn:
                 migrate_v16(conn)
             self.assertEqual(db.imap_processed_uids("email-test"), {1, 2, 3, 4, 5})
+
+    def test_email_parser_status_retries_and_retires_stale_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            old_received_at = (datetime.utcnow() - timedelta(days=31)).replace(microsecond=0).isoformat() + "Z"
+            retry_received_at = (datetime.utcnow() - timedelta(hours=8)).replace(microsecond=0).isoformat() + "Z"
+            fresh_received_at = (datetime.utcnow() - timedelta(minutes=5)).replace(microsecond=0).isoformat() + "Z"
+
+            old_id, _ = db.save_email_alert_raw("email", "<old>", "a@example.com", "Old", old_received_at, "<html>old</html>", "")
+            retry_id, _ = db.save_email_alert_raw("email", "<retry>", "a@example.com", "Retry", retry_received_at, "<html>retry</html>", "")
+            fresh_id, _ = db.save_email_alert_raw("email", "<fresh>", "a@example.com", "Fresh", fresh_received_at, "<html>fresh</html>", "")
+
+            alerts = db.unparsed_email_alerts(10)
+
+            self.assertEqual([alert["id"] for alert in alerts], [retry_id, fresh_id])
+            retry = alerts[0]
+            self.assertEqual(retry["parser_status"], "retrying")
+            self.assertEqual(retry["parser_attempts"], 1)
+            self.assertEqual(db.unparsed_email_count(), 2)
+            self.assertEqual(db.stale_unparsed_email_count(), 1)
+
+            listed = db.list_email_alerts(limit=10)
+            by_id = {row["id"]: row for row in listed}
+            self.assertEqual(by_id[old_id]["parser_status"], "skipped_stale")
+            self.assertIsNotNone(by_id[old_id]["parsed_at"])
+            self.assertEqual(by_id[retry_id]["parser_status"], "retrying")
+            self.assertEqual(by_id[fresh_id]["parser_status"], "pending")
 
     def test_total_score_is_generated_from_l1_and_l2(self):
         with tempfile.TemporaryDirectory() as tmp:
