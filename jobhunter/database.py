@@ -820,6 +820,9 @@ class Database:
         payload = payload if isinstance(payload, dict) else {}
         priority = min(100, max(0, int(priority if priority is not None else 50)))
         with self.connection() as conn:
+            duplicate = self._find_duplicate_agent_task(conn, from_agent, to_agent, kind, payload)
+            if duplicate is not None:
+                return int(duplicate["id"])
             cursor = conn.execute(
                 """
                 insert into agent_tasks (
@@ -838,6 +841,44 @@ class Database:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def _find_duplicate_agent_task(
+        self,
+        conn: sqlite3.Connection,
+        from_agent: str,
+        to_agent: str,
+        kind: str,
+        payload: Dict,
+    ) -> Optional[sqlite3.Row]:
+        anti_pattern = str(payload.get("anti_pattern") or "").strip()
+        if kind != "qa.bug" or not anti_pattern:
+            return None
+        recent_cutoff = (datetime.utcnow() - timedelta(days=7)).replace(microsecond=0).isoformat() + "Z"
+        status_clause = "status in ('open', 'picked')"
+        params = [from_agent, to_agent, kind]
+        if anti_pattern == "failure_reports":
+            status_clause = "(%s or (status = 'completed' and completed_at >= ?))" % status_clause
+            params.append(recent_cutoff)
+        rows = conn.execute(
+            """
+            select id, payload_json
+            from agent_tasks
+            where from_agent = ?
+              and to_agent = ?
+              and kind = ?
+              and %s
+            order by created_at asc, id asc
+            """ % status_clause,
+            params,
+        ).fetchall()
+        for row in rows:
+            try:
+                existing_payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if str(existing_payload.get("anti_pattern") or "").strip() == anti_pattern:
+                return row
+        return None
 
     def pick_agent_task(self, agent: str, kinds: List[str] = None, max_age_days: int = None) -> Optional[sqlite3.Row]:
         validate_agent_id(agent, "agent")
