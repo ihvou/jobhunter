@@ -79,6 +79,7 @@ KPIs vs target:
 - ICP-fit drift: X% of recent high-confidence leads flagged (top source: NAME) — status
 - Lead sourcing fit: median new-lead confidence N (X% below 50, worst source: NAME) — status
 - Active sources: N — status
+- Email parse latency: median first-fetch-to-parse N min vs ~4h cycle — status. Report `email_label_lag` separately as Gmail's label-time visibility delay; it is informational, not a system failure, so do not mark it red or file tasks against it.
 
 Actions taken overnight:
 - Action #id: summary and evidence

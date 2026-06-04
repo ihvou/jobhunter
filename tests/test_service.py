@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from datetime import datetime, timedelta
 
 from jobhunter.app import JobHunter
 from jobhunter.models import Job, Lead, ScoreResult, SourceConfig
@@ -33,6 +34,44 @@ class ServiceTests(unittest.TestCase):
         )
         bot.database.save_score(job_id, ScoreResult(score=80, hard_reject=False, reasons=["AI product"], fired_rules=["title"]))
         return bot, job_id
+
+    def test_email_kpis_split_parse_latency_from_label_lag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            service = JobHunterService(bot)
+            now = datetime.utcnow().replace(microsecond=0)
+
+            def iso(mins_ago):
+                return (now - timedelta(minutes=mins_ago)).isoformat() + "Z"
+
+            # (message_id, received_ago, listed_ago, parsed_ago, parse_count)
+            rows = [
+                ("<a>", 100, 40, 30, 1),       # parse latency 10, label lag 60, in window
+                ("<b>", 200, 50, 20, 1),       # parse latency 30, label lag 150, in window
+                ("<c>", 3000, 3000, 10, 2),    # reparse -> excluded from parse latency
+                ("<d>", 90, 45, None, 0),      # unparsed -> excluded from parse latency
+                ("<e>", 20000, 20000, 5, 1),   # first_listed > 7d -> excluded from both
+            ]
+            with bot.database.connection() as conn:
+                for mid, recv, listed, parsed, pc in rows:
+                    conn.execute(
+                        """
+                        insert into email_alert_raw
+                            (source_id, message_id, sender, subject, received_at,
+                             raw_html_blob, raw_text_blob, parsed_at, parsed_jobs_count,
+                             parser_version, first_listed_at, parse_count)
+                        values ('email-job-alerts', ?, '', '', ?, null, null, ?, 0, '', ?, ?)
+                        """,
+                        (mid, iso(recv), iso(parsed) if parsed is not None else None, iso(listed), pc),
+                    )
+
+            kpis = service.kpi_snapshot(window_days=7)["kpis"]
+            # parse latency = parsed_at - first_listed_at, in-window, parse_count == 1:
+            # a=10, b=30 -> median 20. c (reparse), d (unparsed), e (out of window) excluded.
+            self.assertAlmostEqual(kpis["email_parse_latency_p50_minutes"], 20.0, places=1)
+            # label lag = first_listed_at - received_at, in-window rows:
+            # a=60, b=150, c=0, d=45 -> sorted [0,45,60,150] -> median 52.5. e excluded.
+            self.assertAlmostEqual(kpis["email_label_lag_p50_minutes"], 52.5, places=1)
 
     def test_digest_and_job_actions_are_exposed_over_http(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -642,7 +681,8 @@ class ServiceTests(unittest.TestCase):
                 "irrelevant_rate_jobs_7d",
                 "irrelevant_rate_leads_7d",
                 "active_sources_7d",
-                "latency_email_to_digest_p50_minutes",
+                "email_parse_latency_p50_minutes",
+                "email_label_lag_p50_minutes",
                 "openai_spend_today_usd",
                 "openai_spend_month_usd",
                 "firecrawl_calls_today",

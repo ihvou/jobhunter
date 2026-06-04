@@ -44,7 +44,7 @@ GOALS_TEMPLATE = """# Outcome goals
 
 ## Pipeline health
 - Coverage: >=5 distinct sources producing non-Irrelevant rows in any 7-day window
-- Latency: median email-arrival to digest <=2h
+- Email parse latency: median first-fetch-to-parse <=1 collection cycle (~4h); Gmail label-lag (email_label_lag KPI) is tracked separately and is not actionable
 - No silent failures: a source dark >24h should produce a stakeholder alert
 
 ## Cost
@@ -198,19 +198,39 @@ class JobHunterService:
             job_feedback_irrelevant = scalar_int(conn, "select count(*) from job_feedback where action in ('irrelevant','rejected') and created_at >= ?", (cutoff,))
             lead_feedback_total = scalar_int(conn, "select count(*) from lead_feedback where created_at >= ?", (cutoff,))
             lead_feedback_irrelevant = scalar_int(conn, "select count(*) from lead_feedback where action in ('irrelevant','rejected') and created_at >= ?", (cutoff,))
-            latency_rows = conn.execute(
+            # Email timeliness, split into the part we control vs. the part we
+            # don't. parse latency = first_listed_at (when the collector first
+            # saw the email) -> parsed_at. Windowed on first_listed_at so old
+            # backlog drains fall out of the sample, and restricted to
+            # parse_count = 1 so QA unmark/reparse cycles don't re-inflate it.
+            # label lag = received_at (email Date header) -> first_listed_at,
+            # i.e. how long Gmail's label-time UID assignment kept the email
+            # invisible to us; informational, not actionable on our side.
+            parse_latency_rows = conn.execute(
                 """
-                select (julianday(j.first_seen_at) - julianday(e.received_at)) * 24.0 * 60.0 as minutes
-                from jobs j
-                join email_alert_raw e on e.id = j.email_alert_id
-                where e.received_at >= ? and j.first_seen_at is not null
+                select (julianday(parsed_at) - julianday(first_listed_at)) * 24.0 * 60.0 as minutes
+                from email_alert_raw
+                where first_listed_at >= ?
+                  and parsed_at is not null
+                  and parse_count = 1
+                order by minutes asc
+                """,
+                (cutoff,),
+            ).fetchall()
+            label_lag_rows = conn.execute(
+                """
+                select (julianday(first_listed_at) - julianday(received_at)) * 24.0 * 60.0 as minutes
+                from email_alert_raw
+                where first_listed_at >= ?
+                  and received_at is not null
                 order by minutes asc
                 """,
                 (cutoff,),
             ).fetchall()
         snapshot["irrelevant_rate_jobs_7d"] = ratio(job_feedback_irrelevant, job_feedback_total)
         snapshot["irrelevant_rate_leads_7d"] = ratio(lead_feedback_irrelevant, lead_feedback_total)
-        snapshot["latency_email_to_digest_p50_minutes"] = median([float(row["minutes"] or 0) for row in latency_rows])
+        snapshot["email_parse_latency_p50_minutes"] = median([max(0.0, float(row["minutes"] or 0)) for row in parse_latency_rows])
+        snapshot["email_label_lag_p50_minutes"] = median([max(0.0, float(row["minutes"] or 0)) for row in label_lag_rows])
         return {"ok": True, "window_days": window_days, "kpis": snapshot}
 
     def kpi_history(self, weeks: int = 8) -> Dict:

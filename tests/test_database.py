@@ -28,7 +28,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
-    def test_schema_v16_persists_raw_email_agent_tasks_reports_linkedin_cache_and_imap_uids(self):
+    def test_schema_v17_persists_raw_email_agent_tasks_reports_linkedin_cache_and_imap_uids(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -41,7 +41,7 @@ class DatabaseTests(unittest.TestCase):
                 linkedin_columns = [row["name"] for row in conn.execute("pragma table_info(company_linkedin_cache)").fetchall()]
                 imap_uid_columns = [row["name"] for row in conn.execute("pragma table_info(imap_processed_uids)").fetchall()]
 
-            self.assertEqual(schema_version, 16)
+            self.assertEqual(schema_version, 17)
             self.assertEqual(
                 imap_uid_columns,
                 ["source_id", "uid", "processed_at"],
@@ -64,6 +64,8 @@ class DatabaseTests(unittest.TestCase):
                     "parsed_at",
                     "parsed_jobs_count",
                     "parser_version",
+                    "first_listed_at",
+                    "parse_count",
                 ],
             )
             self.assertIn("email_alert_id", job_columns)
@@ -152,6 +154,45 @@ class DatabaseTests(unittest.TestCase):
             reports = db.read_agent_reports(agent="qa", since="2026-05-24")
             self.assertEqual(len(reports), 1)
             self.assertEqual(reports[0]["summary"], "updated")
+
+    def test_email_first_listed_at_and_parse_count_track_reparses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            email_alert_id, inserted = db.save_email_alert_raw(
+                "email-job-alerts",
+                "<listed-1>",
+                "alerts@example.com",
+                "Product jobs",
+                "2026-05-20T09:00:00Z",
+                "<html><body>AI PM</body></html>",
+                "AI PM",
+            )
+            self.assertTrue(inserted)
+            with db.connection() as conn:
+                fresh = conn.execute(
+                    "select first_listed_at, parse_count, parsed_at from email_alert_raw where id = ?",
+                    (email_alert_id,),
+                ).fetchone()
+            # first_listed_at stamped at insert (~ when the collector first saw
+            # the email); parse_count starts at 0, parsed_at null until extraction.
+            self.assertTrue(fresh["first_listed_at"])
+            self.assertEqual(fresh["parse_count"], 0)
+            self.assertIsNone(fresh["parsed_at"])
+
+            db.mark_email_alert_parsed(email_alert_id, 4)
+            db.unmark_email_parsed([email_alert_id])
+            db.mark_email_alert_parsed(email_alert_id, 5)
+            with db.connection() as conn:
+                reparsed = conn.execute(
+                    "select first_listed_at, parse_count, parsed_at from email_alert_raw where id = ?",
+                    (email_alert_id,),
+                ).fetchone()
+            # first_listed_at is immutable across reparses; parse_count counts the
+            # unmark/reparse cycle so the timeliness KPI can exclude it.
+            self.assertEqual(reparsed["first_listed_at"], fresh["first_listed_at"])
+            self.assertEqual(reparsed["parse_count"], 2)
+            self.assertTrue(reparsed["parsed_at"])
 
     def test_source_failure_backoff_uses_consecutive_recent_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
