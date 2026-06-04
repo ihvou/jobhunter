@@ -14,7 +14,7 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 16
+LATEST_SCHEMA_VERSION = 17
 
 AGENT_IDS = {"collector", "qa", "pm", "researcher", "engineer", "user"}
 TASK_FINAL_STATUSES = {"completed", "cancelled", "needs_clarification"}
@@ -89,6 +89,9 @@ class Database:
             if current < 16:
                 migrate_v16(conn)
                 set_schema_version(conn, 16)
+            if current < 17:
+                migrate_v17(conn)
+                set_schema_version(conn, 17)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -1536,10 +1539,10 @@ class Database:
                 """
                 insert into email_alert_raw (
                     source_id, message_id, sender, subject, received_at,
-                    raw_html_blob, raw_text_blob, parser_version
-                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_html_blob, raw_text_blob, parser_version, first_listed_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (source_id, message_id, sender or "", subject or "", received_at, html_blob, text_blob, parser_version),
+                (source_id, message_id, sender or "", subject or "", received_at, html_blob, text_blob, parser_version, utc_now_iso()),
             )
             return int(cursor.lastrowid), True
 
@@ -1609,7 +1612,8 @@ class Database:
                 """
                 update email_alert_raw
                 set parsed_at = ?,
-                    parsed_jobs_count = ?
+                    parsed_jobs_count = ?,
+                    parse_count = parse_count + 1
                 where id = ?
                 """,
                 (utc_now_iso(), max(0, int(parsed_jobs_count or 0)), email_alert_id),
@@ -2325,6 +2329,44 @@ def migrate_v16(conn) -> None:
                     "insert or ignore into imap_processed_uids (source_id, uid, processed_at) values " + values,
                     params,
                 )
+
+
+def migrate_v17(conn) -> None:
+    """Email timeliness metric fix: separate label-lag (uncontrollable) from
+    parse latency (controllable).
+
+    The old KPI measured (job.first_seen_at - email.received_at), where
+    received_at is the email Date header. But Gmail assigns folder UIDs at
+    *labeling* time, not receipt time (see migrate_v16), so an email can become
+    visible to the collector long after its Date header. That label-lag — plus
+    backlog drains and QA unmark/reparse cycles — was charged to us as latency,
+    keeping the KPI permanently red no matter how fast we actually parsed.
+
+    - first_listed_at: when the collector first persisted the email (~ when it
+      first became visible to us). Set at insert; immutable across re-sightings.
+    - parse_count: number of times the email has been parsed; lets the KPI
+      exclude unmark/reparse samples (parse_count > 1).
+
+    Backfill: first_listed_at = coalesce(parsed_at, received_at) so historical
+    already-parsed rows read as ~0 parse latency (clean slate) rather than
+    inheriting their label-lag; parse_count = 1 where parsed_at is not null.
+    """
+    try:
+        conn.execute("alter table email_alert_raw add column first_listed_at text")
+    except sqlite3.OperationalError:
+        pass  # idempotent: column already present (re-run)
+    try:
+        conn.execute("alter table email_alert_raw add column parse_count integer not null default 0")
+    except sqlite3.OperationalError:
+        pass
+    # Backfill only unset rows so a re-run can't clobber real insert-time values.
+    conn.execute(
+        "update email_alert_raw set first_listed_at = coalesce(parsed_at, received_at) "
+        "where first_listed_at is null"
+    )
+    conn.execute(
+        "update email_alert_raw set parse_count = 1 where parsed_at is not null and parse_count = 0"
+    )
 
 
 def set_schema_version(conn, version: int) -> None:
