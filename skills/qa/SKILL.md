@@ -92,10 +92,12 @@ limit 30;
 5. Agent reports mention unresolved operational failures. This check is a
    backstop for repeated, unclassified agent failures; do not use it for
    expected transient source failures (covered by `repeated_source_failures`) or
-   failures that already have a recent QA task/remediation path. If the query
-   returns no rows because an open/picked/recently completed `failure_reports`
-   task exists, treat the reports as linked to that task and do not file another
-   duplicate.
+   failures that already have a recent QA task/remediation path. Also do not
+   file on self-referential QA/report wording such as `failure_reports` audit
+   summaries; those are evidence that this check ran, not a new operational
+   failure. If the query returns no rows because an open/picked/recently
+   completed `failure_reports` task exists, treat the reports as linked to that task
+   and do not file another duplicate.
 
 ```sql
 with candidate_reports as (
@@ -107,9 +109,11 @@ with candidate_reports as (
       or lower(summary) like '%failed%'
       or lower(summary) like '%skipped%'
       or lower(summary) like '%stuck%'
+      or lower(summary) like '%blocked%'
       or lower(coalesce(details_json, '')) like '%error%'
       or lower(coalesce(details_json, '')) like '%failed%'
       or lower(coalesce(details_json, '')) like '%exception%'
+      or lower(coalesce(details_json, '')) like '%blocked%'
     )
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%expected transient%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%classified transient%'
@@ -117,6 +121,9 @@ with candidate_reports as (
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%remediated%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%closed%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%needs_clarification%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%failure_reports%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%failure-report%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%failure report%'
 )
 select id, agent, report_date, summary, created_at
 from candidate_reports
