@@ -155,6 +155,49 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(len(reports), 1)
             self.assertEqual(reports[0]["summary"], "updated")
 
+    def test_qa_antipattern_tasks_dedupe_active_and_recent_failure_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+
+            payload = {"anti_pattern": "failure_reports", "sample_ids": [1]}
+            first_id = db.file_agent_task("qa", "engineer", "qa.bug", "failure reports", payload, priority=40)
+            duplicate_id = db.file_agent_task("qa", "engineer", "qa.bug", "same failure reports", payload, priority=60)
+            self.assertEqual(duplicate_id, first_id)
+
+            db.complete_agent_task(first_id, "completed", {"pr_url": "https://example.invalid/pr/1"})
+            recent_completed_id = db.file_agent_task("qa", "engineer", "qa.bug", "still same", payload, priority=60)
+            self.assertEqual(recent_completed_id, first_id)
+
+            stale_completed_at = (datetime.utcnow() - timedelta(days=8)).replace(microsecond=0).isoformat() + "Z"
+            with db.connection() as conn:
+                conn.execute("update agent_tasks set completed_at = ? where id = ?", (stale_completed_at, first_id))
+            new_id = db.file_agent_task("qa", "engineer", "qa.bug", "same after stale completion", payload, priority=60)
+            self.assertNotEqual(new_id, first_id)
+
+            other_id = db.file_agent_task(
+                "qa",
+                "engineer",
+                "qa.bug",
+                "source failures",
+                {"anti_pattern": "repeated_source_failures", "sample_ids": ["remoteok"]},
+                priority=40,
+            )
+            self.assertNotEqual(other_id, new_id)
+            other_duplicate_id = db.file_agent_task(
+                "qa",
+                "engineer",
+                "qa.bug",
+                "same source failures",
+                {"anti_pattern": "repeated_source_failures", "sample_ids": ["other"]},
+                priority=60,
+            )
+            self.assertEqual(other_duplicate_id, other_id)
+
+            with db.connection() as conn:
+                task_count = conn.execute("select count(*) as c from agent_tasks").fetchone()["c"]
+            self.assertEqual(task_count, 3)
+
     def test_email_first_listed_at_and_parse_count_track_reparses(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
