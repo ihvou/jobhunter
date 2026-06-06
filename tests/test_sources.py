@@ -4,7 +4,7 @@ from unittest import mock
 
 from jobhunter.models import SourceConfig
 from jobhunter import sources as source_module
-from jobhunter.sources import HN_ALGOLIA_BASE, SourceError, collect_ats, collect_hn, collect_link_page, collect_rss, collect_rss_proxy, enrich_job_from_url, fetch_source_text, infer_company, strip_html, validate_safe_url
+from jobhunter.sources import HN_ALGOLIA_BASE, SourceError, collect_ashby, collect_ats, collect_hn, collect_link_page, collect_rss, collect_rss_proxy, enrich_job_from_url, fetch_source_text, infer_company, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -88,6 +88,44 @@ class SourceTests(unittest.TestCase):
             with self.assertRaises(SourceError) as cm:
                 collect_rss_proxy(source)
         self.assertIn("Firecrawl raw fetch failed", str(cm.exception))
+
+    def test_collect_ashby_retries_transient_read_timeout(self):
+        source = SourceConfig(id="ashby", name="AshbyCo", type="ats", url="https://jobs.ashbyhq.com/ashbyco")
+        response = mock.Mock()
+        response.geturl.return_value = "https://api.ashbyhq.com/posting-api/job-board/ashbyco"
+        response.headers.get_content_charset.return_value = "utf-8"
+        response.read.return_value = b"""
+        {"jobs": [{
+          "id": "job-1",
+          "jobUrl": "https://jobs.ashbyhq.com/ashbyco/job-1",
+          "title": "Senior Product Manager",
+          "locationName": "Remote",
+          "descriptionHtml": "<p>Build AI products.</p>",
+          "publishedAt": "2026-05-31T12:00:00Z"
+        }]}
+        """
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+
+        with mock.patch("jobhunter.sources.wait_for_host_rate_limit"), mock.patch(
+            "jobhunter.sources.urllib.request.urlopen",
+            side_effect=[TimeoutError("read operation timed out"), response],
+        ) as urlopen:
+            jobs = collect_ashby(source, "ashbyco")
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Senior Product Manager")
+
+    def test_fetch_source_text_wraps_timeout_as_source_error(self):
+        source = SourceConfig(id="rss", name="RSS", type="rss", url="https://example.com/rss")
+        with mock.patch("jobhunter.sources.wait_for_host_rate_limit"), mock.patch(
+            "jobhunter.sources.urllib.request.urlopen",
+            side_effect=TimeoutError("read operation timed out"),
+        ):
+            with self.assertRaises(SourceError) as cm:
+                fetch_source_text(source)
+        self.assertIn("Timeout fetching", str(cm.exception))
 
     def test_rejects_file_urls(self):
         with self.assertRaises(SourceError):

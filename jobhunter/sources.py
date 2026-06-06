@@ -162,7 +162,14 @@ def parse_date(value: Optional[str]) -> Optional[str]:
         return None
 
 
-def fetch_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30, robots_check: bool = True) -> str:
+def fetch_text(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 30,
+    robots_check: bool = True,
+    attempts: int = 1,
+    retry_delay: float = 0,
+) -> str:
     validate_safe_url(url)
     wait_for_host_rate_limit(url)
     if robots_check and CHECK_ROBOTS and not robots_allowed(url):
@@ -171,24 +178,58 @@ def fetch_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int 
     if headers:
         merged_headers.update(headers)
     request = urllib.request.Request(url, headers=merged_headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            final_url = response.geturl()
-            validate_safe_url(final_url)
-            charset = response.headers.get_content_charset() or "utf-8"
-            body = response.read(MAX_BYTES + 1)
-            if len(body) > MAX_BYTES:
-                raise SourceError("Response too large for %s" % url)
-            log_context(LOGGER, logging.DEBUG, "source_fetch_ok", url=url, final_url=final_url, bytes=len(body))
-            return body.decode(charset, errors="replace")
-    except urllib.error.HTTPError as exc:
-        raise SourceError("HTTP %s fetching %s" % (exc.code, url))
-    except urllib.error.URLError as exc:
-        raise SourceError("URL error fetching %s: %s" % (url, exc.reason))
+    attempts = max(1, int(attempts or 1))
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                final_url = response.geturl()
+                validate_safe_url(final_url)
+                charset = response.headers.get_content_charset() or "utf-8"
+                body = response.read(MAX_BYTES + 1)
+                if len(body) > MAX_BYTES:
+                    raise SourceError("Response too large for %s" % url)
+                log_context(LOGGER, logging.DEBUG, "source_fetch_ok", url=url, final_url=final_url, bytes=len(body))
+                return body.decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            raise SourceError("HTTP %s fetching %s" % (exc.code, url))
+        except urllib.error.URLError as exc:
+            if _is_timeout_error(exc.reason) and attempt < attempts:
+                log_fetch_retry(url, attempt, attempts, "URL timeout: %s" % exc.reason, retry_delay)
+                continue
+            raise SourceError("URL error fetching %s: %s" % (url, exc.reason))
+        except (TimeoutError, socket.timeout) as exc:
+            if attempt < attempts:
+                log_fetch_retry(url, attempt, attempts, "timeout: %s" % exc, retry_delay)
+                continue
+            raise SourceError("Timeout fetching %s after %s attempt(s): %s" % (url, attempts, exc))
+    raise SourceError("Failed fetching %s" % url)
 
 
-def fetch_source_text(source: SourceConfig, url: Optional[str] = None) -> str:
-    return fetch_text(url or source.url, source.headers, robots_check=robots_check_for_source(source))
+def _is_timeout_error(exc) -> bool:
+    return isinstance(exc, (TimeoutError, socket.timeout)) or "timed out" in str(exc).lower()
+
+
+def log_fetch_retry(url: str, attempt: int, attempts: int, error: str, retry_delay: float) -> None:
+    log_context(LOGGER, logging.WARNING, "source_fetch_retry", url=url, attempt=attempt, attempts=attempts, error=error)
+    if retry_delay > 0:
+        time.sleep(retry_delay)
+
+
+def fetch_source_text(
+    source: SourceConfig,
+    url: Optional[str] = None,
+    timeout: int = 30,
+    attempts: int = 1,
+    retry_delay: float = 0,
+) -> str:
+    return fetch_text(
+        url or source.url,
+        source.headers,
+        timeout=timeout,
+        robots_check=robots_check_for_source(source),
+        attempts=attempts,
+        retry_delay=retry_delay,
+    )
 
 
 def robots_check_for_source(source: SourceConfig) -> bool:
@@ -567,7 +608,7 @@ def collect_lever(source: SourceConfig, company: str) -> List[Job]:
 
 def collect_ashby(source: SourceConfig, organization: str) -> List[Job]:
     url = "https://api.ashbyhq.com/posting-api/job-board/%s" % organization
-    payload = json.loads(fetch_source_text(source, url))
+    payload = json.loads(fetch_source_text(source, url, timeout=45, attempts=2))
     jobs = []
     for raw in payload.get("jobs", []):
         jobs.append(
