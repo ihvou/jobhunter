@@ -36,7 +36,7 @@ ROBOTS_TXT_RESPECT = os.getenv("JOBHUNTER_ROBOTS_TXT_RESPECT", "ignore").strip()
 EMAIL_SAMPLE_MAX_BYTES = int(os.getenv("JOBHUNTER_EMAIL_SAMPLE_MAX_BYTES", str(256 * 1024)))
 EMAIL_SAMPLE_KEEP_PER_SENDER = int(os.getenv("JOBHUNTER_EMAIL_SAMPLE_KEEP_PER_SENDER", "20"))
 HOST_LAST_FETCH: Dict[str, float] = {}
-VALID_SOURCE_TYPES = {"rss", "rss_proxy", "json_api", "ats", "community", "imap"}
+VALID_SOURCE_TYPES = {"rss", "rss_proxy", "json_api", "ats", "community", "imap", "hn"}
 LEGACY_SOURCE_TYPE_ALIASES = {
     "email_alert": "imap",
     "remotive": "json_api",
@@ -214,6 +214,8 @@ def collect_from_source(source: SourceConfig) -> List[Job]:
         return collect_arbeitnow(source)
     if source_type == "json_api":
         return collect_generic_json(source)
+    if source_type == "hn":
+        return collect_hn(source)
     if source_type == "ats":
         return collect_ats(source)
     if source_type == "community":
@@ -355,6 +357,114 @@ def collect_arbeitnow(source: SourceConfig) -> List[Job]:
                 remote_policy="remote" if raw.get("remote") else "unknown",
                 description=strip_html(raw.get("description", "")),
                 posted_at=parse_date(str(raw.get("created_at") or "")),
+            )
+        )
+    return [job for job in jobs if job.title and job.url]
+
+
+HN_ALGOLIA_BASE = "https://hn.algolia.com/api/v1"
+
+
+def collect_hn(source: SourceConfig) -> List[Job]:
+    """Hacker News jobs via the free Algolia API — no key, no scraping, no
+    Firecrawl. The mode is chosen by ``source.query``:
+
+    - ``"jobs"``: HN front-page job posts (tag=job), e.g. "Acme (YC X) Is Hiring".
+    - ``"whoishiring"`` / ``"whoishiring-remote"``: top-level comments of the
+      latest monthly "Ask HN: Who is hiring?" thread; each comment is one job
+      post. The ``-remote`` variant keeps only comments that mention remote.
+
+    Replaces the old ``community`` HTML scrapes of news.ycombinator.com /
+    hnhiring.com, which needed Firecrawl to render and burned credits.
+    """
+    mode = (source.query or "jobs").strip().lower()
+    if mode.startswith("whoishiring"):
+        return _hn_whoishiring(source, remote_only=mode.endswith("remote"))
+    return _hn_job_stories(source)
+
+
+def _hn_get(path: str) -> Dict:
+    payload = json.loads(fetch_text("%s/%s" % (HN_ALGOLIA_BASE, path), robots_check=False))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _hn_company_from_title(title: str) -> str:
+    """"Acme (YC W23) Is Hiring ..." / "Acme | Senior PM | Remote" -> "Acme"."""
+    head = re.split(r"\s*(?:\(YC\b|\bis hiring\b|\||–|—| - )", title, maxsplit=1, flags=re.I)[0]
+    return head.strip()[:80]
+
+
+def _hn_job_stories(source: SourceConfig) -> List[Job]:
+    payload = _hn_get("search_by_date?tags=job&hitsPerPage=50")
+    jobs = []
+    for hit in payload.get("hits", []):
+        title = (hit.get("title") or "").strip()
+        if not title:
+            continue
+        object_id = str(hit.get("objectID") or "")
+        url = (hit.get("url") or "").strip() or "https://news.ycombinator.com/item?id=%s" % object_id
+        jobs.append(
+            Job(
+                source_id=source.id,
+                source_name=source.name,
+                external_id="hn-%s" % object_id,
+                url=url,
+                title=title,
+                company=_hn_company_from_title(title),
+                remote_policy=infer_remote_policy(title),
+                description=title,
+                posted_at=parse_date(hit.get("created_at")),
+            )
+        )
+    return [job for job in jobs if job.title and job.url]
+
+
+def _hn_first_block(text_html: str) -> str:
+    """First non-empty line of a HN comment — the job headline ("Co | Role |
+    Location"). HN comments separate the headline with <p>/<br>, which the
+    plain-text extractor would otherwise collapse into one run-on string."""
+    for chunk in re.split(r"</p>|<p>|<br\s*/?>", text_html, flags=re.I):
+        cleaned = strip_html(chunk).strip()
+        if cleaned:
+            return cleaned[:180]
+    return strip_html(text_html).strip()[:120]
+
+
+def _hn_whoishiring(source: SourceConfig, remote_only: bool = False) -> List[Job]:
+    search = _hn_get("search?tags=story,author_whoishiring&hitsPerPage=8")
+    thread_id = ""
+    for hit in search.get("hits", []):
+        if "who is hiring" in (hit.get("title") or "").lower():
+            thread_id = str(hit.get("objectID") or "")
+            break
+    if not thread_id:
+        return []
+    thread = _hn_get("items/%s" % thread_id)
+    jobs = []
+    for child in thread.get("children") or []:
+        text_html = child.get("text") or ""
+        if not text_html:
+            continue
+        plain = strip_html(text_html).strip()
+        if not plain:
+            continue
+        is_remote = "remote" in plain.lower()
+        if remote_only and not is_remote:
+            continue
+        title = _hn_first_block(text_html)
+        match = re.search(r'href="(https?://[^"]+)"', text_html)
+        link = match.group(1) if match else "https://news.ycombinator.com/item?id=%s" % child.get("id")
+        jobs.append(
+            Job(
+                source_id=source.id,
+                source_name=source.name,
+                external_id="hn-%s" % child.get("id"),
+                url=link,
+                title=title,
+                company=_hn_company_from_title(title),
+                remote_policy="remote" if is_remote else "unknown",
+                description=plain[:4000],
+                posted_at=parse_date(child.get("created_at")),
             )
         )
     return [job for job in jobs if job.title and job.url]
