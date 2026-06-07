@@ -281,7 +281,9 @@ HN_THREAD_JSON = json.dumps({"id": 901, "children": [
 def _fake_hn_fetch(url, **kwargs):
     if "tags=job" in url:
         return HN_JOBS_JSON
-    if "author_whoishiring" in url and "/items/" not in url:
+    if "search_by_date" in url and "author_whoishiring" in url:
+        # Must be date-sorted to get the current month's thread, not a
+        # high-points historical one.
         return HN_WHOIS_SEARCH_JSON
     if "/items/901" in url:
         return HN_THREAD_JSON
