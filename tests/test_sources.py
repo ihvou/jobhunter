@@ -1,9 +1,10 @@
+import json
 import unittest
 from unittest import mock
 
 from jobhunter.models import SourceConfig
 from jobhunter import sources as source_module
-from jobhunter.sources import SourceError, collect_ats, collect_link_page, collect_rss, collect_rss_proxy, enrich_job_from_url, fetch_source_text, infer_company, strip_html, validate_safe_url
+from jobhunter.sources import HN_ALGOLIA_BASE, SourceError, collect_ats, collect_hn, collect_link_page, collect_rss, collect_rss_proxy, enrich_job_from_url, fetch_source_text, infer_company, strip_html, validate_safe_url
 
 
 RSS = """<?xml version="1.0"?>
@@ -255,6 +256,69 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(fields["company"], "ExampleCo")
         self.assertEqual(fields["salary_min"], 120000)
         self.assertIn("Build AI workflows", fields["description"])
+
+
+HN_JOBS_JSON = json.dumps({"hits": [
+    {"objectID": "111", "title": "Acme (YC W23) Is Hiring a Senior Product Manager (Remote)",
+     "url": "https://acme.com/careers/pm", "created_at": "2026-06-01T10:00:00Z"},
+    {"objectID": "112", "title": "Globex Is Hiring", "created_at": "2026-06-01T11:00:00Z"},
+    {"objectID": "113", "title": "", "url": "https://x.example", "created_at": "2026-06-01T12:00:00Z"},
+]})
+HN_WHOIS_SEARCH_JSON = json.dumps({"hits": [
+    {"objectID": "900", "title": "Ask HN: Who wants to be hired? (June 2026)"},
+    {"objectID": "901", "title": "Ask HN: Who is hiring? (June 2026)"},
+]})
+HN_THREAD_JSON = json.dumps({"id": 901, "children": [
+    {"id": 1001, "created_at": "2026-06-01T12:00:00Z",
+     "text": "<p>Initrode | Staff Product Manager | REMOTE (US)</p>"
+             "<p>Build things. <a href=\"https://initrode.com/jobs/1\">Apply here</a></p>"},
+    {"id": 1002, "created_at": "2026-06-01T12:30:00Z",
+     "text": "<p>Onsite Co | NYC PM | Full-time</p>"},
+    {"id": 1003, "created_at": "2026-06-01T13:00:00Z", "text": ""},
+]})
+
+
+def _fake_hn_fetch(url, **kwargs):
+    if "tags=job" in url:
+        return HN_JOBS_JSON
+    if "author_whoishiring" in url and "/items/" not in url:
+        return HN_WHOIS_SEARCH_JSON
+    if "/items/901" in url:
+        return HN_THREAD_JSON
+    raise AssertionError("unexpected HN url: %s" % url)
+
+
+class HnSourceTests(unittest.TestCase):
+    def test_hn_jobs_mode_extracts_structured_stories(self):
+        source = SourceConfig(id="hn-jobs", name="HN Jobs", type="hn", url=HN_ALGOLIA_BASE, query="jobs")
+        with mock.patch("jobhunter.sources.fetch_text", side_effect=_fake_hn_fetch):
+            jobs = collect_hn(source)
+        # The empty-title hit is dropped.
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(jobs[0].company, "Acme")
+        self.assertEqual(jobs[0].url, "https://acme.com/careers/pm")
+        self.assertEqual(jobs[0].remote_policy, "remote")
+        # Missing url falls back to the HN item permalink.
+        self.assertEqual(jobs[1].url, "https://news.ycombinator.com/item?id=112")
+
+    def test_hn_whoishiring_picks_latest_thread_and_parses_comments(self):
+        source = SourceConfig(id="hn-whos-hiring", name="HN WIH", type="hn", url=HN_ALGOLIA_BASE, query="whoishiring")
+        with mock.patch("jobhunter.sources.fetch_text", side_effect=_fake_hn_fetch):
+            jobs = collect_hn(source)
+        # Skips the "who wants to be hired" thread; empty comment dropped.
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(jobs[0].title, "Initrode | Staff Product Manager | REMOTE (US)")
+        self.assertEqual(jobs[0].company, "Initrode")
+        self.assertEqual(jobs[0].url, "https://initrode.com/jobs/1")
+        self.assertEqual(jobs[0].remote_policy, "remote")
+        self.assertEqual(jobs[1].remote_policy, "unknown")
+
+    def test_hn_whoishiring_remote_filters_to_remote_only(self):
+        source = SourceConfig(id="hnhiring-remote", name="HN Remote", type="hn", url=HN_ALGOLIA_BASE, query="whoishiring-remote")
+        with mock.patch("jobhunter.sources.fetch_text", side_effect=_fake_hn_fetch):
+            jobs = collect_hn(source)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].company, "Initrode")
 
 
 if __name__ == "__main__":
