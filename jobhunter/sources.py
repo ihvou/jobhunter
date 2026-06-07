@@ -614,6 +614,8 @@ def collect_link_page(source: SourceConfig) -> List[Job]:
 
 
 def link_page_job(source: SourceConfig, url: str, title: str, description: str, page_text: str) -> Optional[Job]:
+    if is_navigation_link_title(title):
+        return None
     parsed = urlparse(url)
     if is_yc_source(source):
         company = company_from_yc_job_url(parsed.path)
@@ -767,7 +769,27 @@ def strip_company_prefix(title: str, company: str) -> str:
 
 def is_navigation_link_title(title_lower: str) -> bool:
     compact = clean_title(title_lower).lower()
-    if compact in {"rss", "remote", "віддалено", "без досвіду"}:
+    if compact in {
+        "rss",
+        "remote",
+        "віддалено",
+        "без досвіду",
+        "job",
+        "jobs",
+        "careers",
+        "career",
+        "view job",
+        "view jobs",
+        "read more",
+        "learn more",
+        "apply now",
+        "apply here",
+        "apply",
+        "new job",
+        "new jobs",
+    }:
+        return True
+    if compact.startswith("message from "):
         return True
     if re.fullmatch(r"<?\s*\d+\s*(?:року|роки|years?)", compact):
         return True

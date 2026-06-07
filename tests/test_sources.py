@@ -155,6 +155,22 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(jobs), 2)
         self.assertEqual(jobs[0].url, "https://example.com/roles/1")
 
+    def test_collect_link_page_skips_placeholder_job_navigation_titles(self):
+        source = SourceConfig(id="hnhiring-remote", name="HN Hiring Remote", type="community", url="https://hnhiring.com/june-2026")
+        html = """
+<a href="/jobs">View Jobs</a>
+<a href="/post/1">Read more</a>
+<a href="/apply">Apply now</a>
+<a href="/new">New Jobs</a>
+<a href="/message">Message from founder</a>
+<a href="/roles/1">Senior AI Product Engineer</a>
+"""
+        with mock.patch("jobhunter.sources.fetch_text", return_value=html):
+            jobs = collect_link_page(source)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Senior AI Product Engineer")
+
     def test_collect_link_page_uses_firecrawl_for_blocked_community_source(self):
         source = SourceConfig(
             id="dou-product",
