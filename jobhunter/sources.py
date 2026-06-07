@@ -431,7 +431,9 @@ def _hn_first_block(text_html: str) -> str:
 
 
 def _hn_whoishiring(source: SourceConfig, remote_only: bool = False) -> List[Job]:
-    search = _hn_get("search?tags=story,author_whoishiring&hitsPerPage=8")
+    # search_by_date (newest first), NOT search (ranks by points — a 2020
+    # "Who is hiring right now?" thread outranks the current month's).
+    search = _hn_get("search_by_date?tags=story,author_whoishiring&hitsPerPage=8")
     thread_id = ""
     for hit in search.get("hits", []):
         if "who is hiring" in (hit.get("title") or "").lower():
