@@ -41,7 +41,7 @@ class DatabaseTests(unittest.TestCase):
                 linkedin_columns = [row["name"] for row in conn.execute("pragma table_info(company_linkedin_cache)").fetchall()]
                 imap_uid_columns = [row["name"] for row in conn.execute("pragma table_info(imap_processed_uids)").fetchall()]
 
-            self.assertEqual(schema_version, 17)
+            self.assertEqual(schema_version, 18)
             self.assertEqual(
                 imap_uid_columns,
                 ["source_id", "uid", "processed_at"],
@@ -66,6 +66,9 @@ class DatabaseTests(unittest.TestCase):
                     "parser_version",
                     "first_listed_at",
                     "parse_count",
+                    "parser_status",
+                    "parser_status_updated_at",
+                    "parser_error",
                 ],
             )
             self.assertIn("email_alert_id", job_columns)
@@ -128,6 +131,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(len(alerts), 1)
             self.assertEqual(alerts[0]["id"], email_alert_id)
             self.assertEqual(alerts[0]["subject"], "Product jobs updated")
+            self.assertEqual(alerts[0]["parser_status"], "pending")
             compare = db.email_alert_compare(email_alert_id)
             self.assertIn("<html><body>", compare["raw_html"])
             self.assertIn("AI PM", compare["raw_text"])
@@ -193,6 +197,53 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(reparsed["first_listed_at"], fresh["first_listed_at"])
             self.assertEqual(reparsed["parse_count"], 2)
             self.assertTrue(reparsed["parsed_at"])
+
+    def test_stale_email_parser_lifecycle_surfaces_retries_without_resetting_kpis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            now = datetime.utcnow().replace(microsecond=0)
+            stale_seen = (now - timedelta(hours=7)).isoformat() + "Z"
+            old_received = (now - timedelta(days=40)).isoformat() + "Z"
+            with db.connection() as conn:
+                conn.execute(
+                    """
+                    insert into email_alert_raw
+                        (source_id, message_id, sender, subject, received_at,
+                         raw_html_blob, raw_text_blob, parsed_at, parsed_jobs_count,
+                         parser_version, first_listed_at, parse_count,
+                         parser_status, parser_status_updated_at)
+                    values ('email-job-alerts', '<retry>', '', 'retry me', ?,
+                            null, null, null, 0, '', ?, 1, 'pending', ?)
+                    """,
+                    (stale_seen, stale_seen, stale_seen),
+                )
+                old_id = conn.execute(
+                    """
+                    insert into email_alert_raw
+                        (source_id, message_id, sender, subject, received_at,
+                         raw_html_blob, raw_text_blob, parsed_at, parsed_jobs_count,
+                         parser_version, first_listed_at, parse_count,
+                         parser_status, parser_status_updated_at)
+                    values ('email-job-alerts', '<old>', '', 'too old', ?,
+                            null, null, null, 0, '', ?, 0, 'pending', ?)
+                    """,
+                    (old_received, old_received, old_received),
+                ).lastrowid
+
+            pending = db.unparsed_email_alerts(10)
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["message_id"], "<retry>")
+            self.assertEqual(pending[0]["parser_status"], "retrying")
+            self.assertEqual(db.stale_unparsed_email_count(), 1)
+            with db.connection() as conn:
+                retry = conn.execute("select parse_count, parser_status from email_alert_raw where message_id='<retry>'").fetchone()
+                old = conn.execute("select parsed_at, parser_status, parser_error from email_alert_raw where id=?", (old_id,)).fetchone()
+            self.assertEqual(retry["parse_count"], 1)
+            self.assertEqual(retry["parser_status"], "retrying")
+            self.assertTrue(old["parsed_at"])
+            self.assertEqual(old["parser_status"], "skipped_stale")
+            self.assertIn("aged out", old["parser_error"])
 
     def test_source_failure_backoff_uses_consecutive_recent_failures(self):
         with tempfile.TemporaryDirectory() as tmp:

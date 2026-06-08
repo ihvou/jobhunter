@@ -14,7 +14,7 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 17
+LATEST_SCHEMA_VERSION = 18
 
 AGENT_IDS = {"collector", "qa", "pm", "researcher", "engineer", "user"}
 TASK_FINAL_STATUSES = {"completed", "cancelled", "needs_clarification"}
@@ -92,6 +92,9 @@ class Database:
             if current < 17:
                 migrate_v17(conn)
                 set_schema_version(conn, 17)
+            if current < 18:
+                migrate_v18(conn)
+                set_schema_version(conn, 18)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -1539,15 +1542,29 @@ class Database:
                 """
                 insert into email_alert_raw (
                     source_id, message_id, sender, subject, received_at,
-                    raw_html_blob, raw_text_blob, parser_version, first_listed_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_html_blob, raw_text_blob, parser_version,
+                    first_listed_at, parser_status, parser_status_updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (source_id, message_id, sender or "", subject or "", received_at, html_blob, text_blob, parser_version, utc_now_iso()),
+                (
+                    source_id,
+                    message_id,
+                    sender or "",
+                    subject or "",
+                    received_at,
+                    html_blob,
+                    text_blob,
+                    parser_version,
+                    utc_now_iso(),
+                    "pending",
+                    utc_now_iso(),
+                ),
             )
             return int(cursor.lastrowid), True
 
     def list_email_alerts(self, limit: int = 20, since: str = "", only_unparsed: bool = False) -> List[sqlite3.Row]:
         limit = min(max(1, int(limit or 20)), 50)
+        self.refresh_email_parser_statuses()
         where = []
         params: List = []
         if since:
@@ -1555,9 +1572,12 @@ class Database:
             params.append(since)
         if only_unparsed:
             where.append("parsed_at is null")
+            where.append("coalesce(parser_status, 'pending') in ('pending', 'retrying')")
         sql = """
             select id, source_id, message_id, sender, subject, received_at,
-                   parsed_at, parsed_jobs_count, parser_version
+                   parsed_at, parsed_jobs_count, parser_version,
+                   first_listed_at, parse_count, parser_status,
+                   parser_status_updated_at, parser_error
             from email_alert_raw
         """
         if where:
@@ -1581,23 +1601,16 @@ class Database:
 
     def unparsed_email_alerts(self, limit: int = 20) -> List[Dict]:
         limit = min(max(1, int(limit or 20)), 20)
-        cutoff = _email_age_cutoff_iso()
-        params = [limit] if cutoff is None else [cutoff, limit]
+        self.refresh_email_parser_statuses()
         sql = """
             select *
             from email_alert_raw
             where parsed_at is null
+              and coalesce(parser_status, 'pending') in ('pending', 'retrying')
         """
-        if cutoff is not None:
-            sql += " and received_at >= ? "
         sql += " order by received_at asc, id asc limit ?"
         with self.connection() as conn:
-            rows = list(
-                conn.execute(
-                    sql,
-                    tuple([cutoff, limit]) if cutoff is not None else (limit,),
-                )
-            )
+            rows = list(conn.execute(sql, (limit,)))
         alerts = []
         for row in rows:
             data = row_to_plain_dict(row)
@@ -1607,16 +1620,20 @@ class Database:
         return alerts
 
     def mark_email_alert_parsed(self, email_alert_id: int, parsed_jobs_count: int) -> None:
+        now = utc_now_iso()
         with self.connection() as conn:
             conn.execute(
                 """
                 update email_alert_raw
                 set parsed_at = ?,
                     parsed_jobs_count = ?,
-                    parse_count = parse_count + 1
+                    parse_count = parse_count + 1,
+                    parser_status = 'parsed',
+                    parser_status_updated_at = ?,
+                    parser_error = null
                 where id = ?
                 """,
-                (utc_now_iso(), max(0, int(parsed_jobs_count or 0)), email_alert_id),
+                (now, max(0, int(parsed_jobs_count or 0)), now, email_alert_id),
             )
 
     def update_job_enrichment(self, job_id: str, fields: Dict) -> None:
@@ -1648,16 +1665,92 @@ class Database:
             conn.execute("update jobs set %s where id = ?" % ", ".join(assignments), tuple(params))
 
     def unparsed_email_count(self) -> int:
-        cutoff = _email_age_cutoff_iso()
+        self.refresh_email_parser_statuses()
         with self.connection() as conn:
-            if cutoff is None:
-                row = conn.execute("select count(*) as c from email_alert_raw where parsed_at is null").fetchone()
-            else:
-                row = conn.execute(
-                    "select count(*) as c from email_alert_raw where parsed_at is null and received_at >= ?",
-                    (cutoff,),
-                ).fetchone()
+            row = conn.execute(
+                """
+                select count(*) as c
+                from email_alert_raw
+                where parsed_at is null
+                  and coalesce(parser_status, 'pending') in ('pending', 'retrying')
+                """
+            ).fetchone()
             return int(row["c"] or 0)
+
+    def stale_unparsed_email_count(self) -> int:
+        self.refresh_email_parser_statuses()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                select count(*) as c
+                from email_alert_raw
+                where parsed_at is null
+                  and coalesce(parser_status, 'pending') = 'retrying'
+                """,
+            ).fetchone()
+            return int(row["c"] or 0)
+
+    def refresh_email_parser_statuses(self) -> Dict[str, int]:
+        """Surface stale raw-email extraction state instead of hiding it.
+
+        Rows that age out of the extraction window are terminally skipped with
+        an explicit parser_status. Rows still eligible for extraction but older
+        than JOBHUNTER_EMAIL_PARSE_STALE_HOURS since their current queue entry
+        are marked retrying so QA sees actionable parser state rather than an
+        undifferentiated parsed_at NULL backlog.
+        """
+        now = utc_now_iso()
+        max_age_cutoff = _email_age_cutoff_iso()
+        stale_cutoff = _email_parse_stale_cutoff_iso()
+        skipped_stale = 0
+        retrying = 0
+        parsed_synced = 0
+        with self.connection() as conn:
+            if max_age_cutoff is not None:
+                cursor = conn.execute(
+                    """
+                    update email_alert_raw
+                    set parsed_at = ?,
+                        parsed_jobs_count = 0,
+                        parser_status = 'skipped_stale',
+                        parser_status_updated_at = ?,
+                        parser_error = 'Email alert aged out before Codex extraction; unmark manually to retry'
+                    where parsed_at is null
+                      and coalesce(parser_status, 'pending') in ('pending', 'retrying')
+                      and datetime(received_at) < datetime(?)
+                    """,
+                    (now, now, max_age_cutoff),
+                )
+                skipped_stale = int(cursor.rowcount or 0)
+            cursor = conn.execute(
+                """
+                update email_alert_raw
+                set parser_status = 'retrying',
+                    parser_status_updated_at = ?,
+                    parser_error = 'Codex extraction retry queued for stale unparsed email alert'
+                where parsed_at is null
+                  and coalesce(parser_status, 'pending') = 'pending'
+                  and datetime(coalesce(parser_status_updated_at, first_listed_at, received_at)) < datetime(?)
+                """,
+                (now, stale_cutoff),
+            )
+            retrying = int(cursor.rowcount or 0)
+            cursor = conn.execute(
+                """
+                update email_alert_raw
+                set parser_status = 'parsed',
+                    parser_status_updated_at = coalesce(parser_status_updated_at, parsed_at),
+                    parser_error = null
+                where parsed_at is not null
+                  and coalesce(parser_status, 'pending') in ('pending', 'retrying')
+                """
+            )
+            parsed_synced = int(cursor.rowcount or 0)
+        return {
+            "skipped_stale": skipped_stale,
+            "retrying": retrying,
+            "parsed_synced": parsed_synced,
+        }
 
     def email_alerts_for_audit(self, days: int = 7) -> List[Dict]:
         """Return decompressed email_alert_raw rows from the last N days for audit.
@@ -1668,7 +1761,7 @@ class Database:
             for row in conn.execute(
                 """
                 select id, source_id, sender, subject, received_at, parsed_at,
-                       parsed_jobs_count, raw_html_blob
+                       parsed_jobs_count, parser_status, raw_html_blob
                 from email_alert_raw
                 where received_at >= ?
                 order by received_at desc
@@ -1690,6 +1783,7 @@ class Database:
                         "received_at": row["received_at"],
                         "parsed_at": row["parsed_at"],
                         "parsed_jobs_count": int(row["parsed_jobs_count"] or 0),
+                        "parser_status": row["parser_status"],
                         "raw_html": raw_html,
                     }
                 )
@@ -1702,12 +1796,14 @@ class Database:
         if not ids:
             return 0
         placeholders = ",".join("?" * len(ids))
+        now = utc_now_iso()
         sql = (
-            "update email_alert_raw set parsed_at = null, parsed_jobs_count = 0 "
+            "update email_alert_raw set parsed_at = null, parsed_jobs_count = 0, "
+            "parser_status = 'pending', parser_status_updated_at = ?, parser_error = null "
             "where id in (%s)" % placeholders
         )
         with self.connection() as conn:
-            cursor = conn.execute(sql, ids)
+            cursor = conn.execute(sql, [now] + ids)
             return int(cursor.rowcount or 0)
 
 
@@ -1725,6 +1821,16 @@ def _email_age_cutoff_iso() -> Optional[str]:
     if days <= 0:
         return None
     cutoff = datetime.utcnow() - timedelta(days=days)
+    return cutoff.replace(microsecond=0).isoformat() + "Z"
+
+
+def _email_parse_stale_cutoff_iso() -> str:
+    try:
+        hours = float(os.getenv("JOBHUNTER_EMAIL_PARSE_STALE_HOURS", "6"))
+    except ValueError:
+        hours = 6.0
+    hours = max(0.25, hours)
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
     return cutoff.replace(microsecond=0).isoformat() + "Z"
 
 
@@ -2366,6 +2472,41 @@ def migrate_v17(conn) -> None:
     )
     conn.execute(
         "update email_alert_raw set parse_count = 1 where parsed_at is not null and parse_count = 0"
+    )
+
+
+def migrate_v18(conn) -> None:
+    """Track raw-email parser lifecycle separately from parse latency.
+
+    first_listed_at/parse_count (v17) are KPI fields and stay immutable across
+    reparse cycles. parser_status_updated_at is the queue-entry timestamp used
+    to decide whether the current pending/retrying state is stale.
+    """
+    for statement in [
+        "alter table email_alert_raw add column parser_status text not null default 'pending'",
+        "alter table email_alert_raw add column parser_status_updated_at text",
+        "alter table email_alert_raw add column parser_error text",
+    ]:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+    conn.executescript(
+        """
+        create index if not exists idx_email_alert_raw_parser_status
+            on email_alert_raw(parser_status, parsed_at, parser_status_updated_at);
+        update email_alert_raw
+        set parser_status = 'parsed',
+            parser_status_updated_at = coalesce(parser_status_updated_at, parsed_at),
+            parser_error = null
+        where parsed_at is not null
+          and coalesce(parser_status, 'pending') = 'pending';
+        update email_alert_raw
+        set parser_status = 'pending',
+            parser_status_updated_at = coalesce(parser_status_updated_at, first_listed_at, received_at)
+        where parsed_at is null
+          and coalesce(parser_status, 'pending') = 'pending';
+        """
     )
 
 

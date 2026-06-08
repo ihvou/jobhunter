@@ -266,6 +266,7 @@ class JobHunter:
             "inserted": 0,
             "l2_candidates": 0,
             "unparsed_email_count": self.database.unparsed_email_count(),
+            "stale_unparsed_email_count": self.database.stale_unparsed_email_count(),
         }
 
     def should_l2_score(self, source: SourceConfig, job: Job, l1_score: int, current_count: int) -> bool:
