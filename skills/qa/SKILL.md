@@ -90,51 +90,68 @@ limit 30;
 ```
 
 5. Agent reports mention unresolved operational failures. This check is a
-   backstop for repeated, unclassified agent failures; do not use it for
-   expected transient source failures (covered by `repeated_source_failures`) or
-   failures that already have a recent QA task/remediation path. If the query
-   returns no rows because an open/picked/recently completed `failure_reports`
-   task exists, treat the reports as linked to that task and do not file another
-   duplicate.
+   backstop for repeated, unclassified agent failures from the current run; do
+   not use it for expected transient source failures (covered by
+   `repeated_source_failures`), smoke-test skips, PM risk language, historical
+   retrospectives, prior QA reports, or failures that already have a recent QA
+   task/remediation path. If the query returns no rows because an
+   open/picked/recently completed `failure_reports` task exists, treat the
+   reports as linked to that task and do not file another duplicate.
 
 ```sql
-with candidate_reports as (
-  select id, agent, report_date, summary, details_json, created_at
-  from agent_reports
-  where created_at >= datetime('now', '-3 days')
+with active_failure_reports_task as (
+  select 1
+  from agent_tasks
+  where kind = 'qa.bug'
     and (
-      lower(summary) like '%error%'
-      or lower(summary) like '%failed%'
-      or lower(summary) like '%skipped%'
-      or lower(summary) like '%stuck%'
-      or lower(coalesce(details_json, '')) like '%error%'
-      or lower(coalesce(details_json, '')) like '%failed%'
-      or lower(coalesce(details_json, '')) like '%exception%'
+      status in ('open', 'picked')
+      or completed_at >= datetime('now', '-7 days')
     )
-    and lower(summary || ' ' || coalesce(details_json, '')) not like '%expected transient%'
-    and lower(summary || ' ' || coalesce(details_json, '')) not like '%classified transient%'
-    and lower(summary || ' ' || coalesce(details_json, '')) not like '%resolved%'
-    and lower(summary || ' ' || coalesce(details_json, '')) not like '%remediated%'
-    and lower(summary || ' ' || coalesce(details_json, '')) not like '%closed%'
-    and lower(summary || ' ' || coalesce(details_json, '')) not like '%needs_clarification%'
+    and (
+      lower(summary) like '%failure-report%'
+      or lower(summary) like '%failure report%'
+      or lower(payload_json) like '%"anti_pattern": "failure_reports"%'
+      or lower(payload_json) like '%"anti_pattern":"failure_reports"%'
+    )
+  limit 1
+),
+candidate_reports as (
+  select id, agent, report_date, summary, details_json, created_at,
+         lower(summary || ' ' || coalesce(details_json, '')) as report_text
+  from agent_reports
+  where created_at >= datetime('now', '-36 hours')
+    and agent != 'qa'
+),
+actionable_reports as (
+  select id, agent, report_date, summary, created_at
+  from candidate_reports
+  where (
+      report_text like '%error%'
+      or report_text like '%failed%'
+      or report_text like '%blocked%'
+      or report_text like '%exception%'
+      or report_text like '%stuck%'
+    )
+    and report_text not like '%expected transient%'
+    and report_text not like '%classified transient%'
+    and report_text not like '%resolved%'
+    and report_text not like '%remediated%'
+    and report_text not like '%closed%'
+    and report_text not like '%needs_clarification%'
+    and report_text not like '%skipped smoke%'
+    and report_text not like '%smoke skipped%'
+    and report_text not like '%historical%'
+    and report_text not like '%retrospective%'
+    and report_text not like '%prior qa%'
+    and report_text not like '%failure_reports%'
+    and report_text not like '%failure report%'
+    and report_text not like '%anti_pattern%'
+    and report_text not like '%qa.bug%'
+    and report_text not like '%risk%'
 )
 select id, agent, report_date, summary, created_at
-from candidate_reports
-where not exists (
-    select 1
-    from agent_tasks
-    where kind = 'qa.bug'
-      and (
-        status in ('open', 'picked')
-        or completed_at >= datetime('now', '-7 days')
-      )
-      and (
-        lower(summary) like '%failure-report%'
-        or lower(summary) like '%failure report%'
-        or lower(payload_json) like '%"anti_pattern": "failure_reports"%'
-        or lower(payload_json) like '%"anti_pattern":"failure_reports"%'
-      )
-  )
+from actionable_reports
+where not exists (select 1 from active_failure_reports_task)
 order by created_at desc
 limit 20;
 ```
