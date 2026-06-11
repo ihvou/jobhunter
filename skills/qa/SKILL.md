@@ -38,7 +38,10 @@ order by picked_at asc
 limit 20;
 ```
 
-2. Source has repeated failures in the last 24 hours:
+2. Source has repeated failures in the last 24 hours. Only alert for sources
+   that are still enabled and active/test, and suppress rows already covered by
+   an open/picked/recently completed `repeated_source_failures` task so QA does
+   not re-file the same source-family bug every night.
 
 ```sql
 with failed_runs as (
@@ -51,10 +54,28 @@ with failed_runs as (
 select source_id, count(*) as failed_count,
        min(started_at) as first_failed_at,
        max(started_at) as last_failed_at,
-       group_concat(id) as sample_run_ids,
+       group_concat(failed_runs.id) as sample_run_ids,
        substr(group_concat(error, ' | '), 1, 500) as sample_errors
 from failed_runs
+left join sources on sources.id = failed_runs.source_id
 where rn <= 5
+  and coalesce(sources.enabled, 1) = 1
+  and coalesce(sources.status, 'active') in ('active', 'test')
+  and not exists (
+    select 1
+    from agent_tasks
+    where kind = 'qa.bug'
+      and (
+        status in ('open', 'picked')
+        or completed_at >= datetime('now', '-7 days')
+      )
+      and (
+        lower(summary) like '%repeated source failure%'
+        or lower(summary) like '%repeated source failures%'
+        or lower(payload_json) like '%"anti_pattern": "repeated_source_failures"%'
+        or lower(payload_json) like '%"anti_pattern":"repeated_source_failures"%'
+      )
+  )
 group by source_id
 having failed_count >= 2
 order by failed_count desc, last_failed_at desc
@@ -117,6 +138,18 @@ with candidate_reports as (
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%remediated%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%closed%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%needs_clarification%'
+    and not (
+      lower(summary || ' ' || coalesce(details_json, '')) like '%firecrawl%'
+      and (
+        lower(summary || ' ' || coalesce(details_json, '')) like '%402%'
+        or lower(summary || ' ' || coalesce(details_json, '')) like '%insufficient credits%'
+      )
+      and (
+        lower(summary || ' ' || coalesce(details_json, '')) like '%web_fetch%'
+        or lower(summary || ' ' || coalesce(details_json, '')) like '%fallback%'
+        or lower(summary || ' ' || coalesce(details_json, '')) like '%direct web%'
+      )
+    )
 )
 select id, agent, report_date, summary, created_at
 from candidate_reports

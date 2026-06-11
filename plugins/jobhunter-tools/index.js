@@ -450,7 +450,8 @@ export default definePluginEntry({
       label: "Jobhunter Write Status Report",
       description:
         "Upsert one internal daily report for an autonomous agent. One row per agent per UTC date; reruns update the same row. " +
-        "Use this at the end of every cron routine, even if no task was found.",
+        "Use this at the end of every cron routine, even if no task was found. " +
+        "If an external quota/tool issue was worked around successfully, describe it as a classified/expected transient note rather than an unresolved failure/error.",
       parameters: schema(
         {
           agent: { type: "string", enum: ["collector", "qa", "pm", "researcher", "engineer", "user"] },
