@@ -1727,6 +1727,32 @@ def normalize_lead_candidate(candidate) -> Lead:
     )
 
 
+EMAIL_PLACEHOLDER_JOB_TITLES = {
+    "apply",
+    "apply now",
+    "apply for this job",
+    "apply for this role",
+    "apply to job",
+    "learn more",
+    "read more",
+    "see details",
+    "see job",
+    "view job",
+    "view jobs",
+    "view role",
+    "view vacancy",
+}
+
+EMAIL_PLACEHOLDER_COMPANIES = {
+    "",
+    "n/a",
+    "na",
+    "none",
+    "unknown",
+    "unknown company",
+}
+
+
 def normalize_extracted_alert_job(raw_job, source_id: str, source_name: str) -> Job:
     if not isinstance(raw_job, dict):
         raise ServiceError(400, "Extracted job must be an object")
@@ -1735,8 +1761,12 @@ def normalize_extracted_alert_job(raw_job, source_id: str, source_name: str) -> 
     url = first_non_empty(raw_job, "url")
     if not title:
         raise ServiceError(400, "Extracted job needs title")
+    if is_placeholder_email_job_title(title):
+        raise ServiceError(400, "Extracted job title is a template/action label")
     if not company:
         raise ServiceError(400, "Extracted job needs company")
+    if is_placeholder_email_company(company):
+        raise ServiceError(400, "Extracted job needs real company")
     if not url:
         raise ServiceError(400, "Extracted job needs url")
     try:
@@ -1767,6 +1797,18 @@ def clean_email_artifact(value: str) -> str:
     text = re.sub(r"\s+is available(?:\s+LinkedIn)?$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+LinkedIn$", "", text, flags=re.IGNORECASE)
     return " ".join(text.split())
+
+
+def normalize_email_artifact_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def is_placeholder_email_job_title(title: str) -> bool:
+    return normalize_email_artifact_key(title) in EMAIL_PLACEHOLDER_JOB_TITLES
+
+
+def is_placeholder_email_company(company: str) -> bool:
+    return normalize_email_artifact_key(company) in EMAIL_PLACEHOLDER_COMPANIES
 
 
 def job_from_row(row) -> Job:

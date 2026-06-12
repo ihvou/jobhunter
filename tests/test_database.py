@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from jobhunter.database import Database
+from jobhunter.database import Database, migrate_v18
 from jobhunter.models import Job, Lead, ScoreResult, SourceConfig
 
 
@@ -28,7 +28,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(rows[0]["score"], 44)
             self.assertEqual(rows[0]["l1_score"], 44)
 
-    def test_schema_v17_persists_raw_email_agent_tasks_reports_linkedin_cache_and_imap_uids(self):
+    def test_schema_v18_persists_raw_email_agent_tasks_reports_linkedin_cache_and_imap_uids(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "jobs.sqlite")
             db.init_schema()
@@ -41,7 +41,7 @@ class DatabaseTests(unittest.TestCase):
                 linkedin_columns = [row["name"] for row in conn.execute("pragma table_info(company_linkedin_cache)").fetchall()]
                 imap_uid_columns = [row["name"] for row in conn.execute("pragma table_info(imap_processed_uids)").fetchall()]
 
-            self.assertEqual(schema_version, 17)
+            self.assertEqual(schema_version, 18)
             self.assertEqual(
                 imap_uid_columns,
                 ["source_id", "uid", "processed_at"],
@@ -154,6 +154,42 @@ class DatabaseTests(unittest.TestCase):
             reports = db.read_agent_reports(agent="qa", since="2026-05-24")
             self.assertEqual(len(reports), 1)
             self.assertEqual(reports[0]["summary"], "updated")
+
+    def test_migrate_v18_archives_email_placeholder_title_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "jobs.sqlite")
+            db.init_schema()
+            with db.connection() as conn:
+                conn.execute(
+                    "insert or ignore into sources (id, name, type, url) values (?, ?, ?, ?)",
+                    ("email-job-alerts", "Email Alerts", "imap", "imap://job-alerts"),
+                )
+                rows = [
+                    ("bad-read-more", "email-job-alerts", "Read more", "Unknown company", "new"),
+                    ("bad-learn-more", "email-job-alerts", "Learn More", "Unknown company", "new"),
+                    ("good-email", "email-job-alerts", "AI Product Manager", "ExampleCo", "new"),
+                    ("non-email", "community", "Read more", "ExampleCo", "new"),
+                    ("already-applied", "email-job-alerts", "Read more", "Unknown company", "applied"),
+                ]
+                for job_id, source_id, title, company, status in rows:
+                    conn.execute(
+                        """
+                        insert into jobs (
+                            id, source_id, source_name, external_id, url, title, company,
+                            first_seen_at, last_seen_at, status, normalized_title, normalized_company
+                        ) values (?, ?, 'Source', ?, ?, ?, ?, '2026-06-01T00:00:00Z',
+                                  '2026-06-01T00:00:00Z', ?, ?, ?)
+                        """,
+                        (job_id, source_id, job_id, "https://example.com/" + job_id, title, company, status, title.lower(), company.lower()),
+                    )
+                migrate_v18(conn)
+                statuses = {row["id"]: row["status"] for row in conn.execute("select id, status from jobs").fetchall()}
+
+            self.assertEqual(statuses["bad-read-more"], "irrelevant")
+            self.assertEqual(statuses["bad-learn-more"], "irrelevant")
+            self.assertEqual(statuses["good-email"], "new")
+            self.assertEqual(statuses["non-email"], "new")
+            self.assertEqual(statuses["already-applied"], "applied")
 
     def test_email_first_listed_at_and_parse_count_track_reparses(self):
         with tempfile.TemporaryDirectory() as tmp:

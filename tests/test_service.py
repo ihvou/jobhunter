@@ -247,6 +247,86 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(compared["jobs"][0]["email_alert_id"], email_alert_id)
             self.assertGreater(len(compared["jobs"][0]["description"]), 100)
 
+    def test_save_extracted_email_jobs_rejects_placeholder_titles_and_companies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot, _job_id = self.seeded_bot(tmp)
+            bot.config.sources_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "email-job-alerts",
+                            "name": "Email Alerts",
+                            "type": "imap",
+                            "url": "imap://job-alerts",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            service = JobHunterService(bot)
+            processed = service.process_email(
+                {
+                    "source_id": "email-job-alerts",
+                    "sender": "alerts@example.com",
+                    "subject": "Product jobs",
+                    "message_id": "<service-email-placeholder-1>",
+                    "date": "Wed, 20 May 2026 09:00:00 +0000",
+                    "body": "<html><body>Jobs</body></html>",
+                }
+            )
+            email_alert_id = processed["email_alert_id"]
+
+            enrichment_html = """
+<script type="application/ld+json">
+{"@type":"JobPosting","title":"Senior Product Manager","description":"Build AI workflow products with agents and product teams.","hiringOrganization":{"name":"ExampleCo"}}
+</script>
+"""
+            with mock.patch("jobhunter.service.validate_safe_url"), mock.patch("jobhunter.sources.fetch_text", return_value=enrichment_html):
+                saved = service.save_extracted_email_jobs(
+                    {
+                        "email_alert_id": email_alert_id,
+                        "jobs": [
+                            {
+                                "title": "Read more",
+                                "company": "Unknown company",
+                                "url": "https://example.com/read-more",
+                                "snippet": "Template CTA row",
+                            },
+                            {
+                                "title": "Learn More",
+                                "company": "ExampleCo",
+                                "url": "https://example.com/learn-more",
+                                "snippet": "Template CTA row",
+                            },
+                            {
+                                "title": "AI Product Manager",
+                                "company": "Unknown company",
+                                "url": "https://example.com/unknown-company",
+                                "snippet": "Missing company row",
+                            },
+                            {
+                                "title": "Principal Product Manager role at ExampleCo is available LinkedIn",
+                                "company": "ExampleCo LinkedIn",
+                                "url": "https://example.com/real-job",
+                                "snippet": "Real job row",
+                            },
+                        ],
+                    }
+                )
+
+            self.assertEqual(saved["saved"], 1)
+            self.assertEqual(len(saved["skipped"]), 3)
+            reasons = [item["reason"] for item in saved["skipped"]]
+            self.assertIn("template/action label", reasons[0])
+            self.assertIn("template/action label", reasons[1])
+            self.assertIn("real company", reasons[2])
+            compared = service.email_alert_compare(email_alert_id)["email_alert"]
+            self.assertEqual(compared["parsed_jobs_count"], 1)
+            self.assertEqual([job["title"] for job in compared["jobs"]], ["Principal Product Manager"])
+            all_titles = [row["title"] for row in service.query_sql("select title from jobs order by title", limit=20)["rows"]]
+            self.assertNotIn("Read more", all_titles)
+            self.assertNotIn("Learn More", all_titles)
+
     def test_rescore_leads_updates_confidence_and_why_match(self):
         from jobhunter.models import Lead
 

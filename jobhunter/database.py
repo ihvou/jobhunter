@@ -14,7 +14,7 @@ from .logging_setup import log_context
 from .models import Job, Lead, ScoreResult, SourceConfig, utc_now_iso
 
 LOGGER = logging.getLogger(__name__)
-LATEST_SCHEMA_VERSION = 17
+LATEST_SCHEMA_VERSION = 18
 
 AGENT_IDS = {"collector", "qa", "pm", "researcher", "engineer", "user"}
 TASK_FINAL_STATUSES = {"completed", "cancelled", "needs_clarification"}
@@ -92,6 +92,9 @@ class Database:
             if current < 17:
                 migrate_v17(conn)
                 set_schema_version(conn, 17)
+            if current < 18:
+                migrate_v18(conn)
+                set_schema_version(conn, 18)
             trim_usage_logs(conn)
             log_context(LOGGER, logging.INFO, "database_initialized", path=str(self.path), version=LATEST_SCHEMA_VERSION)
 
@@ -2368,6 +2371,45 @@ def migrate_v17(conn) -> None:
         "update email_alert_raw set parse_count = 1 where parsed_at is not null and parse_count = 0"
     )
 
+
+def migrate_v18(conn) -> None:
+    """Archive historical email-alert CTA/template rows accidentally saved as jobs.
+
+    These rows came from extraction using link text like "Read more" / "Learn
+    more" as the job title. They are not real postings, so keep the row for
+    auditability but move it out of new-job queues.
+    """
+    placeholders = (
+        "apply",
+        "apply now",
+        "apply for this job",
+        "apply for this role",
+        "apply to job",
+        "learn more",
+        "read more",
+        "see details",
+        "see job",
+        "view job",
+        "view jobs",
+        "view role",
+        "view vacancy",
+    )
+    email_source_ids = [
+        row["id"]
+        for row in conn.execute("select id from sources where type in ('imap', 'email_alert')").fetchall()
+    ]
+    params = list(placeholders)
+    source_filter = "(email_alert_id is not null or lower(source_id) like '%email%alert%')"
+    if email_source_ids:
+        source_filter = source_filter[:-1] + " or source_id in (%s))" % ",".join("?" for _ in email_source_ids)
+        params.extend(email_source_ids)
+    conn.execute(
+        "update jobs set status = 'irrelevant' "
+        "where status = 'new' "
+        "and lower(trim(title)) in (%s) " % ",".join("?" for _ in placeholders)
+        + "and " + source_filter,
+        params,
+    )
 
 def set_schema_version(conn, version: int) -> None:
     conn.execute("insert or ignore into schema_version (version, applied_at) values (?, ?)", (version, utc_now_iso()))
