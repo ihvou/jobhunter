@@ -421,6 +421,7 @@ class JobHunterService:
             "jobs_after": after,
             "inserted_estimate": max(0, after - before),
             "unparsed_email_count": self.bot.database.unparsed_email_count(),
+            "stale_unparsed_email_count": self.bot.database.stale_unparsed_email_count(),
         }
 
     def rescore_recent_jobs(self, limit: int = 500) -> Dict:
@@ -441,6 +442,7 @@ class JobHunterService:
             "digest_id": digest_id,
             "marked_sent": bool(digest_id),
             "unparsed_email_count": self.bot.database.unparsed_email_count(),
+            "stale_unparsed_email_count": self.bot.database.stale_unparsed_email_count(),
         }
         payload.update(self.bot.collection_freshness())
         return payload
@@ -685,7 +687,12 @@ class JobHunterService:
 
     def unparsed_emails(self, limit: int = 20) -> Dict:
         emails = self.bot.database.unparsed_email_alerts(limit)
-        return {"ok": True, "emails": emails, "count": len(emails)}
+        return {
+            "ok": True,
+            "emails": emails,
+            "count": len(emails),
+            "stale_unparsed_email_count": self.bot.database.stale_unparsed_email_count(),
+        }
 
     def save_extracted_email_jobs(self, body: Dict) -> Dict:
         email_alert_id = required_int(body, "email_alert_id")
@@ -787,6 +794,8 @@ class JobHunterService:
         checked = 0
         for alert in alerts:
             if alert.get("parsed_at") is None:
+                continue
+            if (alert.get("parser_status") or "parsed") != "parsed":
                 continue
             checked += 1
             expected = count_known_job_links_in_html(alert.get("raw_html") or "")

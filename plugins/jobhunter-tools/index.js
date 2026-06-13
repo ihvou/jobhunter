@@ -219,7 +219,7 @@ export default definePluginEntry({
       name: "jobhunter_collect_all_sources",
       label: "Jobhunter Collect All Sources",
       description:
-        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly. Response includes unparsed_email_count: the count of persisted email_alert_raw rows awaiting Codex extraction. If unparsed_email_count > 0, you MUST call jobhunter_process_unparsed_emails before rendering the next digest.",
+        "Collect and index jobs from all enabled Jobhunter sources. The real collection may take 45-120 seconds; this tool waits up to about 28 seconds and then returns status=running while collection continues in the background. If it returns running, call jobhunter_get_more_jobs again shortly. Response includes unparsed_email_count: the count of persisted email_alert_raw rows awaiting Codex extraction, and stale_unparsed_email_count for rows already marked retrying. If unparsed_email_count > 0, you MUST call jobhunter_process_unparsed_emails before rendering the next digest.",
       parameters: schema({}),
       execute: async () => jsonResult(await collectWithSoftTimeout()),
     });
@@ -780,7 +780,7 @@ export default definePluginEntry({
         "Deduplicate within each email by exact url. Strip template artifacts from fields: title suffixes ` role at <X> is available`, ` role`, ` | LinkedIn`, ` - LinkedIn`; " +
         "company suffixes ` is available LinkedIn`, ` LinkedIn`, ` is available`. SECOND CALL posts each extraction to /email/save_extracted_jobs; the server validates URLs, " +
         "saves jobs with email_alert_id, enriches descriptions from the URL, scores L1, may run capped L2, and marks the raw email parsed. If the second call returns " +
-        "remaining_unparsed_count > 0, call this tool again with only {limit} and continue until the queue is empty or the requested limit is processed.",
+        "remaining_unparsed_count > 0, call this tool again with only {limit} and continue until the queue is empty or the requested limit is processed. Emails older than JOBHUNTER_EMAIL_PARSE_STALE_HOURS are returned with parser_status=retrying/parser_error so stale rows are visible rather than silently stuck.",
       parameters: schema({
         limit: intSchema(1, 20),
         extractions: {
@@ -834,6 +834,7 @@ export default definePluginEntry({
             enriched,
             enrich_failed,
             remaining_unparsed_count: Number(remaining.count || 0),
+            stale_unparsed_email_count: Number(remaining.stale_unparsed_email_count || 0),
             results,
           });
         }
@@ -845,6 +846,7 @@ export default definePluginEntry({
           processed: 0,
           emails: pending.emails || [],
           count: pending.count || 0,
+          stale_unparsed_email_count: Number(pending.stale_unparsed_email_count || 0),
         });
       },
     });
@@ -853,7 +855,7 @@ export default definePluginEntry({
       name: "jobhunter_list_email_alerts",
       label: "Jobhunter List Email Alerts",
       description:
-        "Read-only audit tool for persisted raw email alerts. Returns slim email_alert_raw records ordered by received_at desc: id, source_id, sender, subject, received_at, parsed_at, parsed_jobs_count. It never returns raw_html_blob or raw_text_blob, so it is safe for quick diagnostics. Use limit<=50 and only_unparsed=true when looking for alerts that still need Codex extraction.",
+        "Read-only audit tool for persisted raw email alerts. Returns slim email_alert_raw records ordered by received_at desc: id, source_id, sender, subject, received_at, parsed_at, parsed_jobs_count, parser_status, parser_status_updated_at, parser_error. It never returns raw_html_blob or raw_text_blob, so it is safe for quick diagnostics. Use limit<=50 and only_unparsed=true when looking for alerts that still need Codex extraction.",
       parameters: schema({
         limit: intSchema(1, 50),
         since: { type: "string" },
