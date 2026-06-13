@@ -25,6 +25,32 @@ LOGGER = logging.getLogger(__name__)
 JOB_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
 LEAD_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}$")
 LEAD_STATUS_VALUES = {"new", "shortlisted", "reached_out", "rejected", "snoozed", "pitched", "archived"}
+EMAIL_ALERT_NOISE_TITLES = {
+    "apply now",
+    "closed to offers",
+    "edit job alert",
+    "learn more",
+    "message from",
+    "new jobs",
+    "open to offers",
+    "read more",
+    "ready to interview",
+    "unsubscribe",
+    "update preferences",
+    "view job",
+}
+EMAIL_ALERT_PLACEHOLDER_COMPANIES = {
+    "unknown",
+    "unknown company",
+}
+EMAIL_ALERT_NAVIGATION_URL_TERMS = (
+    "email-preferences",
+    "job-alert",
+    "notification",
+    "preferences",
+    "settings",
+    "unsubscribe",
+)
 GOALS_TEMPLATE = """# Outcome goals
 
 ## Job search
@@ -1748,6 +1774,7 @@ def normalize_extracted_alert_job(raw_job, source_id: str, source_name: str) -> 
         raise ServiceError(400, "Extracted job needs company")
     if not url:
         raise ServiceError(400, "Extracted job needs url")
+    reject_noise_extracted_alert_job(title, company, url)
     try:
         validate_safe_url(url)
     except SourceError as exc:
@@ -1765,6 +1792,49 @@ def normalize_extracted_alert_job(raw_job, source_id: str, source_name: str) -> 
         remote_policy="unknown",
         description=snippet,
     )
+
+
+def reject_noise_extracted_alert_job(title: str, company: str, url: str) -> None:
+    if is_email_alert_noise_title(title):
+        raise ServiceError(400, "Skipped email UI/noise title: %s" % safe_log_text(title, 80))
+    if is_email_alert_placeholder_company(company):
+        raise ServiceError(400, "Skipped email job without real company: %s" % safe_log_text(company, 80))
+    if is_email_alert_noise_url(url):
+        raise ServiceError(400, "Skipped email UI/profile/navigation URL")
+
+
+def is_email_alert_noise_title(title: str) -> bool:
+    text = normalize_email_alert_label(title)
+    if text in EMAIL_ALERT_NOISE_TITLES:
+        return True
+    if text.startswith("message from "):
+        return True
+    return False
+
+
+def is_email_alert_placeholder_company(company: str) -> bool:
+    return normalize_email_alert_label(company) in EMAIL_ALERT_PLACEHOLDER_COMPANIES
+
+
+def is_email_alert_noise_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").lower()
+    path_and_query = ("%s?%s" % (parsed.path or "", parsed.query or "")).lower()
+    if re.search(r"\.(?:gif|jpe?g|png|webp|svg)(?:$|[?#])", path_and_query):
+        return True
+    if host.endswith("linkedin.com"):
+        return not re.search(r"/(?:comm/)?jobs/view/\d+", path)
+    if host.endswith("wellfound.com") or host.endswith("angel.co"):
+        if re.fullmatch(r"/jobs/?", path or "/"):
+            return True
+    return any(term in path_and_query for term in EMAIL_ALERT_NAVIGATION_URL_TERMS)
+
+
+def normalize_email_alert_label(value: str) -> str:
+    text = " ".join(str(value or "").strip().lower().split())
+    text = re.sub(r"\s*[:.!-]+\s*$", "", text)
+    return text
 
 
 def clean_email_artifact(value: str) -> str:
