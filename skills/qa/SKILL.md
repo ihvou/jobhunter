@@ -97,7 +97,8 @@ limit 30;
    expected transient source failures (covered by `repeated_source_failures`) or
    failures that already have a recent QA task/remediation path. Also do not
    file on self-referential QA/report wording such as `failure_reports` audit
-   summaries, or completed Engineer reports that only document a finished PR/test
+   summaries, source-failure cleanup summaries, recurring QA findings about this
+   checklist, or completed Engineer reports that only document a finished PR/test
    run; those are historical/resolved evidence, not a new operational failure.
    If the query returns no rows because an open/picked/recently completed
    `failure_reports` task exists, treat the reports as linked to that task and
@@ -128,6 +129,10 @@ with candidate_reports as (
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%failure_reports%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%failure-report%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%failure report%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%source-failure%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%source failure%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%recurring qa%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%recurring finding%'
     and not (
       agent = 'engineer'
       and (
