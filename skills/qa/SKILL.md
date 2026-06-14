@@ -99,6 +99,9 @@ limit 30;
    file on self-referential QA/report wording such as `failure_reports` audit
    summaries, or completed Engineer reports that only document a finished PR/test
    run; those are historical/resolved evidence, not a new operational failure.
+   This is intentionally summary-first: routine status report JSON often has
+   metric keys such as `failed_count` or `blocked_count` with zero values, and
+   those key names are not failures by themselves.
    If the query returns no rows because an open/picked/recently completed
    `failure_reports` task exists, treat the reports as linked to that task and
    do not file another duplicate.
@@ -108,17 +111,25 @@ with candidate_reports as (
   select id, agent, report_date, summary, details_json, created_at
   from agent_reports
   where created_at >= datetime('now', '-3 days')
+    and agent != 'qa'
     and (
       lower(summary) like '%error%'
       or lower(summary) like '%failed%'
-      or lower(summary) like '%skipped%'
       or lower(summary) like '%stuck%'
       or lower(summary) like '%blocked%'
-      or lower(coalesce(details_json, '')) like '%error%'
-      or lower(coalesce(details_json, '')) like '%failed%'
-      or lower(coalesce(details_json, '')) like '%exception%'
-      or lower(coalesce(details_json, '')) like '%blocked%'
+      or lower(coalesce(details_json, '')) like '%"status": "failed"%'
+      or lower(coalesce(details_json, '')) like '%"status":"failed"%'
+      or lower(coalesce(details_json, '')) like '%"status": "blocked"%'
+      or lower(coalesce(details_json, '')) like '%"status":"blocked"%'
+      or lower(coalesce(details_json, '')) like '%exception:%'
     )
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%status report%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%routine completed%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%"failed_count": 0%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%"blocked_count": 0%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%"error_count": 0%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%"errors": 0%'
+    and lower(summary || ' ' || coalesce(details_json, '')) not like '%"blocked": false%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%expected transient%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%classified transient%'
     and lower(summary || ' ' || coalesce(details_json, '')) not like '%resolved%'

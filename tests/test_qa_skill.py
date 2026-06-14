@@ -1,4 +1,5 @@
 import unittest
+import sqlite3
 from pathlib import Path
 
 
@@ -31,6 +32,17 @@ class QASkillTests(unittest.TestCase):
             "treat the reports as linked to that task",
             "self-referential QA/report wording",
             "completed Engineer reports",
+            "summary-first",
+            "agent != 'qa'",
+            "not like '%status report%'",
+            "not like '%routine completed%'",
+            "not like '%\"failed_count\": 0%'",
+            "not like '%\"blocked_count\": 0%'",
+            "not like '%\"error_count\": 0%'",
+            "not like '%\"errors\": 0%'",
+            "not like '%\"blocked\": false%'",
+            'like \'%"status": "failed"%\'',
+            'like \'%"status":"blocked"%\'',
             "not like '%expected transient%'",
             "not like '%needs_clarification%'",
             "not like '%failure_reports%'",
@@ -45,6 +57,76 @@ class QASkillTests(unittest.TestCase):
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+
+    def test_failure_reports_query_ignores_routine_status_and_prior_qa_reports(self):
+        text = QA_SKILL.read_text()
+        start = text.index("with candidate_reports as (")
+        end = text.index("limit 20;", start) + len("limit 20;")
+        sql = text[start:end]
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            create table agent_reports (
+              id integer primary key,
+              agent text,
+              report_date text,
+              summary text,
+              details_json text,
+              created_at text
+            );
+            create table agent_tasks (
+              id integer primary key,
+              kind text,
+              status text,
+              completed_at text,
+              summary text,
+              payload_json text
+            );
+            """
+        )
+        rows = [
+            (
+                1,
+                "qa",
+                "2026-06-14",
+                "QA noted failure_reports noise for follow-up",
+                "{}",
+            ),
+            (
+                2,
+                "collector",
+                "2026-06-14",
+                "Collector status report",
+                '{"failed_count": 0, "blocked_count": 0, "errors": 0}',
+            ),
+            (
+                3,
+                "researcher",
+                "2026-06-14",
+                "Researcher routine completed",
+                '{"blocked": false, "error_count": 0}',
+            ),
+            (
+                4,
+                "collector",
+                "2026-06-14",
+                "Collector failed to parse source batch",
+                '{"source": "example"}',
+            ),
+        ]
+        conn.executemany(
+            """
+            insert into agent_reports
+              (id, agent, report_date, summary, details_json, created_at)
+            values (?, ?, ?, ?, ?, datetime('now', '-1 hour'))
+            """,
+            rows,
+        )
+
+        returned = conn.execute(sql).fetchall()
+        self.assertEqual([row["id"] for row in returned], [4])
 
     def test_sensitive_observability_design_covers_security_contract(self):
         text = QA_OBSERVABILITY_DESIGN.read_text()
