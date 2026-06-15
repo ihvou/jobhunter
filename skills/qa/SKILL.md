@@ -158,10 +158,32 @@ order by created_at desc
 limit 20;
 ```
 
-6. Recent digest candidate volume dropped sharply versus trailing baseline:
+6. Recent digest candidate volume dropped sharply versus trailing baseline. This
+   check is about the eligible, unshown candidate supply for `jobhunter_get_more_jobs`,
+   not human-visible Telegram sends. Do not aggregate `digest_log` by day for this
+   anti-pattern: `digest_log` is only written when cards are rendered with
+   `mark_sent=true`, while collector cron intentionally verifies with
+   `mark_sent=false`. A zero-row `digest_log` day is not evidence by itself. If
+   the eligible queue is empty, or an active/recent `digest_volume_drop` task
+   already exists, treat the drop as explained/suppressed and do not file a
+   duplicate.
 
 ```sql
-with counts as (
+with current_eligible as (
+  select count(*) as eligible_count
+  from jobs j
+  where (
+      j.status = 'new'
+      or (j.status = 'snoozed' and datetime(j.snoozed_until) <= datetime('now'))
+    )
+    and not exists (
+      select 1
+      from digest_log dl
+      where dl.job_id = j.id
+        and j.status != 'snoozed'
+    )
+),
+counts as (
   select
     sum(case when first_seen_at >= datetime('now', '-24 hours') then 1 else 0 end) as last_24h,
     sum(case when first_seen_at >= datetime('now', '-8 days')
@@ -169,10 +191,28 @@ with counts as (
   from jobs
   where status in ('new', 'snoozed')
 )
-select last_24h, round(trailing_avg, 2) as trailing_avg
+select counts.last_24h, round(counts.trailing_avg, 2) as trailing_avg,
+       current_eligible.eligible_count
 from counts
+cross join current_eligible
 where trailing_avg >= 5
-  and last_24h < trailing_avg * 0.3;
+  and last_24h < trailing_avg * 0.3
+  and current_eligible.eligible_count > 0
+  and not exists (
+    select 1
+    from agent_tasks
+    where kind = 'qa.bug'
+      and (
+        status in ('open', 'picked')
+        or completed_at >= datetime('now', '-7 days')
+      )
+      and (
+        lower(summary) like '%digest volume%'
+        or lower(summary) like '%volume drop%'
+        or lower(payload_json) like '%"anti_pattern": "digest_volume_drop"%'
+        or lower(payload_json) like '%"anti_pattern":"digest_volume_drop"%'
+      )
+  );
 ```
 
 ## Filing Format

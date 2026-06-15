@@ -41,6 +41,10 @@ class QASkillTests(unittest.TestCase):
             "like '%tests_passing%'",
             "trailing_avg >= 5",
             "last_24h < trailing_avg * 0.3",
+            "Do not aggregate `digest_log` by day",
+            "current_eligible",
+            "eligible_count > 0",
+            '%"anti_pattern": "digest_volume_drop"%',
         ]
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
