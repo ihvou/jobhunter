@@ -39,8 +39,19 @@ class QASkillTests(unittest.TestCase):
             "agent = 'engineer'",
             "like '%pr_url%'",
             "like '%tests_passing%'",
+            "do not use",
+            "`digest_log` sent-card counts",
+            "collector_state as",
+            "last_successful_collection_at",
+            "recent_source_runs",
+            "recent_source_errors",
+            "recent_fetched",
+            "recent_inserted",
+            "active_remediation as",
+            '%"anti_pattern": "digest_volume_drop"%',
             "trailing_avg >= 5",
             "last_24h < trailing_avg * 0.3",
+            "not exists (select 1 from active_remediation)",
         ]
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):

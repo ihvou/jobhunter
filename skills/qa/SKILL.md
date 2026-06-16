@@ -158,7 +158,12 @@ order by created_at desc
 limit 20;
 ```
 
-6. Recent digest candidate volume dropped sharply versus trailing baseline:
+6. Recent digest candidate volume dropped sharply versus trailing baseline.
+   This is a candidate-supply check, not a user-delivery check: do not use
+   `digest_log` sent-card counts, because those drop to zero on days when the
+   user simply did not request a digest. If it fires, include the surfaced
+   collector state (`last_successful_collection_at`, `recent_source_runs`,
+   `recent_source_errors`, `recent_fetched`, `recent_inserted`) in `observed`.
 
 ```sql
 with counts as (
@@ -168,11 +173,44 @@ with counts as (
               and first_seen_at < datetime('now', '-24 hours') then 1 else 0 end) / 7.0 as trailing_avg
   from jobs
   where status in ('new', 'snoozed')
+),
+collector_state as (
+  select
+    max(case when error is null then finished_at else null end) as last_successful_collection_at,
+    count(*) as recent_source_runs,
+    sum(case when error is not null then 1 else 0 end) as recent_source_errors,
+    sum(coalesce(fetched_count, 0)) as recent_fetched,
+    sum(coalesce(inserted_count, 0)) as recent_inserted
+  from source_runs
+  where started_at >= datetime('now', '-24 hours')
+),
+active_remediation as (
+  select 1
+  from agent_tasks
+  where kind = 'qa.bug'
+    and (
+      status in ('open', 'picked')
+      or completed_at >= datetime('now', '-7 days')
+    )
+    and (
+      lower(summary) like '%digest volume%'
+      or lower(payload_json) like '%"anti_pattern": "digest_volume_drop"%'
+      or lower(payload_json) like '%"anti_pattern":"digest_volume_drop"%'
+    )
 )
-select last_24h, round(trailing_avg, 2) as trailing_avg
+select
+  counts.last_24h,
+  round(counts.trailing_avg, 2) as trailing_avg,
+  collector_state.last_successful_collection_at,
+  collector_state.recent_source_runs,
+  collector_state.recent_source_errors,
+  collector_state.recent_fetched,
+  collector_state.recent_inserted
 from counts
+cross join collector_state
 where trailing_avg >= 5
-  and last_24h < trailing_avg * 0.3;
+  and last_24h < trailing_avg * 0.3
+  and not exists (select 1 from active_remediation);
 ```
 
 ## Filing Format
