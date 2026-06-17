@@ -37,6 +37,7 @@ EMAIL_ALERT_NOISE_TITLES = {
     "ready to interview",
     "unsubscribe",
     "update preferences",
+    "updating your preferences",
     "view job",
 }
 EMAIL_ALERT_PLACEHOLDER_COMPANIES = {
@@ -739,12 +740,18 @@ class JobHunterService:
         enrich_failed = 0
         l2_candidates = []
         source = SourceConfig(id=source_id, name=source_name, type="imap", url="imap://job-alerts")
+        seen_urls = set()
         for index, raw_job in enumerate(raw_jobs):
             try:
                 job = normalize_extracted_alert_job(raw_job, source_id, source_name)
             except ServiceError as exc:
                 skipped.append({"index": index, "reason": exc.message})
                 continue
+            normalized_url = normalize_email_alert_job_url(job.url)
+            if normalized_url in seen_urls:
+                skipped.append({"index": index, "reason": "Skipped duplicate email job URL"})
+                continue
+            seen_urls.add(normalized_url)
             job.email_alert_id = email_alert_id
             job_id, inserted = self.bot.database.upsert_job(job)
             enrichment = self.enrich_job_description(job_id, fail_soft=True)
@@ -1809,6 +1816,14 @@ def is_email_alert_noise_title(title: str) -> bool:
         return True
     if text.startswith("message from "):
         return True
+    if "unsubscribe" in text:
+        return True
+    if "preferences" in text:
+        return True
+    if re.fullmatch(r"(?:\d+[+]?\s*)?new jobs(?:\s*[:：-]\s*\d+)?", text):
+        return True
+    if re.fullmatch(r"\d+[+]?\s+new jobs", text):
+        return True
     return False
 
 
@@ -1829,6 +1844,10 @@ def is_email_alert_noise_url(url: str) -> bool:
         if re.fullmatch(r"/jobs/?", path or "/"):
             return True
     return any(term in path_and_query for term in EMAIL_ALERT_NAVIGATION_URL_TERMS)
+
+
+def normalize_email_alert_job_url(url: str) -> str:
+    return (url or "").strip()
 
 
 def normalize_email_alert_label(value: str) -> str:
