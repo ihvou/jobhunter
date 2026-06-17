@@ -290,6 +290,21 @@ class ServiceTests(unittest.TestCase):
                                 "url": "https://links.wellfound.com/s/c/tracking",
                             },
                             {
+                                "title": "updating your preferences",
+                                "company": "Wellfound",
+                                "url": "https://wellfound.com/email-preferences",
+                            },
+                            {
+                                "title": "30 new jobs:",
+                                "company": "LinkedIn",
+                                "url": "https://www.linkedin.com/jobs/search/?keywords=product",
+                            },
+                            {
+                                "title": "Unsubscribe from these emails",
+                                "company": "LinkedIn",
+                                "url": "https://www.linkedin.com/comm/psettings/email-unsubscribe",
+                            },
+                            {
                                 "title": "Ready to interview",
                                 "company": "Unknown company",
                                 "url": "https://links.wellfound.com/s/c/profile",
@@ -310,14 +325,21 @@ class ServiceTests(unittest.TestCase):
                                 "url": "https://example.com/jobs/pm",
                                 "snippet": "Build workflow agents.",
                             },
+                            {
+                                "title": "Principal PM role at RealCo is available",
+                                "company": "RealCo LinkedIn",
+                                "url": "https://example.com/jobs/pm",
+                                "snippet": "Duplicate of the same posting.",
+                            },
                         ],
                     }
                 )
             self.assertEqual(saved["saved"], 1)
-            self.assertEqual(len(saved["skipped"]), 4)
+            self.assertEqual(len(saved["skipped"]), 8)
             reasons = " ".join(item["reason"] for item in saved["skipped"])
             self.assertIn("UI/noise title", reasons)
             self.assertIn("UI/profile/navigation URL", reasons)
+            self.assertIn("duplicate email job URL", reasons)
             compared = service.email_alert_compare(processed["email_alert_id"])["email_alert"]
             self.assertEqual(compared["parsed_jobs_count"], 1)
             self.assertEqual(len(compared["jobs"]), 1)
