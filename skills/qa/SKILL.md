@@ -158,7 +158,12 @@ order by created_at desc
 limit 20;
 ```
 
-6. Recent digest candidate volume dropped sharply versus trailing baseline:
+6. Recent digest candidate volume dropped sharply versus trailing baseline.
+   This check is about candidate supply, not user-visible delivery frequency:
+   do not query `digest_log` for this anti-pattern. `digest_log` only records
+   cards actually shown with `mark_sent=true`, so it naturally drops when the
+   user does not request digests and is not evidence that collection/ranking
+   volume collapsed.
 
 ```sql
 with counts as (
@@ -172,7 +177,21 @@ with counts as (
 select last_24h, round(trailing_avg, 2) as trailing_avg
 from counts
 where trailing_avg >= 5
-  and last_24h < trailing_avg * 0.3;
+  and last_24h < trailing_avg * 0.3
+  and not exists (
+    select 1
+    from agent_tasks
+    where kind = 'qa.bug'
+      and (
+        status in ('open', 'picked')
+        or completed_at >= datetime('now', '-7 days')
+      )
+      and (
+        lower(summary) like '%digest volume%'
+        or lower(payload_json) like '%"anti_pattern": "digest_volume_drop"%'
+        or lower(payload_json) like '%"anti_pattern":"digest_volume_drop"%'
+      )
+  );
 ```
 
 ## Filing Format

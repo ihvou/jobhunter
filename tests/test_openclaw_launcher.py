@@ -133,6 +133,8 @@ class OpenClawLauncherTests(unittest.TestCase):
         self.assertIn("suppression/linking guards", readable_out)
         self.assertIn("do not file a duplicate", readable_out)
         self.assertIn("digest_volume_drop", readable_out)
+        self.assertIn("do NOT use digest_log", readable_out)
+        self.assertIn("user-visible delivery frequency", readable_out)
         self.assertIn("--name engineer-nightly", out)
         self.assertIn("--agent engineer", out)
         self.assertIn("--name pm-stakeholder", out)
