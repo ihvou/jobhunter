@@ -41,10 +41,21 @@ class QASkillTests(unittest.TestCase):
             "like '%tests_passing%'",
             "trailing_avg >= 5",
             "last_24h < trailing_avg * 0.3",
+            "do not query `digest_log`",
+            "digest_log` only records",
+            '%"anti_pattern": "digest_volume_drop"%',
         ]
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+
+    def test_digest_volume_drop_is_candidate_supply_not_delivery_frequency(self):
+        text = QA_SKILL.read_text()
+        heading = "6. Recent digest candidate volume dropped sharply versus trailing baseline"
+        section = text[text.index(heading) :]
+        self.assertIn("first_seen_at >= datetime('now', '-24 hours')", section)
+        self.assertIn("where status in ('new', 'snoozed')", section)
+        self.assertIn("do not query `digest_log`", section)
 
     def test_sensitive_observability_design_covers_security_contract(self):
         text = QA_OBSERVABILITY_DESIGN.read_text()
